@@ -55,19 +55,38 @@ public struct ColumnInfo: Sendable, Hashable {
     public var name: String
     public var typeName: String
     public var isNullable: Bool
+    /// The default as SQL (`'draft'`, `0`, `now()`), nil when there is none.
     public var defaultExpression: String?
     /// 1-based position within the primary key, nil if not part of it.
     public var primaryKeyPosition: Int?
+    /// Nil where the database has no column comments (SQLite) or none is set.
+    public var comment: String?
+    /// MySQL `AUTO_INCREMENT`, a Postgres identity column, SQLite `AUTOINCREMENT`.
+    public var isAutoIncrement: Bool
+    /// How a generated or identity column is computed, as SQL (`GENERATED ALWAYS AS (a + b) STORED`).
+    /// The structure editor shows it but doesn't change it.
+    public var generated: String?
+    /// MySQL: the column's collation, restated when the column is redefined so it isn't reset.
+    public var collation: String?
+    /// MySQL: `ON UPDATE CURRENT_TIMESTAMP`, restated like the collation.
+    public var onUpdate: String?
 
     public init(
         name: String, typeName: String, isNullable: Bool = true,
-        defaultExpression: String? = nil, primaryKeyPosition: Int? = nil
+        defaultExpression: String? = nil, primaryKeyPosition: Int? = nil,
+        comment: String? = nil, isAutoIncrement: Bool = false, generated: String? = nil,
+        collation: String? = nil, onUpdate: String? = nil
     ) {
         self.name = name
         self.typeName = typeName
         self.isNullable = isNullable
         self.defaultExpression = defaultExpression
         self.primaryKeyPosition = primaryKeyPosition
+        self.comment = comment
+        self.isAutoIncrement = isAutoIncrement
+        self.generated = generated
+        self.collation = collation
+        self.onUpdate = onUpdate
     }
 }
 
@@ -90,17 +109,25 @@ public struct IndexInfo: Sendable, Hashable {
     public var method: String?
     /// The WHERE clause of a partial index.
     public var predicate: String?
+    /// The index belongs to a constraint (PRIMARY KEY, UNIQUE, EXCLUDE) and goes away with it,
+    /// not with DROP INDEX. Postgres and SQLite.
+    public var isConstraint: Bool
+    /// The `CREATE INDEX` statement, where the database keeps one (SQLite, Postgres). A SQLite
+    /// rebuild runs it again.
+    public var definition: String?
 
     public init(
         name: String, columns: [String], isUnique: Bool = false, isPrimary: Bool = false,
-        method: String? = nil, predicate: String? = nil
+        method: String? = nil, predicate: String? = nil, isConstraint: Bool = false, definition: String? = nil
     ) {
+        self.definition = definition
         self.name = name
         self.columns = columns
         self.isUnique = isUnique
         self.isPrimary = isPrimary
         self.method = method
         self.predicate = predicate
+        self.isConstraint = isConstraint || isPrimary
     }
 }
 

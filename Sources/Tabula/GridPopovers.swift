@@ -59,10 +59,13 @@ final class ChangesPreviewController: NSViewController {
     var onDiscard: (() -> Void)?
     private let statements: [String]
     private let note: String?
+    private let summary: String?
 
-    init(statements: [String], note: String?) {
+    /// `summary` replaces the "N statements, run in one transaction" line.
+    init(statements: [String], note: String?, summary: String? = nil) {
         self.statements = statements
         self.note = note
+        self.summary = summary
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -86,7 +89,8 @@ final class ChangesPreviewController: NSViewController {
         let discard = NSButton(title: "Discard", target: self, action: #selector(discard(_:)))
         let commit = NSButton(title: "Commit", target: self, action: #selector(commit(_:)))
         commit.keyEquivalent = "\r"
-        let count = NSTextField(labelWithString: "\(statements.count) \(statements.count == 1 ? "statement" : "statements"), run in one transaction")
+        let count = NSTextField(labelWithString: summary
+            ?? "\(statements.count) \(statements.count == 1 ? "statement" : "statements"), run in one transaction")
         count.font = .systemFont(ofSize: 11)
         count.textColor = .secondaryLabelColor
         let buttons = NSStackView(views: [count, NSView(), discard, commit])

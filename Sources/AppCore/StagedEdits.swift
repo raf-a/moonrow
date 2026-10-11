@@ -107,6 +107,8 @@ public struct StagedEdits: Sendable {
         func assignments(_ cells: [Int: CellChange], forInsert: Bool) -> [ColumnValue] {
             cells.sorted { $0.key < $1.key }.compactMap { column, change in
                 guard column < columns.count else { return nil }
+                // Computed columns and ALWAYS identities can't be written (a duplicated row carries them).
+                if forInsert, columns[column].generated?.hasPrefix("GENERATED ALWAYS") == true { return nil }
                 switch change {
                 case .value(let v): return ColumnValue(columns[column].name, v)
                 case .defaultValue:

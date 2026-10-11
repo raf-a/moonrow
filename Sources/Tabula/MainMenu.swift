@@ -23,6 +23,11 @@ import AppKit
     @objc optional func previousPage(_ sender: Any?)
     @objc optional func reloadCurrentTab(_ sender: Any?)
 
+    // Structure
+    @objc optional func showTableData(_ sender: Any?)
+    @objc optional func showTableStructure(_ sender: Any?)
+    @objc optional func newTable(_ sender: Any?)
+
     // Tabs and the query editor
     @objc optional func newQueryTab(_ sender: Any?)
     @objc optional func closeTab(_ sender: Any?)
@@ -61,6 +66,7 @@ enum MainMenu {
         main.addSubmenu("File") { m in
             m.add("New Connection…", #selector(TabulaActions.newConnection(_:)), "n")
             m.add("New Query Tab", #selector(TabulaActions.newQueryTab(_:)), "t")
+            m.add("New Table…", #selector(TabulaActions.newTable(_:)))
             m.add("Open…", #selector(NSDocumentController.openDocument(_:)), "o")
             m.addItem(.separator())
             m.add("Close Tab", #selector(TabulaActions.closeTab(_:)), "w")
@@ -127,6 +133,9 @@ enum MainMenu {
         }
 
         main.addSubmenu("Navigate") { m in
+            m.add("Show Table Data", #selector(TabulaActions.showTableData(_:)), "[", [.command, .control])
+            m.add("Show Table Structure", #selector(TabulaActions.showTableStructure(_:)), "]", [.command, .control])
+            m.addItem(.separator())
             m.add("Previous Page", #selector(TabulaActions.previousPage(_:)), "\u{F702}")
             m.add("Next Page", #selector(TabulaActions.nextPage(_:)), "\u{F703}")
             m.addItem(.separator())

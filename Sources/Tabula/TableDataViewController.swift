@@ -15,6 +15,8 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
     let table: TableRef
     let kind: ObjectKind
     var onTabItemChange: (() -> Void)?
+    /// Shown first in the bottom bar (the Data / Structure switch).
+    var leadingAccessory: NSView?
     /// Why the grid can't be edited (a view, a read-only connection), or nil.
     let readOnlyReason: String?
     var isEditable: Bool { readOnlyReason == nil }
@@ -170,7 +172,9 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
         statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         statusLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
-        let bar = NSStackView(views: [addRowButton, filtersButton, statusLabel, changesButton, pageButton, pageControl])
+        var views: [NSView] = [addRowButton, filtersButton, statusLabel, changesButton, pageButton, pageControl]
+        if let leadingAccessory { views.insert(leadingAccessory, at: 0) }
+        let bar = NSStackView(views: views)
         bar.spacing = 6
         bar.edgeInsets = NSEdgeInsets(top: 0, left: 8, bottom: 0, right: 8)
         bar.heightAnchor.constraint(equalToConstant: 28).isActive = true
@@ -854,18 +858,4 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
             }
         }
     }
-}
-
-extension TableDataViewController: WorkspaceTab {
-    var tabItem: TabStrip.Item {
-        TabStrip.Item(title: table.name, symbol: kind == .table ? "tablecells" : "eye", toolTip: table.description)
-    }
-
-    var preferredResponder: NSView { grid }
-
-    func prepareToClose(then proceed: @escaping () -> Void) {
-        resolvePendingEdits(before: "Closing the tab", then: proceed)
-    }
-
-    func tabDidClose() { stop() }
 }

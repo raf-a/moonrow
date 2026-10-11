@@ -175,22 +175,62 @@ public actor SQLiteConnection: DatabaseConnection {
     }
 
     public func columns(of table: TableRef) throws -> [ColumnInfo] {
+        // table_xinfo also lists generated columns (hidden 2 virtual, 3 stored); 1 is a virtual
+        // table's hidden column.
         let rows = try query(SQLStatement(
-            #"SELECT name, type, "notnull", dflt_value, pk FROM pragma_table_info(?, ?)"#,
+            #"SELECT name, type, "notnull", dflt_value, pk, hidden FROM pragma_table_xinfo(?, ?) WHERE hidden <> 1"#,
             bindings: [.text(table.name), .text(table.schema ?? "main")]))
         guard !rows.isEmpty else { throw DatabaseError("no such table: \(table)") }
+        let traits = try tableSQL(table).map { (dialect as! SQLiteDialect).columnTraits(definition: $0) } ?? [:]
         return rows.map { row in
             var pk: Int?
             if case .integer(let n) = row[4], n > 0 { pk = Int(n) }
             var defaultExpression: String?
             if case .text(let d) = row[3] { defaultExpression = d }
+            let name = row[0].displayString
+            let trait = traits[name.lowercased()]
+            var generated = trait?.generated
+            if generated == nil, case .integer(let hidden) = row[5], hidden >= 2 {
+                generated = "GENERATED ALWAYS AS (…) \(hidden == 3 ? "STORED" : "VIRTUAL")"
+            }
             return ColumnInfo(
-                name: row[0].displayString,
+                name: name,
                 typeName: row[1].isNull ? "" : row[1].displayString,
                 isNullable: row[2] != .integer(1),
                 defaultExpression: defaultExpression,
-                primaryKeyPosition: pk)
+                primaryKeyPosition: pk,
+                isAutoIncrement: trait?.isAutoIncrement ?? false,
+                generated: generated)
         }
+    }
+
+    /// The table's CREATE TABLE text.
+    private func tableSQL(_ table: TableRef) throws -> String? {
+        let rows = try query(SQLStatement(
+            "SELECT sql FROM \(dialect.quoteIdentifier(table.schema ?? "main")).sqlite_master WHERE type = 'table' AND name = ?",
+            bindings: [.text(table.name)]))
+        if case .text(let sql)? = rows.first?.first { return sql }
+        return nil
+    }
+
+    public func structure(of table: TableRef) async throws -> TableStructure {
+        var s = TableStructure(
+            table: table, columns: try columns(of: table), indexes: try indexes(of: table),
+            foreignKeys: try foreignKeys(of: table), triggers: try triggers(of: table))
+        s.definition = try tableSQL(table)
+        s.foreignKeysEnforced = try query(SQLStatement("PRAGMA foreign_keys")).first?.first == .integer(1)
+        return s
+    }
+
+    public func definition(of object: DatabaseObject) async throws -> String {
+        // Tables and views as created, then their indexes and triggers.
+        let rows = try query(SQLStatement("""
+            SELECT sql FROM \(dialect.quoteIdentifier(object.ref.schema ?? "main")).sqlite_master
+            WHERE tbl_name = ? AND sql IS NOT NULL
+            ORDER BY CASE type WHEN 'table' THEN 0 WHEN 'view' THEN 0 WHEN 'index' THEN 1 ELSE 2 END, name
+            """, bindings: [.text(object.ref.name)]))
+        guard !rows.isEmpty else { throw DatabaseError("no such table: \(object.ref)") }
+        return rows.map { $0[0].displayString + ";" }.joined(separator: "\n\n")
     }
 
     /// One namespace as far as the sidebar is concerned; attached databases come later.
@@ -208,17 +248,23 @@ public actor SQLiteConnection: DatabaseConnection {
             let columns = try query(SQLStatement(
                 "SELECT name, cid FROM pragma_index_xinfo(?, ?) WHERE key = 1 ORDER BY seqno",
                 bindings: [.text(name), .text(schema)]))
-            var predicate: String?
-            if row[3] == .integer(1), let sql = try query(SQLStatement(
+            // Indexes made by UNIQUE or PRIMARY KEY constraints have no SQL of their own.
+            var definition: String?
+            if case .text(let text)? = try query(SQLStatement(
                 "SELECT sql FROM \(dialect.quoteIdentifier(schema)).sqlite_master WHERE type = 'index' AND name = ?",
-                bindings: [.text(name)])).first?.first, case .text(let text) = sql,
+                bindings: [.text(name)])).first?.first {
+                definition = text
+            }
+            var predicate: String?
+            if row[3] == .integer(1), let text = definition,
                let r = text.range(of: " WHERE ", options: [.caseInsensitive, .backwards]) {
                 predicate = String(text[r.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
             }
             return IndexInfo(
                 name: name,
                 columns: columns.map { $0[1] == .integer(-2) ? "<expression>" : $0[0].displayString },
-                isUnique: row[1] == .integer(1), isPrimary: row[2] == .text("pk"), predicate: predicate)
+                isUnique: row[1] == .integer(1), isPrimary: row[2] == .text("pk"), predicate: predicate,
+                isConstraint: row[2] != .text("c"), definition: definition)
         }
     }
 

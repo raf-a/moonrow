@@ -68,29 +68,32 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         environment.onSchemaChange = { [weak self] in self?.sidebar.reload() }
         content.onSelectionChange = { [weak self] in self?.tabChanged() }
         content.onNewTab = { [weak self] in self?.newQueryTab(nil) }
+        connectSidebarActions()
         sidebar.reload()
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
-    /// The selected tab's table, if it shows one.
-    var tableController: TableDataViewController? { content.current as? TableDataViewController }
+    /// The selected tab, if it shows a table.
+    var tableTab: TableTabViewController? { content.current as? TableTabViewController }
+    /// The selected tab's rows, if it shows a table's data.
+    var tableController: TableDataViewController? { tableTab?.data }
     var queryController: QueryEditorViewController? { content.current as? QueryEditorViewController }
-    private var tableTabs: [TableDataViewController] { content.tabs.compactMap { $0 as? TableDataViewController } }
+    private var tableTabs: [TableTabViewController] { content.tabs.compactMap { $0 as? TableTabViewController } }
 
     // MARK: - Opening
 
     /// Opens a table or view. A tab already showing it is selected. Otherwise it replaces the
     /// selected table tab, or opens a new tab when the selected tab is a query (or `newTab`).
-    func open(_ object: DatabaseObject, newTab: Bool) {
-        if let i = content.tabs.firstIndex(where: { ($0 as? TableDataViewController)?.table == object.ref }) {
-            return content.select(i)
+    func open(_ object: DatabaseObject, newTab: Bool, mode: TableTabViewController.Mode = .data) {
+        if let i = content.tabs.firstIndex(where: { ($0 as? TableTabViewController)?.table == object.ref }) {
+            content.select(i)
+            tableTab?.switchTo(mode)
+            return
         }
-        let make = { [config, connection] in
-            TableDataViewController(connection: connection, object: object, readOnlyConnection: config.readOnly, pageSize: config.pageSize)
-        }
-        guard !newTab, let current = tableController else {
+        let make = { [self] in makeTab(object, mode: mode) }
+        guard !newTab, let current = tableTab else {
             return content.add(make())
         }
         // Keep the sidebar on the table with staged edits until the user decides.
@@ -99,6 +102,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
             guard let self, let i = self.content.tabs.firstIndex(where: { $0 === current }) else { return }
             self.content.replace(at: i, with: make())
         }
+    }
+
+    /// A new tab with an empty structure; the table is created on commit.
+    @objc func newTable(_ sender: Any?) {
+        guard !config.readOnly else { return NSSound.beep() }
+        content.add(configure(TableTabViewController(
+            connection: connection, newTable: TableRef(schema: sidebar.schema, ""), pageSize: config.pageSize)))
+
     }
 
     @discardableResult
@@ -136,7 +147,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     }
 
     private func tabChanged() {
-        let table = tableController?.table
+        let table = tableTab?.table
         sidebar.reveal(table)
         if let table {
             window?.subtitle = "\(table) — \(config.summary)"
@@ -170,6 +181,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
 
     /// Commands work wherever the focus is in the window, e.g. ⌘S or ⌘↩ from the sidebar.
     override func supplementalTarget(forAction action: Selector, sender: Any?) -> Any? {
+        if let active = tableTab?.active, active.responds(to: action) { return active }
         if let tab = content.current, tab.responds(to: action) { return tab }
         return super.supplementalTarget(forAction: action, sender: sender)
     }

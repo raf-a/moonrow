@@ -10,6 +10,7 @@ import Darwin
 ///     TABULA_QUERY=events TABULA_STORE=/tmp/tabula-dev/connections.json TABULA_SNAPSHOTS=… Tabula build/sample.sqlite
 ///     TABULA_CONNECT=postgres://postgres:tabula@127.0.0.1:55432/postgres TABULA_STORE=… TABULA_SNAPSHOTS=… Tabula
 ///     TABULA_FORM=mysql TABULA_STORE=… TABULA_SNAPSHOTS=… Tabula
+///     TABULA_STRUCTURE=users TABULA_STORE=… TABULA_SNAPSHOTS=… Tabula /tmp/copy-of-sample.sqlite
 ///
 /// The bench opens the table in the first workspace with every row in one page, scrolls it like
 /// a fast trackpad, jumps to far-apart rows, prints timings and quits. The demo drives the grid's
@@ -17,8 +18,10 @@ import Darwin
 /// COMMITS to the database, so point it at a copy. The query demo types a script into a query
 /// tab (autocomplete included), runs it, cancels an endless query, saves a query and shows the
 /// history; it only reads the database but writes history and saved queries next to
-/// `TABULA_STORE`, which it requires. Snapshots are rendered in-process (no screen-recording
-/// permission needed).
+/// `TABULA_STORE`, which it requires. The structure demo edits a table's columns and indexes
+/// through the structure editor, commits, then designs and creates a new table; it COMMITS DDL,
+/// so point it at a copy (or a TABULA_CONNECT scratch database). Snapshots are rendered
+/// in-process (no screen-recording permission needed).
 @MainActor
 enum DevHarness {
     static func runIfRequested(_ app: AppDelegate) {
@@ -57,6 +60,17 @@ enum DevHarness {
                     try await queryDemo(app, table: table, snapshots: snapshots)
                 } catch {
                     print("query demo failed: \(error)")
+                }
+                NSApp.terminate(nil)
+            }
+            return
+        }
+        if let table = env["TABULA_STRUCTURE"] {
+            Task {
+                do {
+                    try await structureDemo(app, table: table, snapshots: snapshots)
+                } catch {
+                    print("structure demo failed: \(error)")
                 }
                 NSApp.terminate(nil)
             }
@@ -255,6 +269,100 @@ enum DevHarness {
         try await loaded()
         print("committed; staged changes left: \(data.edits.isEmpty ? 0 : 1), page: \(data.query.page.describe(total: data.total))")
         snap("4-committed.png", window)
+    }
+
+    /// Edits a table's structure through the editor's controls, commits, then creates a table.
+    private static func structureDemo(_ app: AppDelegate, table: String, snapshots: URL?) async throws {
+        if let snapshots { try FileManager.default.createDirectory(at: snapshots, withIntermediateDirectories: true) }
+        func snap(_ name: String, _ window: NSWindow?) {
+            window?.displayIfNeeded()
+            if let snapshots, let window { snapshot(window, to: snapshots.appending(path: name)) }
+        }
+        let workspace = try await waitFor("workspace") { app.workspaces.first }
+        let window = try require(workspace.window, "workspace window")
+        _ = try await waitFor("sidebar item \(table)") { workspace.sidebar.select(named: table) ? true : nil }
+        let tab = try await waitFor("table tab") { workspace.tableTab }
+        tab.switchTo(.structure)
+        let s = try await waitFor("structure view") { tab.structure }
+        let loaded = try await waitFor("structure") { s.editor }
+        print("columns: \(loaded.columns.map(\.value.name)), indexes: \(loaded.indexes.map(\.value.name))")
+        snap("1-structure.png", window)
+
+        let grid = s.columnsGrid
+        func typeIntoCell(row: Int, field: String, _ text: String) throws {
+            window.makeFirstResponder(grid)
+            grid.selectRowIndexes([row], byExtendingSelection: false)
+            grid.focusedColumn = NSUserInterfaceItemIdentifier(field)
+            grid.keyDown(with: try key("\r", code: 36))
+            let editor = try require(window.firstResponder as? NSTextView, "field editor for \(field)")
+            editor.selectAll(nil)
+            editor.insertText(text, replacementRange: editor.selectedRange())
+            window.makeFirstResponder(grid)
+        }
+        func toggle(row: Int, field: String) throws {
+            window.makeFirstResponder(grid)
+            grid.selectRowIndexes([row], byExtendingSelection: false)
+            grid.focusedColumn = NSUserInterfaceItemIdentifier(field)
+            grid.keyDown(with: try key("\r", code: 36))
+        }
+
+        // A new column with a default, a renamed column, a nullability flip and an index.
+        let second = loaded.columns[1].value.name
+        try typeIntoCell(row: 1, field: "name", second + "_renamed")
+        if loaded.columns.count > 2, loaded.primaryKey.contains(loaded.columns[2].value.name) == false {
+            try toggle(row: 2, field: "nullable")
+        }
+        grid.selectRowIndexes([grid.numberOfRows - 1], byExtendingSelection: false)
+        s.addRow(nil)
+        if let field = window.firstResponder as? NSTextView {
+            field.selectAll(nil)
+            field.insertText("demo_note", replacementRange: field.selectedRange())
+        }
+        window.makeFirstResponder(grid)
+        let added = grid.numberOfRows - 1
+        try typeIntoCell(row: added, field: "defaultValue", "pending")
+        grid.selectRowIndexes([added], byExtendingSelection: false)
+        s.addIndex(nil)
+        window.makeFirstResponder(grid)
+        snap("2-staged.png", window)
+
+        s.previewChanges(nil)
+        try await Task.sleep(for: .milliseconds(300))
+        snap("3-preview.png", NSApp.windows.first { $0.className.contains("Popover") && $0.isVisible })
+        let editor = try require(s.editor, "editor")
+        print("preview:\n" + (try editor.plan(for: workspace.connection.dialect).preview))
+
+        s.commitChanges(nil)
+        _ = try await waitFor("structure after commit") {
+            s.editor.flatMap { $0.hasChanges ? nil : $0.original.columns.contains { $0.name == "demo_note" } ? $0 : nil }
+        }
+        let after = try require(s.editor, "editor")
+        print("committed: columns \(after.original.columns.map(\.name)), indexes \(after.original.indexes.map(\.name))")
+        snap("4-committed.png", window)
+
+        tab.switchTo(.data)
+        let data = try await waitFor("data view") { tab.data }
+        _ = try await waitFor("rows") { data.cache.flatMap { visibleLoaded(data.grid, $0) ? true : nil } }
+        snap("5-data.png", window)
+
+        // A new table, named and created from the structure editor.
+        workspace.newTable(nil)
+        let newTab = try await waitFor("new table tab") { workspace.tableTab.flatMap { $0 === tab ? nil : $0 } }
+        let ns = try await waitFor("new structure view") { newTab.structure }
+        ns.nameField.stringValue = "demo_table"
+        ns.controlTextDidEndEditing(Notification(name: NSControl.textDidEndEditingNotification, object: ns.nameField))
+        ns.addRow(nil)
+        if let field = window.firstResponder as? NSTextView {
+            field.selectAll(nil)
+            field.insertText("title", replacementRange: field.selectedRange())
+        }
+        window.makeFirstResponder(ns.columnsGrid)
+        snap("6-new-table.png", window)
+        print("create:\n" + (try require(ns.editor, "new editor").plan(for: workspace.connection.dialect).preview))
+        ns.commitChanges(nil)
+        _ = try await waitFor("created table") { ns.editor.flatMap { $0.exists && !$0.hasChanges ? $0 : nil } }
+        print("created: \(newTab.table)")
+        snap("7-created.png", window)
     }
 
     /// Types a script into a query tab with autocomplete, runs it, cancels, saves, shows history.

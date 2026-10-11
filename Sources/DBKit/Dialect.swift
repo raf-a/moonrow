@@ -39,6 +39,19 @@ public protocol Dialect: Sendable {
     /// Makes `schema` where unqualified names resolve for the rest of the session; nil where
     /// the database has a single namespace.
     func useSchema(_ schema: String) -> String?
+
+    // MARK: DDL (see DDL.swift)
+
+    /// Column types the structure editor offers; any other type can be typed in.
+    var commonTypes: [String] { get }
+    /// DDL that turns `change.original` into `change.design`. Throws when the database can't
+    /// make the change.
+    func alterTable(_ change: StructureChange) throws -> DDLPlan
+    func createTable(_ design: TableDesign, schema: String?) -> DDLPlan
+    func drop(_ object: DatabaseObject, options: DropOptions) throws -> DDLPlan
+    /// `hasAutoIncrement`: SQLite keeps an AUTOINCREMENT counter apart from the rows.
+    func truncate(_ table: TableRef, options: TruncateOptions, hasAutoIncrement: Bool) -> DDLPlan
+    func rename(_ object: DatabaseObject, to name: String) throws -> DDLPlan
 }
 
 extension Dialect {

@@ -5,10 +5,19 @@ import DBKit
 /// and, for servers with several schemas or databases, a switcher at the bottom.
 @MainActor
 final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NSOutlineViewDelegate,
-    NSSearchFieldDelegate, NSMenuDelegate
+    NSSearchFieldDelegate, NSMenuDelegate, NSMenuItemValidation
 {
+    /// SQL the context menu's "Copy Script As" writes.
+    enum Script { case create, drop, truncate, select }
+
     var onOpen: ((DatabaseObject) -> Void)?
     var onOpenInNewTab: ((DatabaseObject) -> Void)?
+    var onOpenStructure: ((DatabaseObject) -> Void)?
+    var onNewTable: (() -> Void)?
+    var onRename: ((DatabaseObject) -> Void)?
+    var onTruncate: ((DatabaseObject) -> Void)?
+    var onDelete: ((DatabaseObject) -> Void)?
+    var onCopyScript: ((DatabaseObject, Script) -> Void)?
     /// After the object list (re)loads.
     var onObjectsLoaded: (([DatabaseObject]) -> Void)?
     /// Set while the selection follows the open tab, so it doesn't open anything.
@@ -70,8 +79,23 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         outline.doubleAction = #selector(doubleClicked(_:))
         let menu = NSMenu()
         menu.addItem(withTitle: "Open in New Tab", action: #selector(openInNewTab(_:)), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Open Structure", action: #selector(openStructure(_:)), keyEquivalent: "").target = self
         menu.delegate = self
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "New Table…", action: #selector(newTable(_:)), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Rename…", action: #selector(renameItem(_:)), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Truncate…", action: #selector(truncateItem(_:)), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Delete…", action: #selector(deleteItem(_:)), keyEquivalent: "").target = self
+        menu.addItem(.separator())
         menu.addItem(withTitle: "Copy Name", action: #selector(copyName(_:)), keyEquivalent: "").target = self
+        let scripts = NSMenuItem(title: "Copy Script As", action: nil, keyEquivalent: "")
+        scripts.submenu = NSMenu()
+        for (title, tag) in [("CREATE", 0), ("DROP", 1), ("TRUNCATE", 2), ("SELECT", 3)] {
+            let item = scripts.submenu!.addItem(withTitle: title, action: #selector(copyScript(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = tag
+        }
+        menu.addItem(scripts)
         outline.menu = menu
 
         let scroll = NSScrollView()
@@ -196,6 +220,54 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.items.first?.isEnabled = targetObject.map(Self.opensInGrid) ?? false
+    }
+
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        let kind = targetObject?.kind
+        switch item.action {
+        case #selector(openInNewTab(_:)), #selector(openStructure(_:)):
+            return targetObject.map(Self.opensInGrid) ?? false
+        case #selector(newTable(_:)):
+            return onNewTable != nil
+        case #selector(renameItem(_:)), #selector(deleteItem(_:)):
+            return kind != nil && kind != .function
+        case #selector(truncateItem(_:)):
+            return kind == .table
+        case #selector(copyScript(_:)):
+            guard let kind else { return false }
+            return item.tag == 2 ? kind == .table : true
+        default:
+            return true
+        }
+    }
+
+    @objc private func openStructure(_ sender: Any?) {
+        if let object = targetObject, Self.opensInGrid(object) { onOpenStructure?(object) }
+    }
+
+    @objc private func newTable(_ sender: Any?) { onNewTable?() }
+
+    @objc private func renameItem(_ sender: Any?) {
+        if let object = targetObject { onRename?(object) }
+    }
+
+    @objc private func truncateItem(_ sender: Any?) {
+        if let object = targetObject { onTruncate?(object) }
+    }
+
+    @objc private func deleteItem(_ sender: Any?) {
+        if let object = targetObject { onDelete?(object) }
+    }
+
+    @objc private func copyScript(_ sender: NSMenuItem) {
+        guard let object = targetObject else { return }
+        let script: Script = switch sender.tag {
+        case 0: .create
+        case 1: .drop
+        case 2: .truncate
+        default: .select
+        }
+        onCopyScript?(object, script)
     }
 
     @objc private func copyName(_ sender: Any?) {

@@ -8,3 +8,4 @@ DerivedData/
 .claude/.cc-writes
 __pycache__/
 build/
+.claude/worktrees/

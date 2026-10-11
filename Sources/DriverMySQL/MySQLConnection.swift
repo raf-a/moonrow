@@ -88,7 +88,8 @@ public final class MySQLConnection: DatabaseConnection, @unchecked Sendable {
 
     public func columns(of table: TableRef) async throws -> [ColumnInfo] {
         let found = try await rows("""
-            SELECT c.COLUMN_NAME, c.COLUMN_TYPE, c.IS_NULLABLE, c.COLUMN_DEFAULT, k.ORDINAL_POSITION
+            SELECT c.COLUMN_NAME, c.COLUMN_TYPE, c.IS_NULLABLE, c.COLUMN_DEFAULT, k.ORDINAL_POSITION,
+                   c.EXTRA, c.COLUMN_COMMENT, c.COLLATION_NAME, c.GENERATION_EXPRESSION, c.DATA_TYPE
             FROM information_schema.COLUMNS c
             LEFT JOIN information_schema.KEY_COLUMN_USAGE k
               ON k.TABLE_SCHEMA = c.TABLE_SCHEMA AND k.TABLE_NAME = c.TABLE_NAME
@@ -98,15 +99,89 @@ public final class MySQLConnection: DatabaseConnection, @unchecked Sendable {
             """, tableBindings(table))
         guard !found.isEmpty else { throw DatabaseError("no such table: \(table)") }
         return found.map { row in
-            var defaultExpression = string(row[3])
-            // MariaDB spells "no default / DEFAULT NULL" as the text NULL.
-            if isMariaDB, defaultExpression == "NULL" { defaultExpression = nil }
+            let extra = string(row[5]) ?? ""
+            let lowerExtra = extra.lowercased()
+            var generated: String?
+            if lowerExtra.contains("generated"), !lowerExtra.contains("default_generated"),
+               let expression = string(row[8]), !expression.isEmpty {
+                generated = "GENERATED ALWAYS AS (\(expression)) \(lowerExtra.contains("stored") ? "STORED" : "VIRTUAL")"
+            }
+            var onUpdate: String?
+            if let r = extra.range(of: "on update ", options: .caseInsensitive) {
+                onUpdate = String(extra[r.upperBound...]).trimmingCharacters(in: .whitespaces)
+            }
+            let comment = string(row[6]) ?? ""
             return ColumnInfo(
                 name: string(row[0]) ?? "",
                 typeName: string(row[1]) ?? "",
                 isNullable: string(row[2]) == "YES",
-                defaultExpression: defaultExpression,
-                primaryKeyPosition: integer(row[4]))
+                defaultExpression: generated == nil
+                    ? defaultSQL(string(row[3]), extra: lowerExtra, dataType: string(row[9]) ?? "") : nil,
+                primaryKeyPosition: integer(row[4]),
+                comment: comment.isEmpty ? nil : comment,
+                isAutoIncrement: lowerExtra.contains("auto_increment"),
+                generated: generated,
+                collation: string(row[7]),
+                onUpdate: onUpdate)
+        }
+    }
+
+    /// COLUMN_DEFAULT as SQL. MariaDB already writes it that way (`'text'`, `0`,
+    /// `current_timestamp()`, `NULL`). MySQL gives a literal's bare value and marks expressions
+    /// DEFAULT_GENERATED; those need parentheses unless they're CURRENT_TIMESTAMP.
+    func defaultSQL(_ value: String?, extra: String, dataType: String) -> String? {
+        guard let value else { return nil }
+        if isMariaDB { return value == "NULL" ? nil : value }
+        if extra.contains("default_generated") {
+            let upper = value.uppercased()
+            return upper.hasPrefix("CURRENT_TIMESTAMP") || upper.hasPrefix("NOW(") || value.hasPrefix("(") ? value : "(\(value))"
+        }
+        let numeric = ["tinyint", "smallint", "mediumint", "int", "integer", "bigint", "decimal", "numeric",
+                       "float", "double", "real", "year"]
+        if numeric.contains(dataType.lowercased()), Double(value) != nil { return value }
+        if dataType.lowercased() == "bit", value.hasPrefix("b'") { return value }
+        return dialect.literal(.text(value))
+    }
+
+    public func structure(of table: TableRef) async throws -> TableStructure {
+        var s = TableStructure(
+            table: table, columns: try await columns(of: table), indexes: try await indexes(of: table),
+            foreignKeys: try await foreignKeys(of: table), triggers: try await triggers(of: table))
+        let comment = try await rows("""
+            SELECT TABLE_COMMENT FROM information_schema.TABLES
+            WHERE TABLE_SCHEMA = COALESCE(?, DATABASE()) AND TABLE_NAME = ?
+            """, tableBindings(table)).first.flatMap { string($0[0]) } ?? ""
+        s.comment = comment.isEmpty ? nil : comment
+        return s
+    }
+
+    public func definition(of object: DatabaseObject) async throws -> String {
+        let name = dialect.qualified(object.ref)
+        switch object.kind {
+        case .view:
+            return try await rows("SHOW CREATE VIEW \(name)").first.flatMap { string($0[1]) }.map { $0 + ";" } ?? ""
+        case .function:
+            let types = try await rows("""
+                SELECT ROUTINE_TYPE FROM information_schema.ROUTINES
+                WHERE ROUTINE_SCHEMA = COALESCE(?, DATABASE()) AND ROUTINE_NAME = ?
+                """, tableBindings(object.ref)).compactMap { string($0[0]) }
+            var out: [String] = []
+            for type in types {
+                // SHOW CREATE PROCEDURE/FUNCTION: the body is the third column.
+                if let body = try await rows("SHOW CREATE \(type) \(name)").first.flatMap({ string($0[2]) }) {
+                    out.append(body + ";")
+                }
+            }
+            return out.joined(separator: "\n\n")
+        default:
+            var statements = try await rows("SHOW CREATE TABLE \(name)").first.flatMap { string($0[1]) }.map { [$0] } ?? []
+            for t in try await triggers(of: object.ref) {
+                statements.append("""
+                    CREATE TRIGGER \(dialect.quoteIdentifier(t.name)) \(t.timing) \(t.events.joined(separator: " OR ")) \
+                    ON \(name) FOR EACH ROW \(t.definition)
+                    """)
+            }
+            return statements.map { $0 + ";" }.joined(separator: "\n\n")
         }
     }
 

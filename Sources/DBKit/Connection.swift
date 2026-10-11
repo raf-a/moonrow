@@ -24,11 +24,61 @@ public protocol DatabaseConnection: Sendable {
     func indexes(of table: TableRef) async throws -> [IndexInfo]
     func foreignKeys(of table: TableRef) async throws -> [ForeignKeyInfo]
     func triggers(of table: TableRef) async throws -> [TriggerInfo]
+    /// Everything the structure editor shows. The default puts the calls above together;
+    /// drivers add comments and what their DDL needs.
+    func structure(of table: TableRef) async throws -> TableStructure
+    /// The statements that create the object, for the DDL view and "Copy as CREATE".
+    func definition(of object: DatabaseObject) async throws -> String
 
     func close() async
 }
 
 extension DatabaseConnection {
+    public func structure(of table: TableRef) async throws -> TableStructure {
+        TableStructure(
+            table: table, columns: try await columns(of: table), indexes: try await indexes(of: table),
+            foreignKeys: try await foreignKeys(of: table), triggers: try await triggers(of: table))
+    }
+
+    /// Tables: CREATE TABLE written from the structure, then the triggers.
+    public func definition(of object: DatabaseObject) async throws -> String {
+        guard object.kind == .table else { throw DatabaseError("No definition is available for \(object.ref.name).") }
+        let s = try await structure(of: object.ref)
+        var design = TableDesign(s)
+        // Constraint indexes come with their constraints; list the others.
+        design.indexes = design.indexes.filter { !$0.value.isConstraint }
+        let plan = dialect.createTable(design, schema: object.ref.schema)
+        let statements = plan.statements.map { $0 + ";" } + s.triggers.map { $0.definition + ";" }
+        return statements.joined(separator: "\n\n")
+    }
+
+    /// Runs DDL: setup, then the statements (in one transaction where the database can roll
+    /// DDL back), then teardown, which runs even after a failure.
+    public func apply(_ plan: DDLPlan) async throws {
+        for sql in plan.setup { _ = try await execute(SQLStatement(sql)) }
+        do {
+            if plan.isAtomic {
+                _ = try await transaction(plan.statements.map { SQLStatement($0) })
+            } else {
+                for (i, sql) in plan.statements.enumerated() {
+                    do {
+                        _ = try await execute(SQLStatement(sql))
+                    } catch var error as DatabaseError {
+                        if i > 0 {
+                            error.message += " (The \(i == 1 ? "first statement was" : "first \(i) statements were") applied.)"
+                        }
+                        error.sql = sql
+                        throw error
+                    }
+                }
+            }
+        } catch {
+            for sql in plan.teardown { _ = try? await execute(SQLStatement(sql)) }
+            throw error
+        }
+        for sql in plan.teardown { _ = try await execute(SQLStatement(sql)) }
+    }
+
     public func transaction(_ statements: [SQLStatement]) async throws -> [Int] {
         try await transaction(statements, verify: { _, _ in })
     }
