@@ -13,4 +13,11 @@ public enum SQLKeywords {
         "TRUE", "TRUNCATE", "UNION", "UNIQUE", "UPDATE", "USING", "VALUES", "VIEW", "WHEN",
         "WHERE", "WITH",
     ]
+
+    /// Built-in functions common to SQLite, PostgreSQL and MySQL, offered by autocomplete.
+    public static let functions: [String] = [
+        "abs", "avg", "cast", "coalesce", "count", "date", "group_concat", "ifnull", "instr", "length",
+        "lower", "ltrim", "max", "min", "now", "nullif", "random", "replace", "round", "rtrim", "substr",
+        "substring", "sum", "trim", "upper",
+    ]
 }

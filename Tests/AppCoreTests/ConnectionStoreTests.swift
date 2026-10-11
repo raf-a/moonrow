@@ -86,4 +86,12 @@ private func tempFile() -> URL {
         #expect(c.displayName == "app.sqlite")
         #expect(c.summary == "SQLite · /data/app.sqlite · read-only")
     }
+
+    @Test func openedFilesKeepTheirIDAcrossOpens() {
+        let a = ConnectionConfig.sqliteFile(URL(filePath: "/tmp/x/../app.db"))
+        let b = ConnectionConfig.sqliteFile(URL(filePath: "/tmp/app.db"))
+        #expect(a.id == b.id)
+        #expect(a.filePath == "/tmp/app.db")
+        #expect(ConnectionConfig.sqliteFile(URL(filePath: "/tmp/other.db")).id != a.id)
+    }
 }

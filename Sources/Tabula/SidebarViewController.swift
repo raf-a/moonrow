@@ -7,6 +7,11 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     NSSearchFieldDelegate
 {
     var onOpen: ((DatabaseObject) -> Void)?
+    var onOpenInNewTab: ((DatabaseObject) -> Void)?
+    /// After the object list (re)loads.
+    var onObjectsLoaded: (([DatabaseObject]) -> Void)?
+    /// Set while the selection follows the open tab, so it doesn't open anything.
+    private var isRevealing = false
 
     private let connection: any DatabaseConnection
     private let outline = NSOutlineView()
@@ -54,6 +59,12 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         outline.dataSource = self
         outline.delegate = self
         outline.autosaveExpandedItems = false
+        outline.target = self
+        outline.doubleAction = #selector(doubleClicked(_:))
+        let menu = NSMenu()
+        menu.addItem(withTitle: "Open in New Tab", action: #selector(openInNewTab(_:)), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Copy Name", action: #selector(copyName(_:)), keyEquivalent: "").target = self
+        outline.menu = menu
 
         let scroll = NSScrollView()
         scroll.documentView = outline
@@ -102,6 +113,41 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         return false
     }
 
+    /// Selects the item for `ref` (or nothing) without opening it, so the list follows the
+    /// selected tab.
+    func reveal(_ ref: TableRef?) {
+        isRevealing = true
+        defer { isRevealing = false }
+        let row = ref.flatMap { r in rowOf { $0.ref == r } }
+        if let row {
+            outline.selectRowIndexes([row], byExtendingSelection: false)
+            outline.scrollRowToVisible(row)
+        } else {
+            outline.deselectAll(nil)
+        }
+    }
+
+    /// The item a context-menu command applies to: the clicked row, else the selection.
+    private var targetObject: DatabaseObject? {
+        let row = outline.clickedRow >= 0 ? outline.clickedRow : outline.selectedRow
+        return (outline.item(atRow: row) as? Item)?.object
+    }
+
+    @objc private func doubleClicked(_ sender: Any?) {
+        guard outline.clickedRow >= 0, let object = (outline.item(atRow: outline.clickedRow) as? Item)?.object else { return }
+        onOpen?(object)
+    }
+
+    @objc private func openInNewTab(_ sender: Any?) {
+        if let object = targetObject { onOpenInNewTab?(object) }
+    }
+
+    @objc private func copyName(_ sender: Any?) {
+        guard let object = targetObject else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(object.ref.name, forType: .string)
+    }
+
     func focusFilter() {
         view.window?.makeFirstResponder(filter)
     }
@@ -114,6 +160,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                 guard !Task.isCancelled else { return }
                 self.objects = objects
                 rebuild()
+                onObjectsLoaded?(objects)
             } catch {
                 guard !Task.isCancelled else { return }
                 objects = []
@@ -136,8 +183,10 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         outline.reloadData()
         for g in groups { outline.expandItem(g) }
 
-        if let selected, let row = rowOf(selected) {
+        if let selected, let row = rowOf({ $0 == selected }) {
+            isRevealing = true
             outline.selectRowIndexes([row], byExtendingSelection: false)
+            isRevealing = false
         }
         if objects.isEmpty {
             showMessage("This database has no tables yet.")
@@ -153,9 +202,9 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         message.isHidden = false
     }
 
-    private func rowOf(_ object: DatabaseObject) -> Int? {
+    private func rowOf(_ predicate: (DatabaseObject) -> Bool) -> Int? {
         for g in groups {
-            if let item = g.items.first(where: { $0.object == object }) {
+            if let item = g.items.first(where: { predicate($0.object) }) {
                 let row = outline.row(forItem: item)
                 return row >= 0 ? row : nil
             }
@@ -250,7 +299,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     /// Selecting an item opens it, so arrow keys browse tables one after another.
     func outlineViewSelectionDidChange(_ notification: Notification) {
-        guard let item = outline.item(atRow: outline.selectedRow) as? Item else { return }
+        guard !isRevealing, let item = outline.item(atRow: outline.selectedRow) as? Item else { return }
         onOpen?(item.object)
     }
 }

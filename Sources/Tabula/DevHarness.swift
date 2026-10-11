@@ -6,19 +6,35 @@ import Darwin
 /// Developer self-checks, off unless `TABULA_BENCH` or `TABULA_DEMO` names a table:
 ///
 ///     TABULA_BENCH=events TABULA_SNAPSHOTS=build/snapshots Tabula build/sample.sqlite
-///     TABULA_DEMO=events TABULA_SNAPSHOTS=build/snapshots Tabula /tmp/copy-of-sample.sqlite
+///     TABULA_DEMO=users TABULA_SNAPSHOTS=build/snapshots Tabula /tmp/copy-of-sample.sqlite
+///     TABULA_QUERY=events TABULA_STORE=/tmp/tabula-dev/connections.json TABULA_SNAPSHOTS=… Tabula build/sample.sqlite
 ///
 /// The bench opens the table in the first workspace with every row in one page, scrolls it like
 /// a fast trackpad, jumps to far-apart rows, prints timings and quits. The demo drives the grid's
 /// editing UI (sort, filter, edit, insert, delete, preview, commit) and snapshots each step; it
-/// COMMITS to the database, so point it at a copy. Snapshots are rendered in-process (no
-/// screen-recording permission needed).
+/// COMMITS to the database, so point it at a copy. The query demo types a script into a query
+/// tab (autocomplete included), runs it, cancels an endless query, saves a query and shows the
+/// history; it only reads the database but writes history and saved queries next to
+/// `TABULA_STORE`, which it requires. Snapshots are rendered in-process (no screen-recording
+/// permission needed).
 @MainActor
 enum DevHarness {
     static func runIfRequested(_ app: AppDelegate) {
         setvbuf(stdout, nil, _IOLBF, 0)
         let env = ProcessInfo.processInfo.environment
         let snapshots = env["TABULA_SNAPSHOTS"].map { URL(filePath: $0, directoryHint: .isDirectory) }
+        if let table = env["TABULA_QUERY"] {
+            Task {
+                do {
+                    guard env["TABULA_STORE"] != nil else { throw HarnessError("TABULA_QUERY needs TABULA_STORE") }
+                    try await queryDemo(app, table: table, snapshots: snapshots)
+                } catch {
+                    print("query demo failed: \(error)")
+                }
+                NSApp.terminate(nil)
+            }
+            return
+        }
         if let table = env["TABULA_DEMO"] {
             Task {
                 do {
@@ -66,7 +82,7 @@ enum DevHarness {
         let workspace = try await waitFor("workspace") { app.workspaces.first }
         let window = try require(workspace.window, "workspace window")
         _ = try await waitFor("sidebar item \(table)") { workspace.sidebar.select(named: table) ? true : nil }
-        let data = try await waitFor("table view") { workspace.content.tableController }
+        let data = try await waitFor("table view") { workspace.tableController }
         _ = try await waitFor("first page") { data.cache }
         data.showAllRows()
         let cache = try await waitFor("all rows") { data.cache.flatMap { $0.rowCount == data.total ? $0 : nil } }
@@ -122,7 +138,7 @@ enum DevHarness {
         let workspace = try await waitFor("workspace") { app.workspaces.first }
         let window = try require(workspace.window, "workspace window")
         _ = try await waitFor("sidebar item \(table)") { workspace.sidebar.select(named: table) ? true : nil }
-        let data = try await waitFor("table view") { workspace.content.tableController }
+        let data = try await waitFor("table view") { workspace.tableController }
         let grid = data.grid
         func loaded() async throws {
             _ = try await waitFor("rows") { data.cache.flatMap { visibleLoaded(grid, $0) ? true : nil } }
@@ -198,6 +214,101 @@ enum DevHarness {
         try await loaded()
         print("committed; staged changes left: \(data.edits.isEmpty ? 0 : 1), page: \(data.query.page.describe(total: data.total))")
         snap("4-committed.png", window)
+    }
+
+    /// Types a script into a query tab with autocomplete, runs it, cancels, saves, shows history.
+    private static func queryDemo(_ app: AppDelegate, table: String, snapshots: URL?) async throws {
+        if let snapshots { try FileManager.default.createDirectory(at: snapshots, withIntermediateDirectories: true) }
+        func snap(_ name: String, _ window: NSWindow?) {
+            if let snapshots, let window { snapshot(window, to: snapshots.appending(path: name)) }
+        }
+        let workspace = try await waitFor("workspace") { app.workspaces.first }
+        let window = try require(workspace.window, "workspace window")
+        _ = try await waitFor("catalog") { workspace.environment.catalog.objects.isEmpty ? nil : true }
+        workspace.newQueryTab(nil)
+        let query = try require(workspace.queryController, "query tab")
+        let editor = query.editor
+        window.makeFirstResponder(editor)
+
+        func type(_ text: String) {
+            for ch in text {
+                if ch == "\n" { editor.insertNewline(nil) } else { editor.insertText(String(ch), replacementRange: editor.selectedRange()) }
+            }
+        }
+        func popup() -> NSWindow? { NSApp.windows.first { $0 is NSPanel && $0.isVisible } }
+        func shown(_ what: String) async throws -> [String] {
+            _ = try await waitFor("completion list (\(what))") { query.isCompletionVisible ? true : nil }
+            let names = query.completionItems.prefix(6).map { "\($0.text) (\($0.kind))" }
+            print("completions after \(what): \(names.joined(separator: ", "))")
+            return names
+        }
+        func idle() async throws {
+            _ = try await waitFor("query to finish") { query.isRunning ? nil : true }
+            window.displayIfNeeded()
+        }
+
+        // Table names after FROM, ranked by prefix.
+        type("select * from " + table.prefix(2))
+        _ = try await shown("FROM \(table.prefix(2))")
+        snap("q1-editor.png", window)
+        snap("q1-completion.png", popup())
+        editor.keyDown(with: try key("\r", code: 36))
+        // Columns through an alias, loaded on demand.
+        type(" t where t.")
+        _ = try await shown("alias t.")
+        snap("q2-completion-columns.png", popup())
+        editor.keyDown(with: try key("\t", code: 48))
+        type(" is not null;\nselect count(*) as n from \(table);\nselect * from no_such_table;\n")
+        print("script:\n\(editor.string)")
+
+        // Run all: stops at the error, which shows in Messages.
+        query.runAllQueries(nil)
+        try await idle()
+        print("run all: \(query.results.results.count) result tabs, rows \(query.results.results.map(\.rows.count)), messages shown: \(query.results.showsMessagesTab)")
+        print(query.results.messagesText)
+        snap("q3-run-all.png", window)
+
+        // Run current with the cursor in the first statement.
+        editor.setSelectedRange(NSRange(location: 3, length: 0))
+        query.runCurrentQuery(nil)
+        try await idle()
+        let first = try require(query.results.results.first, "result")
+        print("run current: \(first.rows.count) rows, \(first.columns.count) columns, truncated: \(first.outcome?.truncated ?? false)")
+        snap("q4-run-current.png", window)
+
+        // An endless query, stopped.
+        workspace.newQueryTab(nil)
+        let endless = try require(workspace.queryController, "second query tab")
+        endless.setText("WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT count(*) FROM c")
+        endless.runCurrentQuery(nil)
+        try await Task.sleep(for: .milliseconds(400))
+        let clock = ContinuousClock()
+        let start = clock.now
+        endless.cancelQuery(nil)
+        _ = try await waitFor("cancel") { endless.isRunning ? nil : true }
+        print(String(format: "cancel took %.1f ms", (clock.now - start).ms))
+        window.displayIfNeeded()
+        snap("q5-cancelled.png", window)
+
+        // Save the first query, then show Queries and History.
+        let saved = try workspace.environment.savedQueries.save(editor.string, as: "Demo query", overwrite: true)
+        query.savedQueryChanged(to: saved)
+        workspace.showSavedQueries(nil)
+        window.displayIfNeeded()
+        snap("q6-saved-queries.png", window)
+        workspace.showQueryHistory(nil)
+        window.displayIfNeeded()
+        print("history: \(workspace.environment.history.entries.count) entries, newest: \(workspace.environment.history.entries.first?.sql.prefix(60) ?? "")")
+        snap("q7-history.png", window)
+
+        // A table tab next to the query tabs.
+        workspace.focusItemFilter(nil)
+        _ = workspace.sidebar.select(named: table)
+        let data = try await waitFor("table tab") { workspace.tableController }
+        _ = try await waitFor("rows") { data.cache.flatMap { visibleLoaded(data.grid, $0) ? true : nil } }
+        window.displayIfNeeded()
+        print("tabs: \(workspace.content.tabs.map(\.tabItem.title))")
+        snap("q8-tabs.png", window)
     }
 
     private static func key(_ characters: String, code: UInt16) throws -> NSEvent {

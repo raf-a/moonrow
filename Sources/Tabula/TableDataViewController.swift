@@ -13,6 +13,8 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
     NSTextFieldDelegate, NSMenuItemValidation, TabulaActions
 {
     let table: TableRef
+    let kind: ObjectKind
+    var onTabItemChange: (() -> Void)?
     /// Why the grid can't be edited (a view, a read-only connection), or nil.
     let readOnlyReason: String?
     var isEditable: Bool { readOnlyReason == nil }
@@ -49,6 +51,7 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
     init(connection: any DatabaseConnection, object: DatabaseObject, readOnlyConnection: Bool, pageSize: Int?) {
         self.connection = connection
         self.table = object.ref
+        self.kind = object.kind
         self.readOnlyReason = readOnlyConnection ? "The connection is read-only."
             : object.kind == .table ? nil : "Only tables can be edited."
         self.query = GridQuery(page: Paging(pageSize: pageSize))
@@ -789,6 +792,7 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
         switch item.action {
         case #selector(copy(_:)): return hasRows
         case #selector(commitChanges(_:)), #selector(discardChanges(_:)), #selector(previewChanges(_:)):
+            if item.action == #selector(commitChanges(_:)) { item.title = "Commit Changes" }
             return !edits.isEmpty || editing != nil
         case #selector(addRow(_:)): return isEditable && cache != nil
         case #selector(duplicateRows(_:)), #selector(setNull(_:)), #selector(setEmpty(_:)), #selector(setDefault(_:)):
@@ -850,4 +854,18 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
             }
         }
     }
+}
+
+extension TableDataViewController: WorkspaceTab {
+    var tabItem: TabStrip.Item {
+        TabStrip.Item(title: table.name, symbol: kind == .table ? "tablecells" : "eye", toolTip: table.description)
+    }
+
+    var preferredResponder: NSView { grid }
+
+    func prepareToClose(then proceed: @escaping () -> Void) {
+        resolvePendingEdits(before: "Closing the tab", then: proceed)
+    }
+
+    func tabDidClose() { stop() }
 }

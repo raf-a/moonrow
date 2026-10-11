@@ -9,6 +9,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TabulaActions {
     let store = ConnectionStore(fileURL: ProcessInfo.processInfo.environment["TABULA_STORE"]
         .map { URL(filePath: ($0 as NSString).expandingTildeInPath) } ?? ConnectionStore.defaultFileURL())
 
+    /// History and saved queries live next to the connections file, so `TABULA_STORE` moves them too.
+    var dataRoot: URL { store.fileURL.deletingLastPathComponent() }
+    /// Shared by every workspace open on the same connection.
+    private var histories: [UUID: QueryHistory] = [:]
+    private var savedQueries: [UUID: SavedQueries] = [:]
+
     private var welcome: WelcomeWindowController?
     private var forms: [ConnectionFormWindowController] = []
     private(set) var workspaces: [WorkspaceWindowController] = []
@@ -55,6 +61,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TabulaActions {
             welcome = WelcomeWindowController(store: store, app: self)
         }
         welcome?.showWindow(nil)
+    }
+
+    /// ⌘W outside a workspace closes the window.
+    @objc func closeTab(_ sender: Any?) {
+        NSApp.keyWindow?.performClose(sender)
     }
 
     @objc func newConnection(_ sender: Any?) {
@@ -106,7 +117,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TabulaActions {
     }
 
     private func openWorkspace(_ config: ConnectionConfig, _ connection: any DatabaseConnection) {
-        let workspace = WorkspaceWindowController(config: config, connection: connection)
+        let history = histories[config.id] ?? QueryHistory(fileURL: QueryHistory.fileURL(root: dataRoot, connection: config.id))
+        let saved = savedQueries[config.id] ?? SavedQueries(directory: SavedQueries.directory(root: dataRoot, connection: config.id))
+        histories[config.id] = history
+        savedQueries[config.id] = saved
+        let workspace = WorkspaceWindowController(config: config, connection: connection, history: history, savedQueries: saved)
         workspace.onClose = { [weak self, weak workspace] in
             self?.workspaces.removeAll { $0 === workspace }
         }

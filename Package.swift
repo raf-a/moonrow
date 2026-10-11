@@ -20,7 +20,7 @@ let package = Package(
             linkerSettings: [.linkedLibrary("sqlite3")]
         ),
         // App logic without AppKit, so `swift test` covers it.
-        .target(name: "AppCore", dependencies: ["DBKit", "DriverSQLite"]),
+        .target(name: "AppCore", dependencies: ["SQLScript", "DBKit", "DriverSQLite"]),
         // The AppKit app. `scripts/build-app.sh` wraps it into Tabula.app.
         .executableTarget(name: "Tabula", dependencies: ["AppCore"]),
         .testTarget(name: "SQLScriptTests", dependencies: ["SQLScript"]),
