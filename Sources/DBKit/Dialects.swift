@@ -62,6 +62,12 @@ public struct PostgresDialect: Dialect {
     public func quoteIdentifier(_ name: String) -> String { quote(name, with: "\"") }
     public func placeholder(_ index: Int) -> String { "$\(index)" }
     public func textCast(_ expression: String) -> String { "\(expression)::text" }
+    public var pagesNeedKeyOrder: Bool { true }
+
+    /// The schema first, then `public`, so extensions installed there keep working.
+    public func useSchema(_ schema: String) -> String? {
+        schema == "public" ? "SET search_path TO public" : "SET search_path TO \(quoteIdentifier(schema)), public"
+    }
 
     public func literal(_ value: DBValue) -> String {
         switch value {
@@ -97,12 +103,29 @@ public struct MySQLDialect: Dialect {
         case .null: "NULL"
         case .integer(let v): String(v)
         case .double(let v): v.isFinite ? String(v) : "NULL"
-        case .text(let v):
-            // Assumes the server default (backslash escapes on).
-            quote(v.replacingOccurrences(of: "\\", with: "\\\\"), with: "'")
+        case .text(let v): Self.escapedString(v)
         case .blob(let d): "X'\(hex(d))'"
-        case .bool(let v): v ? "TRUE" : "FALSE"
+        case .bool(let v): v ? "1" : "0"
         }
+    }
+
+    /// `'…'` escaped the way the server writes bound strings into its logs (the C API's
+    /// escape_string rules). Assumes the server default, backslash escapes on.
+    static func escapedString(_ s: String) -> String {
+        var out = "'"
+        for u in s.unicodeScalars {
+            switch u {
+            case "\0": out += "\\0"
+            case "\n": out += "\\n"
+            case "\r": out += "\\r"
+            case "\\": out += "\\\\"
+            case "'": out += "\\'"
+            case "\"": out += "\\\""
+            case "\u{1A}": out += "\\Z"
+            default: out.unicodeScalars.append(u)
+            }
+        }
+        return out + "'"
     }
 
     public func patternMatch(
@@ -122,4 +145,6 @@ public struct MySQLDialect: Dialect {
     }
 
     public var beginTransaction: String { "START TRANSACTION" }
+
+    public func useSchema(_ schema: String) -> String? { "USE \(quoteIdentifier(schema))" }
 }

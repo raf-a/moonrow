@@ -1,5 +1,6 @@
 import DBKit
 import Foundation
+import SQLScript
 import SQLite3
 
 /// A connection to a SQLite file (or `:memory:`). All work is serialized by the actor.
@@ -190,6 +191,85 @@ public actor SQLiteConnection: DatabaseConnection {
                 defaultExpression: defaultExpression,
                 primaryKeyPosition: pk)
         }
+    }
+
+    /// One namespace as far as the sidebar is concerned; attached databases come later.
+    public nonisolated func schemas() -> [String] { [] }
+    public nonisolated func currentSchema() -> String? { nil }
+
+    public func indexes(of table: TableRef) throws -> [IndexInfo] {
+        let schema = table.schema ?? "main"
+        let list = try query(SQLStatement(
+            #"SELECT name, "unique", origin, partial FROM pragma_index_list(?, ?) ORDER BY name"#,
+            bindings: [.text(table.name), .text(schema)]))
+        return try list.map { row in
+            let name = row[0].displayString
+            // pragma_index_xinfo lists key columns first (key = 1); cid -2 is an expression.
+            let columns = try query(SQLStatement(
+                "SELECT name, cid FROM pragma_index_xinfo(?, ?) WHERE key = 1 ORDER BY seqno",
+                bindings: [.text(name), .text(schema)]))
+            var predicate: String?
+            if row[3] == .integer(1), let sql = try query(SQLStatement(
+                "SELECT sql FROM \(dialect.quoteIdentifier(schema)).sqlite_master WHERE type = 'index' AND name = ?",
+                bindings: [.text(name)])).first?.first, case .text(let text) = sql,
+               let r = text.range(of: " WHERE ", options: [.caseInsensitive, .backwards]) {
+                predicate = String(text[r.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            return IndexInfo(
+                name: name,
+                columns: columns.map { $0[1] == .integer(-2) ? "<expression>" : $0[0].displayString },
+                isUnique: row[1] == .integer(1), isPrimary: row[2] == .text("pk"), predicate: predicate)
+        }
+    }
+
+    public func foreignKeys(of table: TableRef) throws -> [ForeignKeyInfo] {
+        let rows = try query(SQLStatement(
+            #"SELECT id, "table", "from", "to", on_update, on_delete FROM pragma_foreign_key_list(?, ?) ORDER BY id, seq"#,
+            bindings: [.text(table.name), .text(table.schema ?? "main")]))
+        var out: [(id: DBValue, key: ForeignKeyInfo)] = []
+        for row in rows {
+            // "to" is NULL when the key references the parent's primary key implicitly.
+            let to = row[3].isNull ? "" : row[3].displayString
+            if out.last?.id == row[0] {
+                out[out.count - 1].key.columns.append(row[2].displayString)
+                out[out.count - 1].key.referencedColumns.append(to)
+            } else {
+                out.append((row[0], ForeignKeyInfo(
+                    name: "", columns: [row[2].displayString],
+                    referencedTable: TableRef(schema: table.schema, row[1].displayString), referencedColumns: [to],
+                    onUpdate: row[4].displayString, onDelete: row[5].displayString)))
+            }
+        }
+        return out.map(\.key)
+    }
+
+    public func triggers(of table: TableRef) throws -> [TriggerInfo] {
+        let rows = try query(SQLStatement("""
+            SELECT name, sql FROM \(dialect.quoteIdentifier(table.schema ?? "main")).sqlite_master
+            WHERE type = 'trigger' AND tbl_name = ? ORDER BY name
+            """, bindings: [.text(table.name)]))
+        return rows.map { row in
+            let sql = row[1].isNull ? "" : row[1].displayString
+            let (timing, events) = Self.triggerHead(sql)
+            return TriggerInfo(name: row[0].displayString, timing: timing, events: events, definition: sql)
+        }
+    }
+
+    /// Timing and events from `CREATE TRIGGER [IF NOT EXISTS] name [BEFORE|AFTER|INSTEAD OF]
+    /// {DELETE|INSERT|UPDATE [OF …]} ON …`.
+    static func triggerHead(_ sql: String) -> (timing: String, events: [String]) {
+        let lexer = SQLLexer(sql, dialect: .sqlite)
+        let words = lexer.tokens().filter { !$0.kind.isTrivia }.map {
+            String(decoding: lexer.units[$0.range], as: UTF16.self).uppercased()
+        }
+        guard var i = words.firstIndex(of: "TRIGGER") else { return ("AFTER", []) }
+        i += 1
+        if i < words.count, words[i] == "IF" { i += 3 }
+        i += 1                                             // the name
+        if i < words.count, words[i] == "." { i += 2 }     // schema.name
+        let head = words[min(i, words.count)...].prefix { $0 != "ON" }
+        let timing = head.contains("INSTEAD") ? "INSTEAD OF" : head.contains("BEFORE") ? "BEFORE" : "AFTER"
+        return (timing, ["INSERT", "UPDATE", "DELETE"].filter(head.contains))
     }
 
     // MARK: - Helpers

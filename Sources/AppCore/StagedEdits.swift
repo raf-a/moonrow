@@ -130,7 +130,10 @@ public enum CellInput {
     public static func parse(_ text: String, typeName: String) -> DBValue {
         let type = typeName.uppercased()
         let trimmed = text.trimmingCharacters(in: .whitespaces)
-        if type.contains("INT"), let n = Int64(trimmed) { return .integer(n) }
+        // SQLite's affinity rule (any type containing INT), minus Postgres's INTERVAL and POINT.
+        if type.contains("INT"), !type.contains("INTERVAL"), !type.contains("POINT"), let n = Int64(trimmed) {
+            return .integer(n)
+        }
         if type.contains("REAL") || type.contains("FLOA") || type.contains("DOUB"), let d = Double(trimmed) {
             return .double(d)
         }

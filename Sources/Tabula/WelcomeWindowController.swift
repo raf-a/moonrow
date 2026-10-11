@@ -247,7 +247,7 @@ final class WelcomeWindowController: NSWindowController, NSWindowDelegate, NSTab
 
     @objc private func duplicateClicked(_ sender: Any?) {
         guard let c = clickedConnection else { return }
-        do { try store.duplicate(id: c.id) } catch { present(error, title: "Couldn't duplicate", in: window) }
+        do { try app.duplicateConnection(c.id) } catch { present(error, title: "Couldn't duplicate", in: window) }
     }
 
     @objc private func deleteClicked(_ sender: Any?) {
@@ -259,7 +259,7 @@ final class WelcomeWindowController: NSWindowController, NSWindowDelegate, NSTab
         alert.addButton(withTitle: "Cancel")
         alert.beginSheetModal(for: window) { [weak self] response in
             guard response == .alertFirstButtonReturn, let self else { return }
-            do { try self.store.delete(id: c.id) } catch { present(error, title: "Couldn't delete", in: self.window) }
+            do { try self.app.deleteConnection(c.id) } catch { present(error, title: "Couldn't delete", in: self.window) }
         }
     }
 
@@ -305,7 +305,9 @@ private final class ConnectionCell: NSTableCellView {
     func show(_ c: ConnectionConfig) {
         title.stringValue = c.displayName
         detail.stringValue = c.summary
-        toolTip = c.expandedFilePath
+        toolTip = c.driver.isServer ? c.summary : c.expandedFilePath
+        glyph.image = NSImage(
+            systemSymbolName: c.driver.isServer ? "server.rack" : "cylinder.split.1x2", accessibilityDescription: c.driver.displayName)
     }
 }
 

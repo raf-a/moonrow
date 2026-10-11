@@ -1,40 +1,55 @@
 import AppCore
 import AppKit
+import WireSupport
 
-/// Creates or edits a saved connection. Only SQLite exists so far; other drivers get their
-/// own field sets in M4.
+/// Creates or edits a saved connection: a file for SQLite, a server for the others.
 @MainActor
 final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate {
     private(set) var config: ConnectionConfig
     private let isNew: Bool
     private let store: ConnectionStore
+    private let secrets: any SecretStore
 
-    /// Asked to connect with the saved config.
-    var onConnect: ((ConnectionConfig) -> Void)?
+    /// Asked to connect with the saved config and the password typed in the form.
+    var onConnect: ((ConnectionConfig, String?) -> Void)?
     var onClose: (() -> Void)?
 
+    private let driverPopup = NSPopUpButton()
     private let nameField = NSTextField()
     private let pathField = NSTextField()
-    private let readOnlyBox = NSButton(checkboxWithTitle: "Open read-only", target: nil, action: nil)
+    private let hostField = NSTextField()
+    private let portField = NSTextField()
+    private let userField = NSTextField()
+    private let passwordField = NSSecureTextField()
+    private let passwordModePopup = NSPopUpButton()
+    private let databaseField = NSTextField()
+    private let tlsPopup = NSPopUpButton()
+    private let caField = NSTextField()
+    private let certField = NSTextField()
+    private let keyField = NSTextField()
+    private let readOnlyBox = NSButton(checkboxWithTitle: "Read-only", target: nil, action: nil)
     private let pageSizeField = NSTextField()
     private let status = NSTextField(wrappingLabelWithString: "")
     private let spinner = NSProgressIndicator()
+    private let grid = NSGridView()
+    private var fileRows: [Int] = []
+    private var serverRows: [Int] = []
     private var testTask: Task<Void, Never>?
 
-    init(config: ConnectionConfig, isNew: Bool, store: ConnectionStore) {
+    init(config: ConnectionConfig, isNew: Bool, store: ConnectionStore, secrets: any SecretStore) {
         self.config = config
         self.isNew = isNew
         self.store = store
+        self.secrets = secrets
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 230),
+            contentRect: NSRect(x: 0, y: 0, width: 540, height: 300),
             styleMask: [.titled, .closable], backing: .buffered, defer: true)
         window.isReleasedWhenClosed = false
-        window.title = isNew ? "New SQLite Connection" : "Edit \(config.displayName)"
         super.init(window: window)
         window.delegate = self
         window.contentView = makeContent()
-        window.center()
         show(config)
+        window.center()
     }
 
     @available(*, unavailable)
@@ -45,27 +60,57 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         onClose?()
     }
 
+    private var driver: DriverKind { DriverKind.allCases[max(0, driverPopup.indexOfSelectedItem)] }
+
     // MARK: - Layout
 
     private func makeContent() -> NSView {
-        nameField.placeholderString = "Defaults to the file name"
+        driverPopup.addItems(withTitles: DriverKind.allCases.map(\.displayName))
+        driverPopup.target = self
+        driverPopup.action = #selector(driverChanged(_:))
+        nameField.placeholderString = "Optional"
         pathField.placeholderString = "/path/to/database.sqlite"
         pathField.lineBreakMode = .byTruncatingMiddle
-        let choose = NSButton(title: "Choose…", target: self, action: #selector(chooseFile(_:)))
-        let pathRow = NSStackView(views: [pathField, choose])
-        pathRow.spacing = 8
+        hostField.placeholderString = "127.0.0.1, or a socket path"
+        portField.alignment = .right
+        portField.widthAnchor.constraint(equalToConstant: 70).isActive = true
+        passwordModePopup.addItems(withTitles: ["Save in Keychain", "Ask every time", "No password"])
+        passwordModePopup.target = self
+        passwordModePopup.action = #selector(passwordModeChanged(_:))
+        for f in [caField, certField, keyField] {
+            f.placeholderString = "None"
+            f.lineBreakMode = .byTruncatingMiddle
+        }
 
-        let grid = NSGridView(views: [
-            [label("Name"), nameField],
-            [label("Database file"), pathRow],
-            [NSGridCell.emptyContentView, readOnlyBox],
-            [label("Rows per page"), pageSizeRow()],
-        ])
-        grid.rowSpacing = 10
+        let hostRow = row(hostField, NSTextField(labelWithString: "Port"), portField)
+        let passwordRow = row(passwordField, passwordModePopup)
+        passwordField.widthAnchor.constraint(greaterThanOrEqualToConstant: 180).isActive = true
+
+        let rows: [(String, NSView, Kind)] = [
+            ("Type", driverPopup, .both),
+            ("Name", nameField, .both),
+            ("Database file", row(pathField, button("Choose…", #selector(chooseFile(_:)))), .file),
+            ("Host", hostRow, .server),
+            ("User", userField, .server),
+            ("Password", passwordRow, .server),
+            ("Database", databaseField, .server),
+            ("TLS", tlsPopup, .server),
+            ("CA certificate", row(caField, button("Choose…", #selector(chooseCA(_:)))), .server),
+            ("Client certificate", row(certField, button("Choose…", #selector(chooseCert(_:)))), .server),
+            ("Client key", row(keyField, button("Choose…", #selector(chooseKey(_:)))), .server),
+            ("", readOnlyBox, .both),
+            ("Rows per page", pageSizeRow(), .both),
+        ]
+        for (i, (title, view, kind)) in rows.enumerated() {
+            grid.addRow(with: [title.isEmpty ? NSGridCell.emptyContentView : NSTextField(labelWithString: title), view])
+            if kind == .file { fileRows.append(i) }
+            if kind == .server { serverRows.append(i) }
+        }
+        grid.rowSpacing = 9
         grid.columnSpacing = 10
         grid.column(at: 0).xPlacement = .trailing
         grid.rowAlignment = .firstBaseline
-        nameField.widthAnchor.constraint(greaterThanOrEqualToConstant: 340).isActive = true
+        nameField.widthAnchor.constraint(greaterThanOrEqualToConstant: 360).isActive = true
 
         status.font = .systemFont(ofSize: 12)
         status.isSelectable = true
@@ -90,12 +135,26 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         stack.spacing = 14
         stack.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 20, right: 20)
         buttons.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40).isActive = true
+        // Holds the grid inside the right inset too; a leading-aligned stack only pins the left.
+        grid.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40).isActive = true
         statusRow.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor, constant: -40).isActive = true
 
         let root = NSView()
         root.addSubview(stack)
         stack.pin(to: root)
         return root
+    }
+
+    private enum Kind { case both, file, server }
+
+    private func row(_ views: NSView...) -> NSStackView {
+        let s = NSStackView(views: views)
+        s.spacing = 8
+        return s
+    }
+
+    private func button(_ title: String, _ action: Selector) -> NSButton {
+        NSButton(title: title, target: self, action: action)
     }
 
     private func pageSizeRow() -> NSView {
@@ -105,33 +164,86 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         let hint = NSTextField(labelWithString: "Empty or 0 shows every row")
         hint.textColor = .secondaryLabelColor
         hint.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        let row = NSStackView(views: [pageSizeField, hint])
-        row.spacing = 8
-        return row
+        return row(pageSizeField, hint)
     }
 
-    private func label(_ text: String) -> NSTextField {
-        NSTextField(labelWithString: text)
+    /// Shows the fields the driver uses and fits the window to them.
+    private func layoutForDriver() {
+        let d = driver
+        for i in fileRows { grid.row(at: i).isHidden = d.isServer }
+        for i in serverRows { grid.row(at: i).isHidden = !d.isServer }
+        portField.placeholderString = d.isServer ? String(d.defaultPort) : ""
+        userField.placeholderString = d == .postgres ? NSUserName() : "root"
+        databaseField.placeholderString = d == .postgres ? "Defaults to the user name" : "Optional"
+        let selected = tlsPopup.indexOfSelectedItem >= 0 ? currentTLSModes[safe: tlsPopup.indexOfSelectedItem] : nil
+        currentTLSModes = d.tlsModes
+        tlsPopup.removeAllItems()
+        tlsPopup.addItems(withTitles: d.tlsModes.map { d.label(for: $0) })
+        if let selected, let i = d.tlsModes.firstIndex(of: selected) { tlsPopup.selectItem(at: i) }
+        passwordField.isEnabled = passwordModePopup.indexOfSelectedItem != 2
+        window?.title = (isNew ? "New \(d.displayName) Connection" : "Edit \(config.displayName)")
+        if let window, let content = window.contentView {
+            content.layoutSubtreeIfNeeded()
+            let size = content.fittingSize
+            var frame = window.frameRect(forContentRect: NSRect(origin: .zero, size: size))
+            frame.origin = window.frame.origin
+            frame.origin.y += window.frame.height - frame.height
+            window.setFrame(frame, display: true)
+        }
     }
+
+    private var currentTLSModes: [TLSMode] = []
 
     // MARK: - Model
 
     private func show(_ c: ConnectionConfig) {
+        driverPopup.selectItem(at: DriverKind.allCases.firstIndex(of: c.driver) ?? 0)
         nameField.stringValue = c.name
         pathField.stringValue = c.filePath
+        hostField.stringValue = c.host
+        portField.stringValue = c.port.map(String.init) ?? ""
+        userField.stringValue = c.user
+        databaseField.stringValue = c.database
+        passwordModePopup.selectItem(at: PasswordMode.allCases.firstIndex(of: c.passwordMode) ?? 0)
+        if c.passwordMode == .keychain, !isNew {
+            passwordField.stringValue = (try? secrets.password(for: c.id)) ?? ""
+        }
+        currentTLSModes = c.driver.tlsModes
+        tlsPopup.addItems(withTitles: currentTLSModes.map { c.driver.label(for: $0) })
+        tlsPopup.selectItem(at: currentTLSModes.firstIndex(of: c.tlsMode) ?? 0)
+        caField.stringValue = c.tlsCAPath
+        certField.stringValue = c.tlsCertPath
+        keyField.stringValue = c.tlsKeyPath
         readOnlyBox.state = c.readOnly ? .on : .off
         pageSizeField.stringValue = c.rowsPerPage > 0 ? String(c.rowsPerPage) : ""
+        layoutForDriver()
     }
 
     /// The config as the fields currently describe it.
     private func edited() -> ConnectionConfig {
+        func text(_ f: NSTextField) -> String { f.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) }
         var c = config
-        c.filePath = pathField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        c.name = nameField.stringValue.trimmingCharacters(in: .whitespaces)
-        if c.name.isEmpty { c.name = (c.filePath as NSString).lastPathComponent }
+        c.driver = driver
+        c.name = text(nameField)
+        c.filePath = text(pathField)
+        if !c.driver.isServer, c.name.isEmpty { c.name = (c.filePath as NSString).lastPathComponent }
+        c.host = text(hostField)
+        c.port = Int(text(portField))
+        c.user = text(userField)
+        c.database = text(databaseField)
+        c.passwordMode = PasswordMode.allCases[max(0, passwordModePopup.indexOfSelectedItem)]
+        c.tlsMode = currentTLSModes[safe: tlsPopup.indexOfSelectedItem] ?? c.driver.tlsModes.first ?? .disable
+        c.tlsCAPath = text(caField)
+        c.tlsCertPath = text(certField)
+        c.tlsKeyPath = text(keyField)
         c.readOnly = readOnlyBox.state == .on
         c.rowsPerPage = Int(pageSizeField.stringValue.filter(\.isNumber)) ?? 0
         return c
+    }
+
+    /// The password to log in with: nil when the connection uses none.
+    private var typedPassword: String? {
+        edited().passwordMode == .none ? nil : passwordField.stringValue
     }
 
     private func setStatus(_ text: String, ok: Bool) {
@@ -142,44 +254,65 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
     @discardableResult
     private func saveEdits() -> Bool {
         let c = edited()
-        guard !c.filePath.isEmpty else {
+        if !c.driver.isServer, c.filePath.isEmpty {
             setStatus("Choose a database file first.", ok: false)
             return false
         }
         do {
+            // Only a Keychain-mode password is kept; switching modes forgets it.
+            let keep = c.driver.isServer && c.passwordMode == .keychain && !passwordField.stringValue.isEmpty
+            try secrets.setPassword(keep ? passwordField.stringValue : nil, for: c.id)
             try store.save(c)
             config = c
             return true
         } catch {
-            setStatus("Couldn't save: \(error.localizedDescription)", ok: false)
+            setStatus("Couldn't save: \(error)", ok: false)
             return false
         }
     }
 
     // MARK: - Actions
 
+    @objc private func driverChanged(_ sender: Any?) {
+        status.stringValue = ""
+        layoutForDriver()
+    }
+
+    @objc private func passwordModeChanged(_ sender: Any?) {
+        passwordField.isEnabled = passwordModePopup.indexOfSelectedItem != 2
+    }
+
     @objc private func chooseFile(_ sender: Any?) {
+        choose(into: pathField, message: "Choose a SQLite database")
+    }
+
+    @objc private func chooseCA(_ sender: Any?) { choose(into: caField, message: "Choose the CA certificate (PEM)") }
+    @objc private func chooseCert(_ sender: Any?) { choose(into: certField, message: "Choose the client certificate (PEM)") }
+    @objc private func chooseKey(_ sender: Any?) { choose(into: keyField, message: "Choose the client key (PEM)") }
+
+    private func choose(into field: NSTextField, message: String) {
         guard let window else { return }
         let panel = NSOpenPanel()
-        panel.message = "Choose a SQLite database"
-        let current = edited().expandedFilePath
+        panel.message = message
+        let current = (field.stringValue as NSString).expandingTildeInPath
         if !current.isEmpty { panel.directoryURL = URL(filePath: current).deletingLastPathComponent() }
         panel.beginSheetModal(for: window) { [weak self] response in
-            guard response == .OK, let url = panel.url, let self else { return }
-            self.pathField.stringValue = (url.path as NSString).abbreviatingWithTildeInPath
-            self.status.stringValue = ""
+            guard response == .OK, let url = panel.url else { return }
+            field.stringValue = (url.path as NSString).abbreviatingWithTildeInPath
+            self?.status.stringValue = ""
         }
     }
 
     @objc private func testClicked(_ sender: Any?) {
         let c = edited()
+        let password = typedPassword
         testTask?.cancel()
         spinner.startAnimation(nil)
         status.stringValue = ""
         testTask = Task {
             defer { spinner.stopAnimation(nil) }
             do {
-                try await ConnectionFactory.test(c)
+                try await ConnectionFactory.test(c, password: password)
                 guard !Task.isCancelled else { return }
                 setStatus("Connection works.", ok: true)
             } catch {
@@ -195,11 +328,16 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
 
     /// Connect saves first, so a connection that worked is never lost.
     @objc private func connectClicked(_ sender: Any?) {
+        let password = typedPassword
         guard saveEdits() else { return }
-        onConnect?(config)
+        onConnect?(config, password)
     }
 
     @objc private func cancelClicked(_ sender: Any?) {
         close()
     }
+}
+
+extension Array {
+    subscript(safe i: Int) -> Element? { indices.contains(i) ? self[i] : nil }
 }

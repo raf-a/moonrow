@@ -8,6 +8,8 @@ import Darwin
 ///     TABULA_BENCH=events TABULA_SNAPSHOTS=build/snapshots Tabula build/sample.sqlite
 ///     TABULA_DEMO=users TABULA_SNAPSHOTS=build/snapshots Tabula /tmp/copy-of-sample.sqlite
 ///     TABULA_QUERY=events TABULA_STORE=/tmp/tabula-dev/connections.json TABULA_SNAPSHOTS=… Tabula build/sample.sqlite
+///     TABULA_CONNECT=postgres://postgres:tabula@127.0.0.1:55432/postgres TABULA_STORE=… TABULA_SNAPSHOTS=… Tabula
+///     TABULA_FORM=mysql TABULA_STORE=… TABULA_SNAPSHOTS=… Tabula
 ///
 /// The bench opens the table in the first workspace with every row in one page, scrolls it like
 /// a fast trackpad, jumps to far-apart rows, prints timings and quits. The demo drives the grid's
@@ -23,6 +25,31 @@ enum DevHarness {
         setvbuf(stdout, nil, _IOLBF, 0)
         let env = ProcessInfo.processInfo.environment
         let snapshots = env["TABULA_SNAPSHOTS"].map { URL(filePath: $0, directoryHint: .isDirectory) }
+        // `TABULA_CONNECT=postgres://user:pw@host:port/db` opens a server workspace without saving
+        // the connection; `TABULA_FORM=postgres` opens a new connection form for that driver.
+        if let url = env["TABULA_CONNECT"] {
+            guard env["TABULA_STORE"] != nil, let (config, password) = ConnectionConfig.parse(url: url) else {
+                print("TABULA_CONNECT needs TABULA_STORE and a postgres:// or mysql:// URL")
+                NSApp.terminate(nil)
+                return
+            }
+            app.connect(config, password: .some(password), presentingErrorsIn: nil)
+            // `TABULA_OPEN=schema.table` switches schema, opens the table and snapshots it.
+            if let target = env["TABULA_OPEN"], let snapshots {
+                Task {
+                    do {
+                        try await openAndSnapshot(app, target, snapshots: snapshots)
+                    } catch {
+                        print("open failed: \(error)")
+                    }
+                    NSApp.terminate(nil)
+                }
+                return
+            }
+        }
+        if let driver = env["TABULA_FORM"].flatMap(DriverKind.init(rawValue:)) {
+            app.editConnection(ConnectionConfig(driver: driver), isNew: true)
+        }
         if let table = env["TABULA_QUERY"] {
             Task {
                 do {
@@ -60,10 +87,24 @@ enum DevHarness {
         }
     }
 
+    private static func openAndSnapshot(_ app: AppDelegate, _ target: String, snapshots: URL) async throws {
+        try FileManager.default.createDirectory(at: snapshots, withIntermediateDirectories: true)
+        let parts = target.split(separator: ".", maxSplits: 1).map(String.init)
+        let table = parts.last!
+        let workspace = try await waitFor("workspace") { app.workspaces.first }
+        if parts.count == 2 {
+            _ = try await waitFor("schema \(parts[0])") { workspace.sidebar.switchSchema(to: parts[0]) ? true : nil }
+        }
+        _ = try await waitFor("sidebar item \(table)") { workspace.sidebar.select(named: table) ? true : nil }
+        try await Task.sleep(for: .seconds(1.5))
+        guard let window = workspace.window else { return }
+        snapshot(window, to: snapshots.appending(path: "\(target).png"))
+    }
+
     /// With only `TABULA_SNAPSHOTS` set: renders every visible window once launched, then quits.
     private static func snapshotWindowsAndQuit(to dir: URL) {
         Task {
-            try? await Task.sleep(for: .seconds(1))
+            try? await Task.sleep(for: .seconds(2))
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             for (i, window) in NSApp.windows.filter(\.isVisible).enumerated() {
                 let name = window.title.isEmpty ? "window" : window.title

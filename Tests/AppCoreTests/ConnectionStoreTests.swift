@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import WireSupport
 @testable import AppCore
 
 private func tempFile() -> URL {
@@ -93,5 +94,23 @@ private func tempFile() -> URL {
         #expect(a.id == b.id)
         #expect(a.filePath == "/tmp/app.db")
         #expect(ConnectionConfig.sqliteFile(URL(filePath: "/tmp/other.db")).id != a.id)
+    }
+}
+
+@Suite struct ConnectionURLTests {
+    @Test func parsesServerURLs() throws {
+        let (pg, pw) = try #require(ConnectionConfig.parse(url: "postgresql://app:s%40cret@db.local:6543/shop?sslmode=verify-full"))
+        #expect(pg.driver == .postgres && pg.host == "db.local" && pg.port == 6543)
+        #expect(pg.user == "app" && pw == "s@cret" && pg.database == "shop" && pg.tlsMode == .verifyFull)
+        let (my, none) = try #require(ConnectionConfig.parse(url: "mysql://root@127.0.0.1/"))
+        #expect(my.driver == .mysql && my.database.isEmpty && my.effectivePort == 3306 && none == nil)
+        #expect(my.passwordMode == .none && my.tlsMode == .prefer)
+        #expect(ConnectionConfig.parse(url: "redis://x").map { _ in true } == nil)
+    }
+
+    @Test func olderFilesLoadWithServerDefaults() throws {
+        let json = #"{"id":"6F9619FF-8B86-D011-B42D-00C04FC964FF","driver":"sqlite","filePath":"/tmp/a.db"}"#
+        let c = try JSONDecoder().decode(ConnectionConfig.self, from: Data(json.utf8))
+        #expect(c.host.isEmpty && c.port == nil && c.passwordMode == .keychain && c.tlsMode == .disable)
     }
 }

@@ -89,13 +89,17 @@ public struct TableBrowser: Sendable {
 
     /// The SELECT for part of the current page. `offset` is relative to the page.
     public func select(_ query: GridQuery, offset: Int, limit: Int) -> SQLFragment {
+        var sort = query.sort
+        // Unsorted pages stay put across OFFSETs only where the scan order is stable; elsewhere
+        // the primary key orders them (the header still shows no sort).
+        if sort.isEmpty, dialect.pagesNeedKeyOrder { sort = columns.primaryKey.map { SortKey($0) } }
         let request = BrowseRequest(
-            table, filter: query.filter, sort: query.sort, limit: limit, offset: query.page.offset + offset)
+            table, filter: query.filter, sort: sort, limit: limit, offset: query.page.offset + offset)
         return dialect.select(request, allColumns: columns.map(\.name))
     }
 
     /// Fetches blocks of the current page for `RowCache`. Without a sort, rows come in the
-    /// database's natural order; SQLite's table scans are stable across OFFSETs.
+    /// database's natural order where that is stable (SQLite, InnoDB).
     public func fetcher(_ query: GridQuery) -> RowCache.Fetch {
         let browser = self
         return { offset, limit in

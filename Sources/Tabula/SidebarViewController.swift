@@ -1,10 +1,11 @@
 import AppKit
 import DBKit
 
-/// The connection's tables and views, grouped by kind, with a filter field on top.
+/// The connection's tables, views and functions, grouped by kind, with a filter field on top
+/// and, for servers with several schemas or databases, a switcher at the bottom.
 @MainActor
 final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NSOutlineViewDelegate,
-    NSSearchFieldDelegate
+    NSSearchFieldDelegate, NSMenuDelegate
 {
     var onOpen: ((DatabaseObject) -> Void)?
     var onOpenInNewTab: ((DatabaseObject) -> Void)?
@@ -17,6 +18,12 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     private let outline = NSOutlineView()
     private let filter = NSSearchField()
     private let message = NSTextField(wrappingLabelWithString: "")
+    private let schemaPopup = NSPopUpButton()
+    private let schemaBar = NSStackView()
+    /// The schema (Postgres) or database (MySQL) whose items are listed; nil for SQLite, or a
+    /// MySQL connection without a default database.
+    private(set) var schema: String?
+    private var schemasLoaded = false
     private var objects: [DatabaseObject] = []
     private var groups: [Group] = []
     private var loadTask: Task<Void, Never>?
@@ -63,6 +70,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         outline.doubleAction = #selector(doubleClicked(_:))
         let menu = NSMenu()
         menu.addItem(withTitle: "Open in New Tab", action: #selector(openInNewTab(_:)), keyEquivalent: "").target = self
+        menu.delegate = self
         menu.addItem(withTitle: "Copy Name", action: #selector(copyName(_:)), keyEquivalent: "").target = self
         outline.menu = menu
 
@@ -75,8 +83,18 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         message.alignment = .center
         message.isHidden = true
 
+        schemaPopup.controlSize = .small
+        schemaPopup.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        schemaPopup.target = self
+        schemaPopup.action = #selector(schemaChosen(_:))
+        schemaPopup.toolTip = "Schema"
+        schemaBar.addArrangedSubview(schemaPopup)
+        schemaBar.edgeInsets = NSEdgeInsets(top: 4, left: 8, bottom: 6, right: 8)
+        schemaBar.isHidden = true
+        schemaPopup.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
         let root = NSView(frame: NSRect(x: 0, y: 0, width: 250, height: 600))
-        for v in [filter, scroll, message] {
+        for v in [filter, scroll, message, schemaBar] {
             v.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview(v)
         }
@@ -87,7 +105,10 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             scroll.topAnchor.constraint(equalTo: filter.bottomAnchor, constant: 6),
             scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor),
+            scroll.bottomAnchor.constraint(equalTo: schemaBar.topAnchor),
+            schemaBar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            schemaBar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            schemaBar.bottomAnchor.constraint(equalTo: root.bottomAnchor),
             message.centerYAnchor.constraint(equalTo: scroll.centerYAnchor),
             message.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
             message.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
@@ -134,12 +155,47 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     }
 
     @objc private func doubleClicked(_ sender: Any?) {
-        guard outline.clickedRow >= 0, let object = (outline.item(atRow: outline.clickedRow) as? Item)?.object else { return }
+        guard outline.clickedRow >= 0, let object = (outline.item(atRow: outline.clickedRow) as? Item)?.object,
+              Self.opensInGrid(object) else { return }
         onOpen?(object)
     }
 
+    /// Tables and views open in a grid; functions are listed only (their editor comes later).
+    static func opensInGrid(_ object: DatabaseObject) -> Bool {
+        [.table, .view, .materializedView].contains(object.kind)
+    }
+
+    /// Lists another schema, as if picked from the switcher. False if there is no such schema.
+    @discardableResult
+    func switchSchema(to name: String) -> Bool {
+        guard schemaPopup.item(withTitle: name) != nil else { return false }
+        schemaPopup.selectItem(withTitle: name)
+        schemaChosen(nil)
+        return true
+    }
+
+    @objc private func schemaChosen(_ sender: Any?) {
+        guard let chosen = schemaPopup.titleOfSelectedItem, chosen != schema else { return }
+        schema = chosen
+        Task {
+            // Unqualified names in query tabs follow the switch too.
+            if let sql = connection.dialect.useSchema(chosen) {
+                do {
+                    _ = try await connection.execute(sql)
+                } catch {
+                    showMessage("Couldn't switch to \(chosen):\n\(error)")
+                }
+            }
+            reload()
+        }
+    }
+
     @objc private func openInNewTab(_ sender: Any?) {
-        if let object = targetObject { onOpenInNewTab?(object) }
+        if let object = targetObject, Self.opensInGrid(object) { onOpenInNewTab?(object) }
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.items.first?.isEnabled = targetObject.map(Self.opensInGrid) ?? false
     }
 
     @objc private func copyName(_ sender: Any?) {
@@ -156,7 +212,18 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         loadTask?.cancel()
         loadTask = Task {
             do {
-                let objects = try await connection.objects(schema: nil)
+                if !schemasLoaded {
+                    try await loadSchemas()
+                }
+                // MySQL without a default database: nothing to list until one is chosen.
+                if schema == nil, !schemaBar.isHidden {
+                    self.objects = []
+                    rebuild()
+                    showMessage("Choose a database below.")
+                    onObjectsLoaded?([])
+                    return
+                }
+                let objects = try await connection.objects(schema: schema)
                 guard !Task.isCancelled else { return }
                 self.objects = objects
                 rebuild()
@@ -170,12 +237,28 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         }
     }
 
+    private func loadSchemas() async throws {
+        let schemas = try await connection.schemas()
+        let current = try await connection.currentSchema()
+        guard !Task.isCancelled else { return }
+        schemasLoaded = true
+        schema = current
+        schemaBar.isHidden = schemas.isEmpty
+        schemaPopup.removeAllItems()
+        schemaPopup.addItems(withTitles: schemas)
+        // The current schema can be one the list leaves out (a system one).
+        if let current, !schemas.contains(current) { schemaPopup.addItem(withTitle: current) }
+        if let current { schemaPopup.selectItem(withTitle: current) } else { schemaPopup.select(nil) }
+    }
+
     private func rebuild() {
         let selected = (outline.item(atRow: outline.selectedRow) as? Item)?.object
         let query = filter.stringValue.trimmingCharacters(in: .whitespaces)
         let matching = query.isEmpty ? objects : objects.filter { $0.ref.name.localizedCaseInsensitiveContains(query) }
 
-        let sections: [(ObjectKind, String)] = [(.table, "Tables"), (.view, "Views"), (.materializedView, "Materialized Views")]
+        let sections: [(ObjectKind, String)] = [
+            (.table, "Tables"), (.view, "Views"), (.materializedView, "Materialized Views"), (.function, "Functions"),
+        ]
         groups = sections.compactMap { kind, title in
             let items = matching.filter { $0.kind == kind }.map(Item.init)
             return items.isEmpty ? nil : Group(title: title, items: items)
@@ -189,7 +272,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             isRevealing = false
         }
         if objects.isEmpty {
-            showMessage("This database has no tables yet.")
+            showMessage(schema.map { "“\($0)” has no tables yet." } ?? "This database has no tables yet.")
         } else if groups.isEmpty {
             showMessage("Nothing matches “\(query)”.")
         } else {
@@ -291,15 +374,20 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             return c
         }()
         cell.textField?.stringValue = item.object.ref.name
-        let symbol = item.object.kind == .table ? "tablecells" : "eye"
+        let (symbol, tint): (String, NSColor) = switch item.object.kind {
+        case .table: ("tablecells", .systemBlue)
+        case .function, .sequence: ("function", .systemOrange)
+        default: ("eye", .systemPurple)
+        }
         cell.imageView?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: item.object.kind.rawValue)
-        cell.imageView?.contentTintColor = item.object.kind == .table ? .systemBlue : .systemPurple
+        cell.imageView?.contentTintColor = tint
         return cell
     }
 
     /// Selecting an item opens it, so arrow keys browse tables one after another.
     func outlineViewSelectionDidChange(_ notification: Notification) {
-        guard !isRevealing, let item = outline.item(atRow: outline.selectedRow) as? Item else { return }
+        guard !isRevealing, let item = outline.item(atRow: outline.selectedRow) as? Item,
+              Self.opensInGrid(item.object) else { return }
         onOpen?(item.object)
     }
 }

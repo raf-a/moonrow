@@ -11,6 +11,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TabulaActions {
 
     /// History and saved queries live next to the connections file, so `TABULA_STORE` moves them too.
     var dataRoot: URL { store.fileURL.deletingLastPathComponent() }
+    /// Passwords: the login Keychain, or with `TABULA_STORE` a plain file next to it, so
+    /// development runs never touch real credentials.
+    lazy var secrets: any SecretStore = ProcessInfo.processInfo.environment["TABULA_STORE"] == nil
+        ? KeychainSecretStore() : FileSecretStore(url: dataRoot.appending(path: "secrets.json"))
     /// Shared by every workspace open on the same connection.
     private var histories: [UUID: QueryHistory] = [:]
     private var savedQueries: [UUID: SavedQueries] = [:]
@@ -89,9 +93,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TabulaActions {
             open.showWindow(nil)
             return
         }
-        let form = ConnectionFormWindowController(config: config, isNew: isNew, store: store)
-        form.onConnect = { [weak self, weak form] config in
-            self?.connect(config, presentingErrorsIn: form?.window)
+        let form = ConnectionFormWindowController(config: config, isNew: isNew, store: store, secrets: secrets)
+        form.onConnect = { [weak self, weak form] config, password in
+            self?.connect(config, password: .some(password), presentingErrorsIn: form?.window)
         }
         form.onClose = { [weak self, weak form] in
             self?.forms.removeAll { $0 === form }
@@ -105,15 +109,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TabulaActions {
     }
 
     /// Opens a workspace window for the connection. Errors appear as a sheet on `window`,
-    /// or as an alert when there is none.
-    func connect(_ config: ConnectionConfig, presentingErrorsIn window: NSWindow?) {
+    /// or as an alert when there is none. `password` is what the form had typed; without it the
+    /// password comes from the connection's password mode.
+    func connect(_ config: ConnectionConfig, password: String?? = nil, presentingErrorsIn window: NSWindow?) {
         Task {
             do {
-                openWorkspace(config, try await ConnectionFactory.open(config))
+                let login: String?
+                if let password {
+                    login = password
+                } else {
+                    switch config.passwordMode {
+                    case .keychain: login = config.driver.isServer ? try secrets.password(for: config.id) : nil
+                    case .none: login = nil
+                    case .ask:
+                        guard let typed = await askPassword(for: config, in: window) else { return }
+                        login = typed
+                    }
+                }
+                openWorkspace(config, try await ConnectionFactory.open(config, password: login))
             } catch {
                 present(error, title: "Couldn't connect to \(config.displayName)", in: window)
             }
         }
+    }
+
+    /// Nil when cancelled.
+    private func askPassword(for config: ConnectionConfig, in window: NSWindow?) async -> String? {
+        let alert = NSAlert()
+        alert.messageText = "Password for \(config.displayName)"
+        alert.informativeText = config.summary
+        alert.addButton(withTitle: "Connect")
+        alert.addButton(withTitle: "Cancel")
+        let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 22))
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        let response: NSApplication.ModalResponse
+        if let window {
+            response = await withCheckedContinuation { c in alert.beginSheetModal(for: window) { c.resume(returning: $0) } }
+        } else {
+            response = alert.runModal()
+        }
+        return response == .alertFirstButtonReturn ? field.stringValue : nil
+    }
+
+    func deleteConnection(_ id: UUID) throws {
+        try store.delete(id: id)
+        try? secrets.setPassword(nil, for: id)
+    }
+
+    func duplicateConnection(_ id: UUID) throws {
+        guard let copy = try store.duplicate(id: id) else { return }
+        if let password = try? secrets.password(for: id) { try? secrets.setPassword(password, for: copy.id) }
     }
 
     private func openWorkspace(_ config: ConnectionConfig, _ connection: any DatabaseConnection) {

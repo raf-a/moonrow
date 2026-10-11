@@ -13,8 +13,17 @@ public protocol DatabaseConnection: Sendable {
         _ statements: [SQLStatement], verify: @Sendable (_ index: Int, _ rowsAffected: Int) throws -> Void
     ) async throws -> [Int]
 
+    /// Schemas (Postgres) or databases (MySQL) the sidebar can switch between, without the
+    /// system ones. Empty when there is a single namespace (SQLite).
+    func schemas() async throws -> [String]
+    /// Where unqualified names resolve: `current_schema()`, `DATABASE()`. Nil if nowhere.
+    func currentSchema() async throws -> String?
+    /// Tables, views and routines of a schema; nil means the current one.
     func objects(schema: String?) async throws -> [DatabaseObject]
     func columns(of table: TableRef) async throws -> [ColumnInfo]
+    func indexes(of table: TableRef) async throws -> [IndexInfo]
+    func foreignKeys(of table: TableRef) async throws -> [ForeignKeyInfo]
+    func triggers(of table: TableRef) async throws -> [TriggerInfo]
 
     func close() async
 }
@@ -31,6 +40,8 @@ extension DatabaseConnection {
             result.rows += batch.rows
             result.rowsAffected = batch.rowsAffected ?? result.rowsAffected
         }
+        // A cancelled consumer sees the stream end early; the result is incomplete, not empty.
+        try Task.checkCancellation()
         return result
     }
 

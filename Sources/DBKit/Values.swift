@@ -80,6 +80,70 @@ extension Array where Element == ColumnInfo {
     }
 }
 
+public struct IndexInfo: Sendable, Hashable {
+    public var name: String
+    /// Key columns in order. An expression index shows its expression.
+    public var columns: [String]
+    public var isUnique: Bool
+    public var isPrimary: Bool
+    /// Access method (`btree`, `hash`, `BTREE`, …) when the database reports one.
+    public var method: String?
+    /// The WHERE clause of a partial index.
+    public var predicate: String?
+
+    public init(
+        name: String, columns: [String], isUnique: Bool = false, isPrimary: Bool = false,
+        method: String? = nil, predicate: String? = nil
+    ) {
+        self.name = name
+        self.columns = columns
+        self.isUnique = isUnique
+        self.isPrimary = isPrimary
+        self.method = method
+        self.predicate = predicate
+    }
+}
+
+public struct ForeignKeyInfo: Sendable, Hashable {
+    /// Empty when the database doesn't name it (SQLite).
+    public var name: String
+    public var columns: [String]
+    public var referencedTable: TableRef
+    public var referencedColumns: [String]
+    /// Referential actions as SQL words: `NO ACTION`, `CASCADE`, `SET NULL`, …
+    public var onUpdate: String
+    public var onDelete: String
+
+    public init(
+        name: String, columns: [String], referencedTable: TableRef, referencedColumns: [String],
+        onUpdate: String = "NO ACTION", onDelete: String = "NO ACTION"
+    ) {
+        self.name = name
+        self.columns = columns
+        self.referencedTable = referencedTable
+        self.referencedColumns = referencedColumns
+        self.onUpdate = onUpdate
+        self.onDelete = onDelete
+    }
+}
+
+public struct TriggerInfo: Sendable, Hashable {
+    public var name: String
+    /// `BEFORE`, `AFTER` or `INSTEAD OF`.
+    public var timing: String
+    /// `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`.
+    public var events: [String]
+    /// The full definition, or the action body where that's all the database keeps (MySQL).
+    public var definition: String
+
+    public init(name: String, timing: String, events: [String], definition: String) {
+        self.name = name
+        self.timing = timing
+        self.events = events
+        self.definition = definition
+    }
+}
+
 /// A column of a result set (may not map to a table column).
 public struct ResultColumn: Sendable, Hashable {
     public var name: String
@@ -121,12 +185,15 @@ public struct QueryResult: Sendable {
 public struct DatabaseError: Error, Sendable, CustomStringConvertible {
     public var message: String
     public var code: Int?
+    /// SQLSTATE, when the server reports one (Postgres, MySQL).
+    public var state: String?
     /// The statement that failed, when known.
     public var sql: String?
 
-    public init(_ message: String, code: Int? = nil, sql: String? = nil) {
+    public init(_ message: String, code: Int? = nil, state: String? = nil, sql: String? = nil) {
         self.message = message
         self.code = code
+        self.state = state
         self.sql = sql
     }
 

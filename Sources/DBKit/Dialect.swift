@@ -31,6 +31,14 @@ public protocol Dialect: Sendable {
     var beginTransaction: String { get }
     var commitTransaction: String { get }
     var rollbackTransaction: String { get }
+
+    /// Whether an unsorted page needs an ORDER BY (the primary key) to stay stable across
+    /// OFFSETs. SQLite's and InnoDB's scans are; Postgres's may not be (synchronized scans).
+    var pagesNeedKeyOrder: Bool { get }
+
+    /// Makes `schema` where unqualified names resolve for the rest of the session; nil where
+    /// the database has a single namespace.
+    func useSchema(_ schema: String) -> String?
 }
 
 extension Dialect {
@@ -71,6 +79,8 @@ extension Dialect {
     public var beginTransaction: String { "BEGIN" }
     public var commitTransaction: String { "COMMIT" }
     public var rollbackTransaction: String { "ROLLBACK" }
+    public var pagesNeedKeyOrder: Bool { false }
+    public func useSchema(_ schema: String) -> String? { nil }
 
     /// LIKE pattern with `\` as the escape character.
     public func likePattern(_ kind: PatternKind, _ value: String) -> String {
