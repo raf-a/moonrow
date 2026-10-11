@@ -9,6 +9,7 @@ import Darwin
 ///     TABULA_DEMO=users TABULA_SNAPSHOTS=build/snapshots Tabula /tmp/copy-of-sample.sqlite
 ///     TABULA_QUERY=events TABULA_STORE=/tmp/tabula-dev/connections.json TABULA_SNAPSHOTS=… Tabula build/sample.sqlite
 ///     TABULA_CONNECT=postgres://postgres:tabula@127.0.0.1:55432/postgres TABULA_STORE=… TABULA_SNAPSHOTS=… Tabula
+///     TABULA_CONNECT=postgres://…@tabula-test-pg:5432/postgres TABULA_SSH=ssh://tabula:tabula@127.0.0.1:52222 TABULA_STORE=… Tabula
 ///     TABULA_FORM=mysql TABULA_STORE=… TABULA_SNAPSHOTS=… Tabula
 ///
 /// The bench opens the table in the first workspace with every row in one page, scrolls it like
@@ -28,12 +29,23 @@ enum DevHarness {
         // `TABULA_CONNECT=postgres://user:pw@host:port/db` opens a server workspace without saving
         // the connection; `TABULA_FORM=postgres` opens a new connection form for that driver.
         if let url = env["TABULA_CONNECT"] {
-            guard env["TABULA_STORE"] != nil, let (config, password) = ConnectionConfig.parse(url: url) else {
+            guard env["TABULA_STORE"] != nil, let (parsed, password) = ConnectionConfig.parse(url: url) else {
                 print("TABULA_CONNECT needs TABULA_STORE and a postgres:// or mysql:// URL")
                 NSApp.terminate(nil)
                 return
             }
-            app.connect(config, password: .some(password), presentingErrorsIn: nil)
+            var config = parsed
+            // `TABULA_SSH=ssh://user:pw@host:port` goes through that SSH server, trusting its key.
+            var sshPassword: String?
+            if let ssh = env["TABULA_SSH"] {
+                do {
+                    sshPassword = try config.applySSH(url: ssh)
+                    app.autoTrustHostKeys = true
+                } catch {
+                    print(error)
+                }
+            }
+            app.connect(config, password: .some(password), sshPassword: sshPassword, presentingErrorsIn: nil)
             // `TABULA_OPEN=schema.table` switches schema, opens the table and snapshots it.
             if let target = env["TABULA_OPEN"], let snapshots {
                 Task {
@@ -48,7 +60,9 @@ enum DevHarness {
             }
         }
         if let driver = env["TABULA_FORM"].flatMap(DriverKind.init(rawValue:)) {
-            app.editConnection(ConnectionConfig(driver: driver), isNew: true)
+            var config = ConnectionConfig(driver: driver)
+            if let ssh = env["TABULA_SSH"] { _ = try? config.applySSH(url: ssh) }
+            app.editConnection(config, isNew: true)
         }
         if let table = env["TABULA_QUERY"] {
             Task {

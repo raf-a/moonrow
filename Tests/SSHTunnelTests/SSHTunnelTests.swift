@@ -34,7 +34,7 @@ import WireSupport
         let c = SSHTunnelConfiguration(
             host: "-bastion", port: 2222, user: "deploy", identityFile: "/k/id",
             knownHostsFiles: ["/Users/me/Library/Application Support/Tabula/known_hosts", "/Users/me/.ssh/known_hosts"],
-            configFile: "none", useAgent: false, askpassPath: "/x")
+            configFile: "none", useAgent: false, helperPath: "/x")
         let args = c.masterArguments(controlPath: "/tmp/t/m")
         #expect(args.prefix(9) == ["-F", "none", "-M", "-S", "/tmp/t/m", "-N", "-T", "-i", "/k/id"])
         #expect(args.contains(#"UserKnownHostsFile="/Users/me/Library/Application Support/Tabula/known_hosts" /Users/me/.ssh/known_hosts"#))
@@ -44,7 +44,7 @@ import WireSupport
         // A host that looks like an option can't be taken for one.
         #expect(args.suffix(6) == ["-p", "2222", "-l", "deploy", "--", "-bastion"])
 
-        let plain = SSHTunnelConfiguration(host: "db", askpassPath: "/x").masterArguments(controlPath: "/m")
+        let plain = SSHTunnelConfiguration(host: "db", helperPath: "/x").masterArguments(controlPath: "/m")
         #expect(!plain.contains("-F") && !plain.contains("-p") && !plain.contains("-l") && !plain.contains("-i"))
         #expect(!plain.contains { $0.hasPrefix("UserKnownHostsFile") || $0.hasPrefix("IdentityAgent") })
     }
@@ -52,6 +52,32 @@ import WireSupport
     @Test func streamArguments() {
         #expect(SSHTunnelConfiguration.streamArguments(controlPath: "/m", host: "::1", port: 5432).contains("[::1]:5432"))
         #expect(SSHTunnelConfiguration.streamArguments(controlPath: "/m", host: "db", port: 3306).contains("db:3306"))
+    }
+
+    /// The guard stops its child when the app's end of the lifeline closes (the app quit or
+    /// crashed), and passes SIGTERM on.
+    @Test func guardStopsItsChildWhenTheAppGoesAway() async throws {
+        for viaSignal in [false, true] {
+            let guardProcess = Process()
+            guardProcess.executableURL = URL(filePath: SSHTestServer.helperPath)
+            guardProcess.arguments = ["--guard", "/bin/sleep", "60"]
+            let lifeline = Pipe()
+            guardProcess.standardInput = lifeline
+            try guardProcess.run()
+            try await Task.sleep(for: .milliseconds(200))
+            let sleeper = try SSHTestServer.child(of: guardProcess.processIdentifier)
+            if viaSignal {
+                guardProcess.terminate()
+            } else {
+                try lifeline.fileHandleForWriting.close()
+            }
+            let deadline = ContinuousClock.now + .seconds(4)
+            while guardProcess.isRunning, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            #expect(!guardProcess.isRunning)
+            #expect(kill(sleeper, 0) != 0)
+        }
     }
 
     @Test func cleansErrorOutput() {
@@ -141,13 +167,13 @@ enum SSHTestServer {
     static var isAvailable: Bool { url != nil && pg != nil }
 
     /// The helper `swift test` builds next to the test bundle.
-    static var askpassPath: String {
+    static var helperPath: String {
         for bundle in Bundle.allBundles where bundle.bundlePath.hasSuffix(".xctest") {
-            let path = URL(filePath: bundle.bundlePath).deletingLastPathComponent().appending(path: "tabula-askpass").path
+            let path = URL(filePath: bundle.bundlePath).deletingLastPathComponent().appending(path: "tabula-ssh-helper").path
             if FileManager.default.isExecutableFile(atPath: path) { return path }
         }
         let root = URL(filePath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        return root.appending(path: ".build/debug/tabula-askpass").path
+        return root.appending(path: ".build/debug/tabula-ssh-helper").path
     }
 
     /// A copy of a test key with the permissions ssh insists on.
@@ -167,13 +193,26 @@ enum SSHTestServer {
             host: url!.host!, port: url!.port, user: url!.user!, identityFile: identityFile,
             password: password, keyPassphrase: keyPassphrase,
             knownHostsFiles: [directory.appending(path: "known_hosts").path],
-            configFile: "none", useAgent: false, askpassPath: askpassPath, connectTimeout: 5)
+            configFile: "none", useAgent: false, helperPath: helperPath, connectTimeout: 5)
     }
 
     static func postgres(through tunnel: SSHTunnel, tls: TLSMode = .disable) -> PostgresConfiguration {
         PostgresConfiguration(
             endpoint: tunnel.endpoint(host: "tabula-test-pg", port: 5432), user: pg!.user!, password: pg!.password,
             database: String(pg!.path.dropFirst()), tls: TLSSettings(mode: tls), connectTimeout: 5)
+    }
+
+    /// The ssh a guard process runs (killing it simulates a dropped connection).
+    static func child(of pid: pid_t) throws -> pid_t {
+        let pgrep = Process()
+        pgrep.executableURL = URL(filePath: "/usr/bin/pgrep")
+        pgrep.arguments = ["-P", String(pid)]
+        let out = Pipe()
+        pgrep.standardOutput = out
+        try pgrep.run()
+        let text = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        pgrep.waitUntilExit()
+        return try #require(pid_t(text.split(separator: "\n").first ?? ""))
     }
 
     /// ssh processes on this machine using one of our control sockets.
@@ -282,7 +321,7 @@ struct SSHTunnelServerTests {
 
         // A dropped connection logs in again with the password that worked, without asking.
         let pid = try #require(await tunnel.masterProcessID)
-        kill(pid, SIGKILL)
+        kill(try SSHTestServer.child(of: pid), SIGKILL)
         try await Task.sleep(for: .milliseconds(200))
         try await tunnel.connect()
         #expect(log.seen.filter { if case .password = $0.prompt { true } else { false } }.count == 1)
@@ -361,7 +400,7 @@ struct SSHTunnelServerTests {
         let db = try await PostgresConnection.connect(SSHTestServer.postgres(through: tunnel))
         _ = try await db.execute("SELECT 1")
         let pid = try #require(await tunnel.masterProcessID)
-        kill(pid, SIGKILL)
+        kill(try SSHTestServer.child(of: pid), SIGKILL)
         // The stream ends with the master; the session notices before the next statement.
         try await Task.sleep(for: .milliseconds(500))
         let result = try await db.execute("SELECT 7")
@@ -409,7 +448,7 @@ struct SSHTunnelServerTests {
         let login = SSHLogin(
             password: ssh.password, responder: PromptLog.trustingHostKeys().responder,
             knownHostsFiles: [directory.appending(path: "known_hosts").path], configFile: "none", useAgent: false,
-            askpassPath: SSHTestServer.askpassPath)
+            helperPath: SSHTestServer.helperPath)
         try await ConnectionFactory.test(config, password: pg.password, ssh: login)
         // Released with the connection; give the processes a moment to exit.
         let deadline = ContinuousClock.now + .seconds(4)

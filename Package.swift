@@ -13,7 +13,7 @@ let package = Package(
         .library(name: "SSHTunnel", targets: ["SSHTunnel"]),
         .library(name: "AppCore", targets: ["AppCore"]),
         .executable(name: "Tabula", targets: ["Tabula"]),
-        .executable(name: "tabula-askpass", targets: ["tabula-askpass"]),
+        .executable(name: "tabula-ssh-helper", targets: ["tabula-ssh-helper"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.104.0"),
@@ -50,7 +50,7 @@ let package = Package(
         ),
         // SSH_ASKPASS helper ssh runs to ask for passwords; relays prompts to the app. Bundled
         // next to the app's executable.
-        .executableTarget(name: "tabula-askpass"),
+        .executableTarget(name: "tabula-ssh-helper"),
         // App logic without AppKit, so `swift test` covers it.
         .target(name: "AppCore", dependencies: ["SQLScript", "DBKit", "WireSupport", "SSHTunnel", "DriverSQLite", "DriverPostgres", "DriverMySQL"]),
         // The AppKit app. `scripts/build-app.sh` wraps it into Tabula.app.
@@ -64,7 +64,7 @@ let package = Package(
         // Depends on the helper so `swift test` builds it next to the test bundle.
         .testTarget(
             name: "SSHTunnelTests",
-            dependencies: ["SSHTunnel", "AppCore", "WireSupport", "DriverPostgres", "DriverMySQL", "tabula-askpass"],
+            dependencies: ["SSHTunnel", "AppCore", "WireSupport", "DriverPostgres", "DriverMySQL", "tabula-ssh-helper"],
             exclude: ["Fixtures"]
         ),
     ]

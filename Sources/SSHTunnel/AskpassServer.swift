@@ -2,7 +2,7 @@ import Foundation
 import NIOCore
 import NIOPosix
 
-/// The app's end of SSH_ASKPASS: a Unix socket the `tabula-askpass` helper connects to with
+/// The app's end of SSH_ASKPASS: a Unix socket `tabula-ssh-helper` connects to with
 /// one JSON line `{"token", "prompt"}`; the reply is one line `{"answer"}`, or `{}` to cancel.
 /// The token (passed to ssh in the environment, along with the socket path) keeps other
 /// processes from asking.

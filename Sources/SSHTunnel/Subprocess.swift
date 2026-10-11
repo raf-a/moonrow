@@ -15,11 +15,29 @@ final class Subprocess: @unchecked Sendable {
     private var errorWaiters: [CheckedContinuation<Void, Never>] = []
 
     private static let errorOutputLimit = 64 * 1024
+    /// Our end of the child's stdin pipe when it has a lifeline; closing it tells the child we're gone.
+    private let lifeline: Int32?
 
-    /// `stdio` becomes the child's stdin and stdout; nil gives it /dev/null.
-    init(_ path: String, _ arguments: [String], environment: [String: String], stdio: Int32? = nil) throws {
+    /// `stdio` becomes the child's stdin and stdout; nil gives it /dev/null. With `lifeline`, its
+    /// stdin is instead a pipe that reaches EOF when our process ends, however it ends
+    /// (`tabula-ssh-helper --guard` stops ssh then).
+    init(
+        _ path: String, _ arguments: [String], environment: [String: String], stdio: Int32? = nil,
+        lifeline: Bool = false
+    ) throws {
         var errPipe: [Int32] = [-1, -1]
         guard pipe(&errPipe) == 0 else { throw SSHTunnelError("Can't start \(path): \(String(cString: strerror(errno)))") }
+        // Our ends must not leak into other children, or EOF would never come.
+        _ = fcntl(errPipe[0], F_SETFD, FD_CLOEXEC)
+        var inPipe: [Int32] = [-1, -1]
+        if lifeline {
+            guard pipe(&inPipe) == 0 else {
+                close(errPipe[0])
+                close(errPipe[1])
+                throw SSHTunnelError("Can't start \(path): \(String(cString: strerror(errno)))")
+            }
+            _ = fcntl(inPipe[1], F_SETFD, FD_CLOEXEC)
+        }
 
         var actions: posix_spawn_file_actions_t?
         posix_spawn_file_actions_init(&actions)
@@ -27,6 +45,9 @@ final class Subprocess: @unchecked Sendable {
         if let stdio {
             posix_spawn_file_actions_adddup2(&actions, stdio, 0)
             posix_spawn_file_actions_adddup2(&actions, stdio, 1)
+        } else if lifeline {
+            posix_spawn_file_actions_adddup2(&actions, inPipe[0], 0)
+            posix_spawn_file_actions_addopen(&actions, 1, "/dev/null", O_WRONLY, 0)
         } else {
             posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0)
             posix_spawn_file_actions_addopen(&actions, 1, "/dev/null", O_WRONLY, 0)
@@ -57,13 +78,20 @@ final class Subprocess: @unchecked Sendable {
         var pid: pid_t = 0
         let status = posix_spawn(&pid, path, &actions, &attributes, argv, envp)
         close(errPipe[1])
+        if lifeline { close(inPipe[0]) }
         guard status == 0 else {
             close(errPipe[0])
+            if lifeline { close(inPipe[1]) }
             throw SSHTunnelError("Can't start \(path): \(String(cString: strerror(status)))")
         }
         self.pid = pid
+        self.lifeline = lifeline ? inPipe[1] : nil
         startReadingErrors(errPipe[0])
         startWaiting()
+    }
+
+    deinit {
+        if let lifeline { close(lifeline) }
     }
 
     private func startReadingErrors(_ fd: Int32) {

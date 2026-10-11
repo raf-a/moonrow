@@ -21,12 +21,12 @@ public struct SSHLogin: Sendable {
     /// For tests: another ssh config file ("none"), no agent, another askpass helper.
     public var configFile: String?
     public var useAgent: Bool
-    public var askpassPath: String?
+    public var helperPath: String?
 
     public init(
         password: String? = nil, keyPassphrase: String? = nil, responder: SSHPromptResponder? = nil,
         onSave: (@Sendable (SSHSecret, String) -> Void)? = nil, knownHostsFiles: [String] = [],
-        configFile: String? = nil, useAgent: Bool = true, askpassPath: String? = nil
+        configFile: String? = nil, useAgent: Bool = true, helperPath: String? = nil
     ) {
         self.password = password
         self.keyPassphrase = keyPassphrase
@@ -35,7 +35,7 @@ public struct SSHLogin: Sendable {
         self.knownHostsFiles = knownHostsFiles
         self.configFile = configFile
         self.useAgent = useAgent
-        self.askpassPath = askpassPath
+        self.helperPath = helperPath
     }
 
     /// Our own file next to the connections (accepted keys are written there), then the
@@ -85,7 +85,7 @@ public enum ConnectionFactory {
             identityFile: key.isEmpty ? nil : (key as NSString).expandingTildeInPath,
             password: c.sshPasswordMode == .none ? nil : login.password, keyPassphrase: login.keyPassphrase,
             knownHostsFiles: login.knownHostsFiles, configFile: login.configFile, useAgent: login.useAgent,
-            askpassPath: login.askpassPath ?? SSHTunnel.defaultAskpassPath)
+            helperPath: login.helperPath ?? SSHTunnel.defaultHelperPath)
     }
 
     private static func tunnelEndpoint(_ c: ConnectionConfig, _ login: SSHLogin) throws -> Endpoint {

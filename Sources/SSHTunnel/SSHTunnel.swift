@@ -30,8 +30,8 @@ public struct SSHTunnelConfiguration: Sendable, Hashable {
     /// False keeps ssh away from the agent (tests).
     public var useAgent: Bool
     public var sshPath: String
-    /// The SSH_ASKPASS helper (`tabula-askpass`).
-    public var askpassPath: String
+    /// The SSH_ASKPASS helper (`tabula-ssh-helper`).
+    public var helperPath: String
     public var connectTimeout: Int
     /// Seconds between keepalive probes; the tunnel drops after 3 unanswered ones.
     public var keepAliveInterval: Int
@@ -40,7 +40,7 @@ public struct SSHTunnelConfiguration: Sendable, Hashable {
         host: String, port: Int? = nil, user: String = "", identityFile: String? = nil,
         password: String? = nil, keyPassphrase: String? = nil, knownHostsFiles: [String] = [],
         configFile: String? = nil, useAgent: Bool = true, sshPath: String = "/usr/bin/ssh",
-        askpassPath: String = SSHTunnel.defaultAskpassPath, connectTimeout: Int = 15, keepAliveInterval: Int = 30
+        helperPath: String = SSHTunnel.defaultHelperPath, connectTimeout: Int = 15, keepAliveInterval: Int = 30
     ) {
         self.host = host
         self.port = port
@@ -52,7 +52,7 @@ public struct SSHTunnelConfiguration: Sendable, Hashable {
         self.configFile = configFile
         self.useAgent = useAgent
         self.sshPath = sshPath
-        self.askpassPath = askpassPath
+        self.helperPath = helperPath
         self.connectTimeout = connectTimeout
         self.keepAliveInterval = keepAliveInterval
     }
@@ -160,11 +160,11 @@ public actor SSHTunnel {
         try? FileManager.default.removeItem(atPath: directory)
     }
 
-    /// The default helper: `tabula-askpass` next to the running executable (inside the app
+    /// The default helper: `tabula-ssh-helper` next to the running executable (inside the app
     /// bundle, or the build folder).
-    public static var defaultAskpassPath: String {
+    public static var defaultHelperPath: String {
         let executable = Bundle.main.executableURL ?? URL(filePath: CommandLine.arguments[0])
-        return executable.deletingLastPathComponent().appending(path: "tabula-askpass").path
+        return executable.deletingLastPathComponent().appending(path: "tabula-ssh-helper").path
     }
 
     /// An endpoint for the drivers: every socket they open to it is a new channel through this
@@ -222,7 +222,7 @@ public actor SSHTunnel {
         return master.isRunning && isSocket(controlPath)
     }
 
-    /// The master's process id while it runs (tests kill it to simulate a dropped connection).
+    /// The master's guard process (`tabula-ssh-helper --guard`; ssh is its child) while it runs.
     public var masterProcessID: pid_t? { master?.isRunning == true ? master?.pid : nil }
 
     /// Process ids of everything this tunnel started that's still running.
@@ -258,15 +258,19 @@ public actor SSHTunnel {
                 await self?.answer(text)
             }
         }
-        guard FileManager.default.isExecutableFile(atPath: configuration.askpassPath) else {
-            throw SSHTunnelError("The password helper is missing (\(configuration.askpassPath)).")
+        guard FileManager.default.isExecutableFile(atPath: configuration.helperPath) else {
+            throw SSHTunnelError("Tabula's SSH helper is missing (\(configuration.helperPath)).")
         }
         var env = baseEnvironment.merging(askpass!.environment) { $1 }
-        env["SSH_ASKPASS"] = configuration.askpassPath
+        env["SSH_ASKPASS"] = configuration.helperPath
         env["SSH_ASKPASS_REQUIRE"] = "force"
         asked = []
         typed = [:]
-        let process = try Subprocess(configuration.sshPath, configuration.masterArguments(controlPath: controlPath), environment: env)
+        // Under the helper's guard, so the master can't outlive the app even if the app crashes.
+        let process = try Subprocess(
+            configuration.helperPath,
+            ["--guard", configuration.sshPath] + configuration.masterArguments(controlPath: controlPath),
+            environment: env, lifeline: true)
         master = process
         // Logged in once the control socket appears (ssh creates it after authentication).
         while !isSocket(controlPath) {
