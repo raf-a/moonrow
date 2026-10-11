@@ -518,9 +518,17 @@ enum DevHarness {
         let controller = try require(prefs.windowController as? PreferencesWindowController, "settings controller")
         for (i, name) in ["p1-general", "p2-fonts", "p3-keymap"].enumerated() {
             controller.show(pane: i)
-            try await Task.sleep(for: .milliseconds(300))
+            try await Task.sleep(for: .milliseconds(500))
+            let pane = controller.tabs.tabViewItems[i].viewController!.view
+            print("\(name): content \(prefs.contentLayoutRect.size), pane needs \(pane.fittingSize)")
             snap("\(name).png", prefs)
         }
+
+        // Scrolled partway, so a section header sits at the top of the list.
+        controller.keymap.table.scrollRowToVisible(controller.keymap.table.numberOfRows - 1)
+        controller.keymap.table.scrollRowToVisible(13)
+        try await Task.sleep(for: .milliseconds(200))
+        snap("p3b-keymap-scrolled.png", prefs)
 
         // Rebind Run All to ⌃⌘R with the recorder, as a key press would.
         let runAll = try require(Keymap.command("runAllQueries:"), "Run All command")

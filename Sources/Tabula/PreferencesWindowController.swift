@@ -5,7 +5,7 @@ import SQLScript
 /// Settings (⌘,): General, Fonts & Colors, Keymap. Every change is saved and applied at once.
 @MainActor
 final class PreferencesWindowController: NSWindowController {
-    let tabs = NSTabViewController()
+    let tabs = PreferencesTabs()
     let general: GeneralPreferences
     let fonts: FontsPreferences
     let keymap: KeymapPreferences
@@ -33,6 +33,7 @@ final class PreferencesWindowController: NSWindowController {
         window.title = "Settings"
         window.toolbarStyle = .preference
         super.init(window: window)
+        tabs.fitWindow()
         window.center()
     }
 
@@ -41,6 +42,26 @@ final class PreferencesWindowController: NSWindowController {
 
     func show(pane index: Int) {
         tabs.selectedTabViewItemIndex = index
+    }
+}
+
+/// Panes of different heights: the window takes the selected pane's own size, keeping its top
+/// edge in place. (Left to itself, the tab view controller keeps a size that can clip a pane.)
+@MainActor
+final class PreferencesTabs: NSTabViewController {
+    override func tabView(_ tabView: NSTabView, didSelect item: NSTabViewItem?) {
+        super.tabView(tabView, didSelect: item)
+        fitWindow()
+    }
+
+    func fitWindow() {
+        guard let window = view.window ?? tabView.window,
+              let pane = tabViewItems[safe: selectedTabViewItemIndex]?.viewController?.view else { return }
+        pane.layoutSubtreeIfNeeded()
+        let size = pane.fittingSize
+        var frame = window.frameRect(forContentRect: NSRect(origin: .zero, size: size))
+        frame.origin = NSPoint(x: window.frame.minX, y: window.frame.maxY - frame.height)
+        window.setFrame(frame, display: true, animate: window.isVisible)
     }
 }
 
@@ -102,12 +123,6 @@ final class GeneralPreferences: NSViewController {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
-
-    /// The window takes each pane's own size.
-    override func viewWillAppear() {
-        super.viewWillAppear()
-        preferredContentSize = view.fittingSize
-    }
 
     override func loadView() {
         appearancePopup.addItems(withTitles: AppSettings.Appearance.allCases.map(\.title))
@@ -179,12 +194,6 @@ final class FontsPreferences: NSViewController {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
-
-    /// The window takes each pane's own size.
-    override func viewWillAppear() {
-        super.viewWillAppear()
-        preferredContentSize = view.fittingSize
-    }
 
     override func loadView() {
         themePopup.addItems(withTitles: EditorTheme.all.map(\.name))
@@ -313,20 +322,18 @@ final class KeymapPreferences: NSViewController, NSTableViewDataSource, NSTableV
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
-    /// The window takes each pane's own size.
-    override func viewWillAppear() {
-        super.viewWillAppear()
-        preferredContentSize = view.fittingSize
-    }
-
     override func loadView() {
-        for (id, title, width) in [("command", "Command", 280.0), ("shortcut", "Shortcut", 170.0), ("reset", "", 90.0)] {
+        for (id, title, width) in [("command", "Command", 250.0), ("shortcut", "Shortcut", 170.0), ("reset", "", 80.0)] {
             let column = NSTableColumn(identifier: .init(id))
             column.title = title
             column.width = width
             table.addTableColumn(column)
         }
         table.rowHeight = 26
+        table.floatsGroupRows = false
+        // The section labels say what the columns are; a header would also show rows through it.
+        table.headerView = nil
+        table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
         table.style = .inset
         table.selectionHighlightStyle = .none
         table.dataSource = self
@@ -349,18 +356,28 @@ final class KeymapPreferences: NSViewController, NSTableViewDataSource, NSTableV
 
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
 
-    func tableView(_ tableView: NSTableView, isGroupRow row: Int) -> Bool {
-        if case .group = rows[row] { return true }
-        return false
+    // Section headers are ordinary rows: AppKit's group rows float over the commands below them
+    // and draw a band wider than the table.
+    func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
+        if case .group = rows[row] { return row == 0 ? 24 : 34 }
+        return 26
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         switch rows[row] {
         case .group(let title):
-            let label = NSTextField(labelWithString: title)
-            label.font = .systemFont(ofSize: 11, weight: .semibold)
+            guard tableColumn?.identifier.rawValue == "command" else { return nil }
+            let cell = NSView()
+            let label = NSTextField(labelWithString: title.uppercased())
+            label.font = .systemFont(ofSize: 10, weight: .semibold)
             label.textColor = .secondaryLabelColor
-            return label
+            cell.addSubview(label)
+            label.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 2),
+                label.bottomAnchor.constraint(equalTo: cell.bottomAnchor, constant: -3),
+            ])
+            return cell
         case .command(let command):
             let overrides = settings.settings.keyBindings
             switch tableColumn?.identifier.rawValue {
