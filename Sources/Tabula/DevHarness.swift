@@ -524,9 +524,24 @@ enum DevHarness {
             snap("\(name).png", prefs)
         }
 
+        // A two-line safe-mode hint grows the General pane, then a one-line one shrinks it back.
+        controller.show(pane: 0)
+        let popup = controller.general.safeModePopup
+        for (mode, name) in [(SafeMode.alertWrites, "p1b-general-long-hint"), (.silent, "p1c-general-short-hint")] {
+            popup.selectItem(at: SafeMode.allCases.firstIndex(of: mode) ?? 0)
+            NSApp.sendAction(try require(popup.action, "popup action"), to: popup.target, from: popup)
+            try await Task.sleep(for: .milliseconds(500))
+            let pane = controller.general.view
+            print("\(name): content \(prefs.contentLayoutRect.size), pane needs \(pane.fittingSize)")
+            snap("\(name).png", prefs)
+        }
+        controller.show(pane: 2)
+        try await Task.sleep(for: .milliseconds(500))
+
         // Scrolled partway, so a section header sits at the top of the list.
+        let headerRow = try require(controller.keymap.row(ofGroup: "SQL Editor"), "SQL Editor header row")
         controller.keymap.table.scrollRowToVisible(controller.keymap.table.numberOfRows - 1)
-        controller.keymap.table.scrollRowToVisible(13)
+        controller.keymap.table.scrollRowToVisible(headerRow)
         try await Task.sleep(for: .milliseconds(200))
         snap("p3b-keymap-scrolled.png", prefs)
 

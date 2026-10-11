@@ -280,10 +280,7 @@ final class ExportSheetController: NSWindowController, NSTextFieldDelegate {
             progress.isHidden = true
             revealButton.isHidden = true
         }
-        window?.contentView?.layoutSubtreeIfNeeded()
-        if let window, let content = window.contentView {
-            window.setContentSize(content.fittingSize)
-        }
+        if let window, let content = window.contentView { window.fit(to: content) }
     }
 
     @objc private func formatChanged(_ sender: Any?) { updatePanes() }

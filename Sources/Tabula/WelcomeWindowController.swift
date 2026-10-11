@@ -349,3 +349,14 @@ extension NSView {
         ])
     }
 }
+
+extension NSWindow {
+    /// Sizes the window to `content`'s fitting size, keeping its top edge where it is. A free
+    /// window is then kept on its screen; a sheet stays attached to its parent.
+    func fit(to content: NSView, animate: Bool = false) {
+        var frame = frameRect(forContentRect: NSRect(origin: .zero, size: content.fittingSize))
+        frame.origin = NSPoint(x: self.frame.minX, y: self.frame.maxY - frame.height)
+        if sheetParent == nil { frame = constrainFrameRect(frame, to: screen) }
+        setFrame(frame, display: true, animate: animate && isVisible)
+    }
+}

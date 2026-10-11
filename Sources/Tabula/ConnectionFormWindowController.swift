@@ -251,14 +251,7 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         passwordField.isEnabled = passwordModePopup.indexOfSelectedItem != 2
         sshPasswordField.isEnabled = sshPasswordModePopup.indexOfSelectedItem == 0
         window?.title = (isNew ? "New \(d.displayName) Connection" : "Edit \(config.displayName)")
-        if let window, let content = window.contentView {
-            content.layoutSubtreeIfNeeded()
-            let size = content.fittingSize
-            var frame = window.frameRect(forContentRect: NSRect(origin: .zero, size: size))
-            frame.origin = window.frame.origin
-            frame.origin.y += window.frame.height - frame.height
-            window.setFrame(frame, display: true)
-        }
+        if let window, let content = window.contentView { window.fit(to: content) }
     }
 
     private var currentTLSModes: [TLSMode] = []

@@ -33,7 +33,7 @@ final class PreferencesWindowController: NSWindowController {
         window.title = "Settings"
         window.toolbarStyle = .preference
         super.init(window: window)
-        tabs.fitWindow()
+        if let pane = tabs.tabViewItems.first?.viewController?.view { window.fit(to: pane) }
         window.center()
     }
 
@@ -51,17 +51,7 @@ final class PreferencesWindowController: NSWindowController {
 final class PreferencesTabs: NSTabViewController {
     override func tabView(_ tabView: NSTabView, didSelect item: NSTabViewItem?) {
         super.tabView(tabView, didSelect: item)
-        fitWindow()
-    }
-
-    func fitWindow() {
-        guard let window = view.window ?? tabView.window,
-              let pane = tabViewItems[safe: selectedTabViewItemIndex]?.viewController?.view else { return }
-        pane.layoutSubtreeIfNeeded()
-        let size = pane.fittingSize
-        var frame = window.frameRect(forContentRect: NSRect(origin: .zero, size: size))
-        frame.origin = NSPoint(x: window.frame.minX, y: window.frame.maxY - frame.height)
-        window.setFrame(frame, display: true, animate: window.isVisible)
+        if let pane = item?.viewController?.view { view.window?.fit(to: pane, animate: true) }
     }
 }
 
@@ -160,6 +150,8 @@ final class GeneralPreferences: NSViewController {
             $0.defaultSafeMode = safeMode
         }
         refresh()
+        // Safe-mode hints run from one line to two; the grid is pinned top and bottom.
+        view.window?.fit(to: view, animate: true)
     }
 }
 
@@ -323,14 +315,11 @@ final class KeymapPreferences: NSViewController, NSTableViewDataSource, NSTableV
     required init?(coder: NSCoder) { fatalError() }
 
     override func loadView() {
-        for (id, title, width) in [("command", "Command", 250.0), ("shortcut", "Shortcut", 170.0), ("reset", "", 80.0)] {
+        for (id, width) in [("command", 250.0), ("shortcut", 170.0), ("reset", 80.0)] {
             let column = NSTableColumn(identifier: .init(id))
-            column.title = title
             column.width = width
             table.addTableColumn(column)
         }
-        table.rowHeight = 26
-        table.floatsGroupRows = false
         // The section labels say what the columns are; a header would also show rows through it.
         table.headerView = nil
         table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
@@ -356,6 +345,16 @@ final class KeymapPreferences: NSViewController, NSTableViewDataSource, NSTableV
 
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
 
+    /// The row of a section header. For the dev harness.
+    func row(ofGroup group: String) -> Int? {
+        rows.firstIndex { if case .group(group) = $0 { true } else { false } }
+    }
+
+    func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
+        if case .group = rows[row] { return false }
+        return true
+    }
+
     // Section headers are ordinary rows: AppKit's group rows float over the commands below them
     // and draw a band wider than the table.
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
@@ -371,6 +370,10 @@ final class KeymapPreferences: NSViewController, NSTableViewDataSource, NSTableV
             let label = NSTextField(labelWithString: title.uppercased())
             label.font = .systemFont(ofSize: 10, weight: .semibold)
             label.textColor = .secondaryLabelColor
+            // Read as words, not the uppercased letters.
+            label.setAccessibilityLabel(title)
+            label.setAccessibilityRole(.staticText)
+            label.setAccessibilitySubrole(NSAccessibility.Subrole(rawValue: "AXHeading"))
             cell.addSubview(label)
             label.translatesAutoresizingMaskIntoConstraints = false
             NSLayoutConstraint.activate([
@@ -389,6 +392,7 @@ final class KeymapPreferences: NSViewController, NSTableViewDataSource, NSTableV
                 let recorder = ShortcutRecorder()
                 recorder.binding = Keymap.binding(for: command.id, overrides: overrides) ?? .empty
                 recorder.onRecord = { [weak self] binding in self?.assign(binding, to: command) }
+                recorder.setAccessibilityHelp("Shortcut for \(command.title). Press to record a new one.")
                 return recorder
             default:
                 let changed = overrides[command.id] != nil
@@ -398,6 +402,7 @@ final class KeymapPreferences: NSViewController, NSTableViewDataSource, NSTableV
                 reset.identifier = .init(command.id)
                 reset.isHidden = !changed
                 reset.toolTip = "Back to \(command.defaultBinding.display)"
+                reset.setAccessibilityLabel("Restore the default shortcut for \(command.title)")
                 return reset
             }
         }
