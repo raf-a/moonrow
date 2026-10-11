@@ -1,0 +1,117 @@
+import Foundation
+import SQLScript
+
+public struct SQLiteDialect: Dialect {
+    public init() {}
+    public var name: String { "SQLite" }
+    public var lexer: LexerDialect { .sqlite }
+
+    public func quoteIdentifier(_ name: String) -> String { quote(name, with: "\"") }
+
+    public func literal(_ value: DBValue) -> String {
+        switch value {
+        case .null: "NULL"
+        case .integer(let v): String(v)
+        case .double(let v): v.isNaN ? "NULL" : v.isInfinite ? (v < 0 ? "-9e999" : "9e999") : String(v)
+        case .text(let v): quote(v, with: "'")
+        case .blob(let d): "X'\(hex(d))'"
+        case .bool(let v): v ? "1" : "0"
+        }
+    }
+
+    public func patternMatch(
+        _ expression: String, _ kind: PatternKind, _ value: String,
+        caseSensitive: Bool, negated: Bool
+    ) -> SQLFragment {
+        let not = negated ? " NOT" : ""
+        if caseSensitive {
+            // SQLite's LIKE ignores ASCII case; GLOB doesn't.
+            var escaped = ""
+            for c in value {
+                switch c {
+                case "*": escaped += "[*]"
+                case "?": escaped += "[?]"
+                case "[": escaped += "[[]"
+                default: escaped.append(c)
+                }
+            }
+            let pattern = switch kind {
+            case .contains: "*\(escaped)*"
+            case .hasPrefix: "\(escaped)*"
+            case .hasSuffix: "*\(escaped)"
+            }
+            return "\(expression)\(not) GLOB " + .value(.text(pattern))
+        }
+        return "\(expression)\(not) LIKE " + .value(.text(likePattern(kind, value))) + " ESCAPE '\\'"
+    }
+}
+
+public struct PostgresDialect: Dialect {
+    public init() {}
+    public var name: String { "PostgreSQL" }
+    public var lexer: LexerDialect { .postgres }
+
+    public func quoteIdentifier(_ name: String) -> String { quote(name, with: "\"") }
+    public func placeholder(_ index: Int) -> String { "$\(index)" }
+    public func textCast(_ expression: String) -> String { "\(expression)::text" }
+
+    public func literal(_ value: DBValue) -> String {
+        switch value {
+        case .null: "NULL"
+        case .integer(let v): String(v)
+        case .double(let v):
+            v.isNaN ? "'NaN'::float8" : v.isInfinite ? (v < 0 ? "'-Infinity'::float8" : "'Infinity'::float8") : String(v)
+        case .text(let v): quote(v, with: "'")
+        case .blob(let d): "'\\x\(hex(d))'::bytea"
+        case .bool(let v): v ? "TRUE" : "FALSE"
+        }
+    }
+
+    public func patternMatch(
+        _ expression: String, _ kind: PatternKind, _ value: String,
+        caseSensitive: Bool, negated: Bool
+    ) -> SQLFragment {
+        let op = (negated ? "NOT " : "") + (caseSensitive ? "LIKE" : "ILIKE")
+        return "\(expression) \(op) " + .value(.text(likePattern(kind, value)))
+    }
+}
+
+public struct MySQLDialect: Dialect {
+    public init() {}
+    public var name: String { "MySQL" }
+    public var lexer: LexerDialect { .mysql }
+
+    public func quoteIdentifier(_ name: String) -> String { quote(name, with: "`") }
+    public func textCast(_ expression: String) -> String { "CAST(\(expression) AS CHAR)" }
+
+    public func literal(_ value: DBValue) -> String {
+        switch value {
+        case .null: "NULL"
+        case .integer(let v): String(v)
+        case .double(let v): v.isFinite ? String(v) : "NULL"
+        case .text(let v):
+            // Assumes the server default (backslash escapes on).
+            quote(v.replacingOccurrences(of: "\\", with: "\\\\"), with: "'")
+        case .blob(let d): "X'\(hex(d))'"
+        case .bool(let v): v ? "TRUE" : "FALSE"
+        }
+    }
+
+    public func patternMatch(
+        _ expression: String, _ kind: PatternKind, _ value: String,
+        caseSensitive: Bool, negated: Bool
+    ) -> SQLFragment {
+        let not = negated ? " NOT" : ""
+        let pattern = DBValue.text(likePattern(kind, value))
+        if caseSensitive {
+            return "CAST(\(expression) AS BINARY)\(not) LIKE CAST(" + .value(pattern) + " AS BINARY)"
+        }
+        return "LOWER(\(expression))\(not) LIKE LOWER(" + .value(pattern) + ")"
+    }
+
+    public func insertDefaultValues(into table: String) -> String {
+        "INSERT INTO \(table) () VALUES ()"
+    }
+
+    public var beginTransaction: String { "START TRANSACTION" }
+}

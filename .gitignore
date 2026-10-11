@@ -1,0 +1,9 @@
+.build/
+.swiftpm/
+*.xcodeproj/xcuserdata/
+DerivedData/
+.DS_Store
+# Personal Claude Code state
+.claude/settings.local.json
+.claude/.cc-writes
+__pycache__/
