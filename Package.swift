@@ -10,8 +10,10 @@ let package = Package(
         .library(name: "DriverSQLite", targets: ["DriverSQLite"]),
         .library(name: "DriverPostgres", targets: ["DriverPostgres"]),
         .library(name: "DriverMySQL", targets: ["DriverMySQL"]),
+        .library(name: "SSHTunnel", targets: ["SSHTunnel"]),
         .library(name: "AppCore", targets: ["AppCore"]),
         .executable(name: "Tabula", targets: ["Tabula"]),
+        .executable(name: "tabula-askpass", targets: ["tabula-askpass"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.104.0"),
@@ -37,8 +39,20 @@ let package = Package(
         ),
         .target(name: "DriverPostgres", dependencies: ["DBKit", "WireSupport"]),
         .target(name: "DriverMySQL", dependencies: ["DBKit", "WireSupport"]),
+        // Database sockets carried over the system's OpenSSH client.
+        .target(
+            name: "SSHTunnel",
+            dependencies: [
+                "DBKit", "WireSupport",
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+            ]
+        ),
+        // SSH_ASKPASS helper ssh runs to ask for passwords; relays prompts to the app. Bundled
+        // next to the app's executable.
+        .executableTarget(name: "tabula-askpass"),
         // App logic without AppKit, so `swift test` covers it.
-        .target(name: "AppCore", dependencies: ["SQLScript", "DBKit", "WireSupport", "DriverSQLite", "DriverPostgres", "DriverMySQL"]),
+        .target(name: "AppCore", dependencies: ["SQLScript", "DBKit", "WireSupport", "SSHTunnel", "DriverSQLite", "DriverPostgres", "DriverMySQL"]),
         // The AppKit app. `scripts/build-app.sh` wraps it into Tabula.app.
         .executableTarget(name: "Tabula", dependencies: ["AppCore"]),
         .testTarget(name: "SQLScriptTests", dependencies: ["SQLScript"]),
@@ -47,5 +61,11 @@ let package = Package(
         .testTarget(name: "DriverPostgresTests", dependencies: ["DriverPostgres", "WireSupport"]),
         .testTarget(name: "DriverMySQLTests", dependencies: ["DriverMySQL", "WireSupport"]),
         .testTarget(name: "AppCoreTests", dependencies: ["AppCore", "WireSupport", "DriverSQLite", "DriverPostgres", "DriverMySQL"]),
+        // Depends on the helper so `swift test` builds it next to the test bundle.
+        .testTarget(
+            name: "SSHTunnelTests",
+            dependencies: ["SSHTunnel", "AppCore", "WireSupport", "DriverPostgres", "DriverMySQL", "tabula-askpass"],
+            exclude: ["Fixtures"]
+        ),
     ]
 )

@@ -1,4 +1,5 @@
 import CryptoKit
+import DBKit
 import Foundation
 import WireSupport
 
@@ -88,13 +89,27 @@ public struct ConnectionConfig: Codable, Hashable, Sendable, Identifiable {
     public var readOnly: Bool
     /// Rows per page in table grids; 0 shows every row.
     public var rowsPerPage: Int
+    /// Servers: reach the database through an SSH server. `host` and `port` are then as that
+    /// server sees them (127.0.0.1 is the SSH server itself).
+    public var overSSH: Bool
+    /// The SSH server: a host name, an IP or an alias from ~/.ssh/config.
+    public var sshHost: String
+    /// Nil leaves it to ssh (its config, else 22).
+    public var sshPort: Int?
+    /// Empty leaves it to ssh (its config, else the Mac's login name).
+    public var sshUser: String
+    public var sshPasswordMode: PasswordMode
+    /// A private key file; empty lets ssh choose (~/.ssh/config, the agent, the default keys).
+    public var sshKeyPath: String
 
     public init(
         id: UUID = UUID(), name: String = "", driver: DriverKind = .sqlite,
         filePath: String = "", host: String = "", port: Int? = nil, user: String = "", database: String = "",
         passwordMode: PasswordMode = .keychain, tlsMode: TLSMode? = nil,
         tlsCAPath: String = "", tlsCertPath: String = "", tlsKeyPath: String = "",
-        readOnly: Bool = false, rowsPerPage: Int = Paging.defaultPageSize
+        readOnly: Bool = false, rowsPerPage: Int = Paging.defaultPageSize,
+        overSSH: Bool = false, sshHost: String = "", sshPort: Int? = nil, sshUser: String = "",
+        sshPasswordMode: PasswordMode = .keychain, sshKeyPath: String = ""
     ) {
         self.id = id
         self.name = name
@@ -111,11 +126,18 @@ public struct ConnectionConfig: Codable, Hashable, Sendable, Identifiable {
         self.tlsKeyPath = tlsKeyPath
         self.readOnly = readOnly
         self.rowsPerPage = max(0, rowsPerPage)
+        self.overSSH = overSSH
+        self.sshHost = sshHost
+        self.sshPort = sshPort
+        self.sshUser = sshUser
+        self.sshPasswordMode = sshPasswordMode
+        self.sshKeyPath = sshKeyPath
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, name, driver, filePath, host, port, user, database, passwordMode
         case tlsMode, tlsCAPath, tlsCertPath, tlsKeyPath, readOnly, rowsPerPage
+        case overSSH, sshHost, sshPort, sshUser, sshPasswordMode, sshKeyPath
     }
 
     // Fields added in later versions get defaults, so older files keep loading.
@@ -136,7 +158,16 @@ public struct ConnectionConfig: Codable, Hashable, Sendable, Identifiable {
         tlsKeyPath = try c.decodeIfPresent(String.self, forKey: .tlsKeyPath) ?? ""
         readOnly = try c.decodeIfPresent(Bool.self, forKey: .readOnly) ?? false
         rowsPerPage = max(0, try c.decodeIfPresent(Int.self, forKey: .rowsPerPage) ?? Paging.defaultPageSize)
+        overSSH = try c.decodeIfPresent(Bool.self, forKey: .overSSH) ?? false
+        sshHost = try c.decodeIfPresent(String.self, forKey: .sshHost) ?? ""
+        sshPort = try c.decodeIfPresent(Int.self, forKey: .sshPort)
+        sshUser = try c.decodeIfPresent(String.self, forKey: .sshUser) ?? ""
+        sshPasswordMode = try c.decodeIfPresent(PasswordMode.self, forKey: .sshPasswordMode) ?? .keychain
+        sshKeyPath = try c.decodeIfPresent(String.self, forKey: .sshKeyPath) ?? ""
     }
+
+    /// Whether connecting goes through SSH (servers only).
+    public var usesSSH: Bool { driver.isServer && overSSH }
 
     /// The grid's page size: nil for every row.
     public var pageSize: Int? { rowsPerPage > 0 ? rowsPerPage : nil }
@@ -167,6 +198,7 @@ public struct ConnectionConfig: Codable, Hashable, Sendable, Identifiable {
             if !usesSocket, port != nil { target += ":\(effectivePort)" }
             if !database.isEmpty { target += "/" + database }
             parts.append(target)
+            if usesSSH { parts.append("via SSH " + (sshUser.isEmpty ? "" : sshUser + "@") + sshHost) }
         } else if !filePath.isEmpty {
             parts.append((expandedFilePath as NSString).abbreviatingWithTildeInPath)
         }
@@ -221,5 +253,19 @@ extension ConnectionConfig {
         let password = u.password
         c.passwordMode = password == nil ? .none : .keychain
         return (c, password)
+    }
+
+    /// Routes the connection through `ssh://user:password@host:port`. Returns the SSH password
+    /// in the URL, if any.
+    public mutating func applySSH(url text: String) throws -> String? {
+        guard let u = URLComponents(string: text), u.scheme?.lowercased() == "ssh", let host = u.host, !host.isEmpty else {
+            throw DatabaseError("Not an SSH URL: \(text)")
+        }
+        overSSH = true
+        sshHost = host
+        sshPort = u.port
+        sshUser = u.user ?? ""
+        sshPasswordMode = u.password == nil ? .none : .keychain
+        return u.password
     }
 }
