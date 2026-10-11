@@ -7,12 +7,15 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 
 swift build -c "$config" --product Tabula
-bin="$(swift build -c "$config" --show-bin-path)/Tabula"
+swift build -c "$config" --product tabula-ssh-helper
+bindir="$(swift build -c "$config" --show-bin-path)"
 
 app="build/Tabula.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-cp "$bin" "$app/Contents/MacOS/Tabula"
+cp "$bindir/Tabula" "$app/Contents/MacOS/Tabula"
+# Runs ssh for the tunnels and answers its prompts; the app looks for it next to its executable.
+cp "$bindir/tabula-ssh-helper" "$app/Contents/MacOS/tabula-ssh-helper"
 version="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
 
 cat > "$app/Contents/Info.plist" <<PLIST

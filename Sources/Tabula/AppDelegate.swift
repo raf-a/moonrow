@@ -19,6 +19,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TabulaActions {
     private var histories: [UUID: QueryHistory] = [:]
     private var savedQueries: [UUID: SavedQueries] = [:]
 
+    /// Dev harness only: accept unknown SSH host keys without asking.
+    var autoTrustHostKeys = false
+
     private var welcome: WelcomeWindowController?
     private var forms: [ConnectionFormWindowController] = []
     private(set) var workspaces: [WorkspaceWindowController] = []
@@ -94,6 +97,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TabulaActions {
             return
         }
         let form = ConnectionFormWindowController(config: config, isNew: isNew, store: store, secrets: secrets)
+        form.sshLogin = { [weak self, weak form] config, password, passphrase in
+            self?.sshLogin(for: config, password: password, keyPassphrase: passphrase, in: form?.window) ?? SSHLogin()
+        }
         form.onConnect = { [weak self, weak form] config, password in
             self?.connect(config, password: .some(password), presentingErrorsIn: form?.window)
         }
@@ -110,8 +116,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TabulaActions {
 
     /// Opens a workspace window for the connection. Errors appear as a sheet on `window`,
     /// or as an alert when there is none. `password` is what the form had typed; without it the
-    /// password comes from the connection's password mode.
-    func connect(_ config: ConnectionConfig, password: String?? = nil, presentingErrorsIn window: NSWindow?) {
+    /// password comes from the connection's password mode. Over SSH, `sshPassword` overrides the
+    /// saved one.
+    func connect(_ config: ConnectionConfig, password: String?? = nil, sshPassword: String? = nil,
+                 presentingErrorsIn window: NSWindow?) {
         Task {
             do {
                 let login: String?
@@ -126,11 +134,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TabulaActions {
                         login = typed
                     }
                 }
-                openWorkspace(config, try await ConnectionFactory.open(config, password: login))
+                let ssh = sshLogin(for: config, password: sshPassword, in: window)
+                openWorkspace(config, try await ConnectionFactory.open(config, password: login, ssh: ssh))
             } catch {
                 present(error, title: "Couldn't connect to \(config.displayName)", in: window)
             }
         }
+    }
+
+    /// What a tunnel needs to log in: the SSH secrets (typed in the form, else saved), sheets on
+    /// `window` for anything ssh asks, and the Keychain for answers the user wants kept.
+    func sshLogin(for config: ConnectionConfig, password: String? = nil, keyPassphrase: String? = nil,
+                  in window: NSWindow?) -> SSHLogin {
+        let secrets = secrets
+        let id = config.id
+        let autoTrust = autoTrustHostKeys
+        let saved = config.sshPasswordMode == .keychain ? try? secrets.secret(.sshPassword, for: id) : nil
+        let sheetWindow = WeakWindow(window)
+        return SSHLogin(
+            password: password ?? saved,
+            keyPassphrase: keyPassphrase ?? (try? secrets.secret(.sshKeyPassphrase, for: id)),
+            responder: { request in
+                if autoTrust, case .hostKey = request.prompt {
+                    print("trusting SSH host key \(request.prompt.fingerprint ?? "?")")
+                    return SSHAnswer("yes")
+                }
+                return await SSHPromptSheet.ask(request, in: sheetWindow)
+            },
+            onSave: { secret, value in
+                try? secrets.setSecret(value, secret == .password ? .sshPassword : .sshKeyPassphrase, for: id)
+            },
+            knownHostsFiles: SSHLogin.knownHostsFiles(root: dataRoot))
     }
 
     /// Nil when cancelled.
@@ -154,12 +188,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TabulaActions {
 
     func deleteConnection(_ id: UUID) throws {
         try store.delete(id: id)
-        try? secrets.setPassword(nil, for: id)
+        secrets.removeAll(for: id)
     }
 
     func duplicateConnection(_ id: UUID) throws {
         guard let copy = try store.duplicate(id: id) else { return }
-        if let password = try? secrets.password(for: id) { try? secrets.setPassword(password, for: copy.id) }
+        secrets.copyAll(from: id, to: copy.id)
     }
 
     private func openWorkspace(_ config: ConnectionConfig, _ connection: any DatabaseConnection) {

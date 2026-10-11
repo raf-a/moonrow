@@ -9,18 +9,24 @@ import NIOTLS
 public enum Endpoint: Sendable, Hashable, CustomStringConvertible {
     case tcp(host: String, port: Int)
     case unixSocket(path: String)
+    /// Carried by something else, such as an SSH tunnel.
+    case stream(StreamOpener)
 
     public var description: String {
         switch self {
         case .tcp(let host, let port): host.contains(":") ? "[\(host)]:\(port)" : "\(host):\(port)"
         case .unixSocket(let path): path
+        case .stream(let opener): opener.description
         }
     }
 
     /// The host name to check certificates against, nil for sockets and IP literals.
     public var hostName: String? {
-        guard case .tcp(let host, _) = self else { return nil }
-        return Self.isIPAddress(host) ? nil : host
+        switch self {
+        case .tcp(let host, _): Self.isIPAddress(host) ? nil : host
+        case .unixSocket: nil
+        case .stream(let opener): opener.hostName
+        }
     }
 
     static func isIPAddress(_ s: String) -> Bool {
@@ -62,6 +68,7 @@ public enum WireError: Error, Sendable, CustomStringConvertible {
 public final class WireChannel: @unchecked Sendable {
     private let channel: any Channel
     private let inbox: FrameInbox
+    private var diagnostics: (@Sendable () async -> String?)?
     private var pending: [ByteBuffer] = []
     private var pendingIndex = 0
     public let endpoint: Endpoint
@@ -94,8 +101,21 @@ public final class WireChannel: @unchecked Sendable {
                     .connect(host: host, port: port).get()
             case .unixSocket(let path):
                 channel = try await bootstrap.connect(unixDomainSocketPath: path).get()
+            case .stream(let opener):
+                let stream = try await opener.open()
+                do {
+                    channel = try await bootstrap.withConnectedSocket(stream.descriptor).get()
+                } catch {
+                    Darwin.close(stream.descriptor)
+                    throw error
+                }
+                let wire = WireChannel(channel: channel, inbox: inbox, endpoint: endpoint)
+                wire.diagnostics = stream.diagnostics
+                return wire
             }
             return WireChannel(channel: channel, inbox: inbox, endpoint: endpoint)
+        } catch let error as DatabaseError {
+            throw error
         } catch {
             throw DatabaseError("Can't connect to \(endpoint): \(describe(error))")
         }
@@ -133,6 +153,10 @@ public final class WireChannel: @unchecked Sendable {
         do {
             pending = try await inbox.take()
         } catch {
+            // A carried stream ends when its carrier gives up; its reason beats "closed".
+            if let reason = await diagnostics?(), !reason.isEmpty {
+                throw DatabaseError("Lost the connection to the server: \(reason)")
+            }
             throw DatabaseError("Lost the connection to the server: \(Self.describe(error))")
         }
         pendingIndex = 1
