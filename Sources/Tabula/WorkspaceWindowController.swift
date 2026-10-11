@@ -10,6 +10,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     let connection: any DatabaseConnection
     let environment: QueryEnvironment
     var onClose: (() -> Void)?
+    var safety: SafetyGate { environment.safety }
 
     /// The tables and views list.
     let sidebar: SidebarViewController
@@ -17,10 +18,16 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     let content = WorkspaceTabsController()
     private var queryCount = 0
 
-    init(config: ConnectionConfig, connection: any DatabaseConnection, history: QueryHistory, savedQueries: SavedQueries) {
+    /// `password` is the database password the workspace logged in with; safe mode's password
+    /// levels ask for it.
+    init(config: ConnectionConfig, connection: any DatabaseConnection, history: QueryHistory, savedQueries: SavedQueries,
+         password: String?) {
         self.config = config
         self.connection = connection
-        environment = QueryEnvironment(connection: connection, history: history, savedQueries: savedQueries)
+        let safety = SafetyGate(
+            level: config.safeMode, credential: SafetyCredential(password: password, connectionName: config.displayName),
+            connectionName: config.displayName, dialect: connection.dialect.lexer)
+        environment = QueryEnvironment(connection: connection, history: history, savedQueries: savedQueries, safety: safety)
         sidebar = SidebarViewController(connection: connection)
         leftSidebar = LeftSidebarController(items: sidebar, savedQueries: savedQueries, history: history)
 
@@ -47,6 +54,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         window.tabbingMode = .disallowed
         super.init(window: window)
         window.delegate = self
+        safety.window = window
+        NotificationCenter.default.addObserver(self, selector: #selector(safetyLevelChanged), name: SafetyGate.levelDidChange, object: safety)
 
         let toolbar = NSToolbar(identifier: "Workspace")
         toolbar.delegate = self
@@ -69,6 +78,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         content.onSelectionChange = { [weak self] in self?.tabChanged() }
         content.onNewTab = { [weak self] in self?.newQueryTab(nil) }
         connectSidebarActions()
+        connectTransferActions()
         sidebar.reload()
     }
 
@@ -116,6 +126,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     func newQuery(text: String = "", saved: SavedQueries.Query? = nil) -> QueryEditorViewController {
         queryCount += 1
         let editor = QueryEditorViewController(environment: environment, number: queryCount, text: text, savedQuery: saved)
+        editor.results.dialect = connection.dialect
         content.add(editor)
         return editor
     }
@@ -232,13 +243,60 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     @objc func showQueryHistory(_ sender: Any?) { leftSidebar.show(.history) }
     @objc func showSavedQueries(_ sender: Any?) { leftSidebar.show(.queries) }
 
+    // MARK: - Safe mode
+
+    /// Asks safe mode before statements other than the grid's and editor's own are sent
+    /// (imports, for example). True when they may go.
+    func confirmWrite(_ statements: [String]) async -> Bool {
+        await safety.approve(statements)
+    }
+
+    @objc func changeSafeMode(_ sender: NSMenuItem) {
+        guard let level = SafeMode.allCases[safe: sender.tag] else { return }
+        Task { await safety.change(to: level) }
+    }
+
+    @objc private func safetyLevelChanged() { updateSafetyItem() }
+
+    private func makeSafetyMenu() -> NSMenu {
+        let menu = NSMenu(title: "Safe Mode")
+        for (i, level) in SafeMode.allCases.enumerated() {
+            let item = menu.addItem(withTitle: level.title, action: #selector(changeSafeMode(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = i
+            item.toolTip = level.detail
+        }
+        if config.readOnly {
+            menu.addItem(.separator())
+            menu.addItem(withTitle: "The connection is read-only", action: nil, keyEquivalent: "").isEnabled = false
+        }
+        return menu
+    }
+
+    private func updateSafetyItem() {
+        guard let item = window?.toolbar?.items.first(where: { $0.itemIdentifier == Self.safetyItem }) as? NSMenuToolbarItem else { return }
+        let level = safety.level
+        let symbol = config.readOnly ? "lock.fill"
+            : level == .silent ? "shield" : level.requiresPassword ? "lock.shield" : "exclamationmark.shield"
+        item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Safe mode")
+        item.label = "Safe Mode"
+        item.toolTip = "Safe mode: \(level.title)" + (config.readOnly ? " · read-only connection" : "")
+        for menuItem in item.menu.items where menuItem.action == #selector(changeSafeMode(_:)) {
+            menuItem.state = menuItem.tag == SafeMode.allCases.firstIndex(of: level) ? .on : .off
+        }
+    }
+
     // MARK: - Toolbar
 
     private static let reloadItem = NSToolbarItem.Identifier("reload")
     private static let queryItem = NSToolbarItem.Identifier("query")
+    private static let safetyItem = NSToolbarItem.Identifier("safety")
+    private static let markItem = NSToolbarItem.Identifier("mark")
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.toggleSidebar, .sidebarTrackingSeparator, .flexibleSpace, Self.queryItem, Self.reloadItem]
+        var items: [NSToolbarItem.Identifier] = [.toggleSidebar, .sidebarTrackingSeparator]
+        if config.markColor != nil || config.tag != nil { items.append(Self.markItem) }
+        return items + [.flexibleSpace, Self.safetyItem, Self.queryItem, Self.reloadItem]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -249,6 +307,24 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         _ toolbar: NSToolbar, itemForItemIdentifier id: NSToolbarItem.Identifier,
         willBeInsertedIntoToolbar flag: Bool
     ) -> NSToolbarItem? {
+        switch id {
+        case Self.safetyItem:
+            let item = NSMenuToolbarItem(itemIdentifier: id)
+            item.menu = makeSafetyMenu()
+            item.showsIndicator = true
+            DispatchQueue.main.async { [weak self] in self?.updateSafetyItem() }
+            item.image = NSImage(systemSymbolName: "shield", accessibilityDescription: "Safe mode")
+            item.label = "Safe Mode"
+            return item
+        case Self.markItem:
+            let item = NSToolbarItem(itemIdentifier: id)
+            item.view = ConnectionMarkView(config)
+            item.label = config.tag?.title ?? "Colour"
+            item.toolTip = config.tag.map { "\($0.title) connection" } ?? config.displayName
+            return item
+        default:
+            break
+        }
         let item = NSToolbarItem(itemIdentifier: id)
         item.target = self
         item.isBordered = true

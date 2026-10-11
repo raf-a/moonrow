@@ -11,6 +11,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TabulaActions {
 
     /// History and saved queries live next to the connections file, so `TABULA_STORE` moves them too.
     var dataRoot: URL { store.fileURL.deletingLastPathComponent() }
+    lazy var settings = SettingsStore(fileURL: SettingsStore.fileURL(root: dataRoot))
+    private var preferences: PreferencesWindowController?
     /// Passwords: the login Keychain, or with `TABULA_STORE` a plain file next to it, so
     /// development runs never touch real credentials.
     lazy var secrets: any SecretStore = ProcessInfo.processInfo.environment["TABULA_STORE"] == nil
@@ -27,7 +29,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TabulaActions {
     private(set) var workspaces: [WorkspaceWindowController] = []
 
     func applicationWillFinishLaunching(_ notification: Notification) {
-        NSApp.mainMenu = MainMenu.build()
+        let settingsError = settings.load()
+        AppStyle.settings = settings.settings
+        AppStyle.apply()
+        NSApp.mainMenu = MainMenu.build(keyBindings: settings.settings.keyBindings)
+        NotificationCenter.default.addObserver(self, selector: #selector(settingsChanged), name: SettingsStore.didChange, object: settings)
+        if let settingsError {
+            present(settingsError, title: "Your preferences couldn't be read, so the defaults are used. The old file was kept as settings.json.bak.", in: nil)
+        }
+    }
+
+    @objc private func settingsChanged() {
+        let old = AppStyle.settings
+        AppStyle.settings = settings.settings
+        if old.keyBindings != settings.settings.keyBindings {
+            NSApp.mainMenu = MainMenu.build(keyBindings: settings.settings.keyBindings)
+        }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -76,7 +93,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TabulaActions {
     }
 
     @objc func newConnection(_ sender: Any?) {
-        editConnection(ConnectionConfig(), isNew: true)
+        editConnection(ConnectionConfig(safeMode: settings.settings.defaultSafeMode), isNew: true)
+    }
+
+    @objc func showPreferences(_ sender: Any?) {
+        if preferences == nil { preferences = PreferencesWindowController(settings: settings) }
+        preferences?.showWindow(nil)
     }
 
     @objc func openDocument(_ sender: Any?) {
@@ -111,7 +133,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TabulaActions {
     }
 
     func openFile(_ url: URL) {
-        connect(.sqliteFile(url), presentingErrorsIn: nil)
+        var config = ConnectionConfig.sqliteFile(url)
+        config.safeMode = settings.settings.defaultSafeMode
+        connect(config, presentingErrorsIn: nil)
     }
 
     /// Opens a workspace window for the connection. Errors appear as a sheet on `window`,
@@ -135,7 +159,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TabulaActions {
                     }
                 }
                 let ssh = sshLogin(for: config, password: sshPassword, in: window)
-                openWorkspace(config, try await ConnectionFactory.open(config, password: login, ssh: ssh))
+                openWorkspace(config, try await ConnectionFactory.open(config, password: login, ssh: ssh), password: login)
             } catch {
                 present(error, title: "Couldn't connect to \(config.displayName)", in: window)
             }
@@ -196,12 +220,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TabulaActions {
         secrets.copyAll(from: id, to: copy.id)
     }
 
-    private func openWorkspace(_ config: ConnectionConfig, _ connection: any DatabaseConnection) {
+    private func openWorkspace(_ config: ConnectionConfig, _ connection: any DatabaseConnection, password: String?) {
         let history = histories[config.id] ?? QueryHistory(fileURL: QueryHistory.fileURL(root: dataRoot, connection: config.id))
         let saved = savedQueries[config.id] ?? SavedQueries(directory: SavedQueries.directory(root: dataRoot, connection: config.id))
         histories[config.id] = history
         savedQueries[config.id] = saved
-        let workspace = WorkspaceWindowController(config: config, connection: connection, history: history, savedQueries: saved)
+        let workspace = WorkspaceWindowController(
+            config: config, connection: connection, history: history, savedQueries: saved, password: password)
+        // A level picked in the toolbar is kept with the saved connection.
+        workspace.safety.onLevelChange = { [weak self] level in
+            guard let self, var saved = self.store.connection(id: config.id) else { return }
+            saved.safeMode = level
+            do { try self.store.save(saved) } catch { present(error, title: "Couldn't save the safe mode", in: nil) }
+        }
         workspace.onClose = { [weak self, weak workspace] in
             self?.workspaces.removeAll { $0 === workspace }
         }

@@ -57,6 +57,8 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
 
     private(set) var table: TableRef
     let connection: any DatabaseConnection
+    /// Asks before changes are applied.
+    var safety: SafetyGate?
     /// Why the structure can't be changed (a view, a read-only connection), or nil.
     let readOnlyReason: String?
     /// After a commit: the table's name now (it may have been renamed), and whether it was created.
@@ -810,6 +812,10 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
         let created = !editor.exists
         Task {
             defer { isCommitting = false }
+            if let safety, await !safety.approve(plan.setup + plan.statements + plan.teardown) {
+                showStatus("")
+                return
+            }
             do {
                 try await connection.apply(plan)
                 table = newRef

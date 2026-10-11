@@ -10,16 +10,19 @@ final class QueryEnvironment {
     let catalog: SchemaCatalog
     let history: QueryHistory
     let savedQueries: SavedQueries
+    /// Asks before statements go out, as the connection's safe mode says.
+    let safety: SafetyGate
     /// Accepted completions, most recent first; ranks them higher next time.
     var recentCompletions: [String] = []
     /// A statement created, dropped or altered something.
     var onSchemaChange: (() -> Void)?
 
-    init(connection: any DatabaseConnection, history: QueryHistory, savedQueries: SavedQueries) {
+    init(connection: any DatabaseConnection, history: QueryHistory, savedQueries: SavedQueries, safety: SafetyGate) {
         self.connection = connection
         self.catalog = SchemaCatalog(connection: connection)
         self.history = history
         self.savedQueries = savedQueries
+        self.safety = safety
     }
 
     func noteCompletion(_ text: String) {
@@ -58,6 +61,8 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
 
     private var runTask: Task<Void, Never>?
     private(set) var isRunning = false
+    /// Safe mode is asking about the statements to run.
+    private var isAwaitingApproval = false
     private var autosaveTask: Task<Void, Never>?
     private var isDirty = false
     /// Text length when last highlighted; each change's length delta follows from it.
@@ -95,6 +100,7 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
         completion.onAccept = { [weak self] item in self?.insertCompletion(item) }
         NotificationCenter.default.addObserver(
             self, selector: #selector(catalogChanged), name: SchemaCatalog.didChange, object: environment.catalog)
+        NotificationCenter.default.addObserver(self, selector: #selector(styleChanged), name: AppStyle.didChange, object: nil)
 
         let editorScroll = NSScrollView()
         editorScroll.documentView = editor
@@ -248,11 +254,22 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
         return r.location..<NSMaxRange(r)
     }
 
-    /// Runs `statements` (UTF-16 ranges into the editor text) and shows their results.
+    /// Runs `statements` (UTF-16 ranges into the editor text) and shows their results, once safe
+    /// mode allows it.
     func run(_ statements: [SQLStatementRange]) {
-        guard !isRunning else { return NSSound.beep() }
+        guard !isRunning, !isAwaitingApproval else { return NSSound.beep() }
         guard !statements.isEmpty else { return NSSound.beep() }
         completion.hide()
+        guard environment.safety.requirement(for: statements.map(\.text)) != .none else { return start(statements) }
+        isAwaitingApproval = true
+        Task {
+            let approved = await environment.safety.approve(statements.map(\.text))
+            isAwaitingApproval = false
+            if approved { start(statements) }
+        }
+    }
+
+    private func start(_ statements: [SQLStatementRange]) {
         clearErrorHighlight()
         let textAtStart = editor.string
         let options = ScriptRunner.Options(rowLimit: rowLimit, stopOnError: true)
@@ -337,7 +354,7 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
         // Only worth showing when there's more than one statement.
         guard statement.range.count < length - 1 || editor.string.contains(";") else { return }
         let r = NSRange(location: statement.range.lowerBound, length: statement.range.count)
-        layout.addTemporaryAttribute(.backgroundColor, value: NSColor.controlAccentColor.withAlphaComponent(0.07), forCharacterRange: r)
+        layout.addTemporaryAttribute(.backgroundColor, value: AppStyle.colors.currentStatement, forCharacterRange: r)
         statementHighlight = r
     }
 
@@ -352,6 +369,14 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
         updatePosition()
         updateStatementHighlight()
         if savedQuery != nil { scheduleAutosave() }
+    }
+
+    /// The theme or font changed in the preferences.
+    @objc private func styleChanged() {
+        editor.applyStyle()
+        highlighter.highlight(editor.textStorage!, delta: 0, full: true)
+        ruler.textChanged()
+        updateStatementHighlight()
     }
 
     func textViewDidChangeSelection(_ notification: Notification) {
@@ -491,7 +516,7 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         switch item.action {
         case #selector(runCurrentQuery(_:)), #selector(runAllQueries(_:)):
-            return !isRunning
+            return !isRunning && !isAwaitingApproval
         case #selector(cancelQuery(_:)):
             return isRunning
         case #selector(commitChanges(_:)):

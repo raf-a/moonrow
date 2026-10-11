@@ -29,6 +29,10 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
     private let caField = NSTextField()
     private let certField = NSTextField()
     private let keyField = NSTextField()
+    private let colorPicker = ColorSwatchPicker()
+    private let tagPopup = NSPopUpButton()
+    private let safeModePopup = NSPopUpButton()
+    private let safeModeHint = NSTextField(wrappingLabelWithString: "")
     private let readOnlyBox = NSButton(checkboxWithTitle: "Read-only", target: nil, action: nil)
     private let pageSizeField = NSTextField()
     private let sshBox = NSButton(checkboxWithTitle: "Connect through an SSH server", target: nil, action: nil)
@@ -118,6 +122,17 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         sshHint.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         sshHint.preferredMaxLayoutWidth = 360
 
+        tagPopup.addItem(withTitle: "None")
+        tagPopup.addItems(withTitles: ConnectionTag.allCases.map(\.title))
+        tagPopup.target = self
+        tagPopup.action = #selector(tagChanged(_:))
+        safeModePopup.addItems(withTitles: SafeMode.allCases.map(\.title))
+        safeModePopup.target = self
+        safeModePopup.action = #selector(safeModeChanged(_:))
+        safeModeHint.textColor = .secondaryLabelColor
+        safeModeHint.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        safeModeHint.preferredMaxLayoutWidth = 360
+
         let hostRow = row(hostField, NSTextField(labelWithString: "Port"), portField)
         let passwordRow = row(passwordField, passwordModePopup)
         passwordField.widthAnchor.constraint(greaterThanOrEqualToConstant: 180).isActive = true
@@ -125,6 +140,7 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         let rows: [(String, NSView, Kind)] = [
             ("Type", driverPopup, .both),
             ("Name", nameField, .both),
+            ("Colour", row(colorPicker, NSTextField(labelWithString: "Tag"), tagPopup), .both),
             ("Database file", row(pathField, button("Choose…", #selector(chooseFile(_:)))), .file),
             ("Host", hostRow, .server),
             ("User", userField, .server),
@@ -142,6 +158,8 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
             ("Key file", row(sshKeyField, button("Choose…", #selector(chooseSSHKey(_:)))), .sshKey),
             ("Passphrase", sshPassphraseField, .sshKey),
             ("", sshHint, .ssh),
+            ("Safe mode", safeModePopup, .both),
+            ("", safeModeHint, .both),
             ("", readOnlyBox, .both),
             ("Rows per page", pageSizeRow(), .both),
         ]
@@ -265,6 +283,10 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         caField.stringValue = c.tlsCAPath
         certField.stringValue = c.tlsCertPath
         keyField.stringValue = c.tlsKeyPath
+        colorPicker.color = c.color
+        tagPopup.selectItem(at: c.tag.flatMap { ConnectionTag.allCases.firstIndex(of: $0) }.map { $0 + 1 } ?? 0)
+        safeModePopup.selectItem(at: SafeMode.allCases.firstIndex(of: c.safeMode) ?? 0)
+        safeModeHint.stringValue = c.safeMode.detail
         readOnlyBox.state = c.readOnly ? .on : .off
         pageSizeField.stringValue = c.rowsPerPage > 0 ? String(c.rowsPerPage) : ""
         sshBox.state = c.overSSH ? .on : .off
@@ -298,6 +320,9 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         c.tlsCAPath = text(caField)
         c.tlsCertPath = text(certField)
         c.tlsKeyPath = text(keyField)
+        c.color = colorPicker.color
+        c.tag = tagPopup.indexOfSelectedItem > 0 ? ConnectionTag.allCases[tagPopup.indexOfSelectedItem - 1] : nil
+        c.safeMode = SafeMode.allCases[max(0, safeModePopup.indexOfSelectedItem)]
         c.readOnly = readOnlyBox.state == .on
         c.rowsPerPage = Int(pageSizeField.stringValue.filter(\.isNumber)) ?? 0
         c.overSSH = sshBox.state == .on
@@ -355,6 +380,16 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
     @objc private func driverChanged(_ sender: Any?) {
         status.stringValue = ""
         layoutForDriver()
+    }
+
+    /// A tag picked while no colour is chosen brings its colour along.
+    @objc private func tagChanged(_ sender: Any?) {
+        guard colorPicker.color == nil, tagPopup.indexOfSelectedItem > 0 else { return }
+        colorPicker.color = ConnectionTag.allCases[tagPopup.indexOfSelectedItem - 1].suggestedColor
+    }
+
+    @objc private func safeModeChanged(_ sender: Any?) {
+        safeModeHint.stringValue = SafeMode.allCases[max(0, safeModePopup.indexOfSelectedItem)].detail
     }
 
     @objc private func passwordModeChanged(_ sender: Any?) {
@@ -436,4 +471,76 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
 
 extension Array {
     subscript(safe i: Int) -> Element? { indices.contains(i) ? self[i] : nil }
+}
+
+/// Round colour buttons, "none" first; one is selected at a time.
+@MainActor
+final class ColorSwatchPicker: NSStackView {
+    var color: ConnectionColor? {
+        didSet { for (i, b) in swatches.enumerated() { b.isSelected = i == 0 ? color == nil : ConnectionColor.allCases[i - 1] == color } }
+    }
+    private var swatches: [Swatch] = []
+
+    init() {
+        super.init(frame: .zero)
+        spacing = 5
+        let choices: [ConnectionColor?] = [nil] + ConnectionColor.allCases
+        for (i, c) in choices.enumerated() {
+            let swatch = Swatch(color: c?.nsColor)
+            swatch.toolTip = c?.title ?? "No colour"
+            swatch.tag = i
+            swatch.target = self
+            swatch.action = #selector(picked(_:))
+            swatches.append(swatch)
+            addArrangedSubview(swatch)
+        }
+        color = nil
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    @objc private func picked(_ sender: NSButton) {
+        color = sender.tag == 0 ? nil : ConnectionColor.allCases[sender.tag - 1]
+    }
+
+    final class Swatch: NSButton {
+        let fill: NSColor?
+        var isSelected = false { didSet { needsDisplay = true } }
+
+        init(color: NSColor?) {
+            fill = color
+            super.init(frame: NSRect(x: 0, y: 0, width: 18, height: 18))
+            isBordered = false
+            title = ""
+            widthAnchor.constraint(equalToConstant: 18).isActive = true
+            heightAnchor.constraint(equalToConstant: 18).isActive = true
+            setAccessibilityLabel(color == nil ? "No colour" : "Colour")
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { fatalError() }
+
+        override func draw(_ dirtyRect: NSRect) {
+            let circle = NSBezierPath(ovalIn: bounds.insetBy(dx: 3, dy: 3))
+            if let fill {
+                fill.setFill()
+                circle.fill()
+            } else {
+                NSColor.tertiaryLabelColor.setStroke()
+                circle.lineWidth = 1
+                circle.stroke()
+                let slash = NSBezierPath()
+                slash.move(to: NSPoint(x: bounds.minX + 5, y: bounds.minY + 5))
+                slash.line(to: NSPoint(x: bounds.maxX - 5, y: bounds.maxY - 5))
+                slash.stroke()
+            }
+            if isSelected {
+                let ring = NSBezierPath(ovalIn: bounds.insetBy(dx: 0.75, dy: 0.75))
+                ring.lineWidth = 1.5
+                NSColor.labelColor.setStroke()
+                ring.stroke()
+            }
+        }
+    }
 }

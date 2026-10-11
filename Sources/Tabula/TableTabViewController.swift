@@ -19,6 +19,8 @@ final class TableTabViewController: NSViewController, WorkspaceTab, NSMenuItemVa
     var onStructureCommitted: ((_ tab: TableTabViewController, _ created: Bool) -> Void)?
     /// Tables the foreign-key editor offers.
     var knownTables: () -> [TableRef] = { [] }
+    /// Asks before commits are sent.
+    var safety: SafetyGate?
 
     private(set) var data: TableDataViewController?
     private(set) var structure: StructureViewController?
@@ -102,6 +104,7 @@ final class TableTabViewController: NSViewController, WorkspaceTab, NSMenuItemVa
                     connection: connection, object: DatabaseObject(table, kind: kind),
                     readOnlyConnection: readOnlyConnection, pageSize: pageSize)
                 d.leadingAccessory = makeSwitch()
+                d.safety = safety
                 d.onTabItemChange = { [weak self] in self?.onTabItemChange?() }
                 addChild(d)
                 data = d
@@ -113,6 +116,7 @@ final class TableTabViewController: NSViewController, WorkspaceTab, NSMenuItemVa
                     ? StructureViewController(connection: connection, newTable: table)
                     : StructureViewController(connection: connection, object: DatabaseObject(table, kind: kind), readOnlyConnection: readOnlyConnection)
                 s.leadingAccessory = makeSwitch()
+                s.safety = safety
                 s.knownTables = { [weak self] in self?.knownTables() ?? [] }
                 s.onPendingChange = { [weak self] in self?.onTabItemChange?() }
                 s.onCommitted = { [weak self] table, created in self?.structureCommitted(table, created: created) }

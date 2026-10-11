@@ -19,7 +19,6 @@ final class SQLTextView: NSTextView {
     weak var completionDelegate: SQLTextViewCompletionDelegate?
     var indent = "    "
 
-    static let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
 
     /// A TextKit 1 stack: line numbers and highlighting work on glyph ranges.
     static func make() -> SQLTextView {
@@ -49,10 +48,7 @@ final class SQLTextView: NSTextView {
         smartInsertDeleteEnabled = false
         isAutomaticLinkDetectionEnabled = false
         isAutomaticDataDetectionEnabled = false
-        font = Self.font
-        typingAttributes = [.font: Self.font, .foregroundColor: NSColor.textColor]
-        textColor = .textColor
-        backgroundColor = .textBackgroundColor
+        applyStyle()
         drawsBackground = true
         isVerticallyResizable = true
         isHorizontallyResizable = false
@@ -60,6 +56,17 @@ final class SQLTextView: NSTextView {
         maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textContainerInset = NSSize(width: 4, height: 6)
         textContainer?.lineFragmentPadding = 4
+    }
+
+    /// Font and colours from the preferences. The caller re-highlights afterwards.
+    func applyStyle() {
+        let colors = AppStyle.colors
+        font = AppStyle.editorFont
+        typingAttributes = [.font: AppStyle.editorFont, .foregroundColor: colors.text]
+        textColor = colors.text
+        backgroundColor = colors.background
+        insertionPointColor = colors.text
+        selectedTextAttributes = [.backgroundColor: colors.selection]
     }
 
     // MARK: - Keys
@@ -217,15 +224,16 @@ final class SQLHighlighter {
     enum Style: Equatable {
         case plain, keyword, string, number, comment, identifier, parameter
 
-        var color: NSColor {
-            switch self {
-            case .plain: .textColor
-            case .keyword: .systemPink
-            case .string: .systemRed
-            case .number: .systemBlue
-            case .comment: .systemGreen
-            case .identifier: .systemTeal
-            case .parameter: .systemOrange
+        @MainActor var color: NSColor {
+            let c = AppStyle.colors
+            return switch self {
+            case .plain: c.text
+            case .keyword: c.keyword
+            case .string: c.string
+            case .number: c.number
+            case .comment: c.comment
+            case .identifier: c.identifier
+            case .parameter: c.parameter
             }
         }
     }
@@ -290,7 +298,9 @@ final class LineNumberRuler: NSRulerView {
     private weak var textView: NSTextView?
     /// UTF-16 offsets where each line starts.
     private var lineStarts: [Int] = [0]
-    private let font = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+    private var font: NSFont {
+        .monospacedDigitSystemFont(ofSize: max(9, AppStyle.editorFont.pointSize - 3), weight: .regular)
+    }
 
     init(textView: NSTextView, scrollView: NSScrollView) {
         self.textView = textView
@@ -313,7 +323,8 @@ final class LineNumberRuler: NSRulerView {
         }
         lineStarts = starts
         let digits = max(2, String(starts.count).count)
-        let width = CGFloat(digits) * 7 + 14
+        let digitWidth = ("0" as NSString).size(withAttributes: [.font: font]).width
+        let width = ceil(CGFloat(digits) * digitWidth) + 14
         if abs(ruleThickness - width) > 0.5 { ruleThickness = width }
         needsDisplay = true
     }
@@ -332,12 +343,13 @@ final class LineNumberRuler: NSRulerView {
 
     override func drawHashMarksAndLabels(in rect: NSRect) {
         guard let textView, let layout = textView.layoutManager, let container = textView.textContainer else { return }
-        NSColor.textBackgroundColor.setFill()
+        AppStyle.colors.background.setFill()
         bounds.fill()
         let visible = textView.visibleRect
         let glyphs = layout.glyphRange(forBoundingRect: visible, in: container)
         let chars = layout.characterRange(forGlyphRange: glyphs, actualGlyphRange: nil)
-        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.tertiaryLabelColor]
+        let font = font
+        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: AppStyle.colors.lineNumber]
         let caretLine = line(at: textView.selectedRange().location)
         let inset = textView.textContainerInset.height
         var n = line(at: chars.location)
@@ -356,7 +368,7 @@ final class LineNumberRuler: NSRulerView {
             let y = convert(NSPoint(x: 0, y: rect.minY + inset), from: textView).y
             let label = String(n) as NSString
             var a = attrs
-            if n == caretLine { a[.foregroundColor] = NSColor.secondaryLabelColor }
+            if n == caretLine { a[.foregroundColor] = AppStyle.colors.text }
             let size = label.size(withAttributes: a)
             label.draw(at: NSPoint(x: ruleThickness - size.width - 6, y: y + (rect.height - size.height) / 2), withAttributes: a)
             n += 1

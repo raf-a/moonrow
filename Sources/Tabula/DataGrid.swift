@@ -16,6 +16,31 @@ final class DataGrid: NSTableView {
     /// ⌥Return: the menu to pop up at the cursor.
     var setValueMenu: (() -> NSMenu?)?
 
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        NotificationCenter.default.addObserver(self, selector: #selector(styleChanged), name: AppStyle.didChange, object: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    // Row height and row backgrounds follow the preferences. Applied once the grid is in a
+    // window, after its controller has configured it, and again whenever they change.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil { applyStyle() }
+    }
+
+    @objc private func styleChanged() {
+        applyStyle()
+        reloadData()
+    }
+
+    private func applyStyle() {
+        rowHeight = GridCell.rowHeight
+        usesAlternatingRowBackgroundColors = AppStyle.settings.alternatingRows
+    }
+
     var focusedColumnIndex: Int? {
         guard let id = focusedColumn else { return nil }
         let i = column(withIdentifier: id)
@@ -113,9 +138,12 @@ enum CellContent {
 /// One grid cell. Frame-based layout: cells are created and reused constantly while scrolling.
 final class GridCell: NSTableCellView {
     static let identifier = NSUserInterfaceItemIdentifier("GridCell")
-    static let font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+    /// The grid font from the preferences.
+    static var font: NSFont { AppStyle.gridFont }
     private static let headerFont = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: .medium)
-    private static let lineHeight = ceil(font.ascender - font.descender + font.leading)
+    private static var lineHeight: CGFloat { ceil(font.ascender - font.descender + font.leading) }
+    /// 22 pt at the default 12 pt font, taller for bigger fonts.
+    static var rowHeight: CGFloat { max(22, lineHeight + 7) }
     private static let padding: CGFloat = 5
     private static let editedColor = NSColor.systemYellow.withAlphaComponent(0.28)
 
@@ -145,6 +173,10 @@ final class GridCell: NSTableCellView {
     }
 
     func show(_ content: CellContent, edited: Bool = false, focused: Bool = false, struckOut: Bool = false) {
+        if label.font !== Self.font {
+            label.font = Self.font
+            needsLayout = true
+        }
         label.isEditable = false
         label.isSelectable = false
         var text: String

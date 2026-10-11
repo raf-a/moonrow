@@ -16,12 +16,12 @@ extension WorkspaceWindowController {
     }
 
     /// Tabs showing `object`.
-    private func tabs(showing object: DatabaseObject) -> [TableTabViewController] {
+    func tabs(showing object: DatabaseObject) -> [TableTabViewController] {
         content.tabs.compactMap { $0 as? TableTabViewController }.filter { $0.table == object.ref }
     }
 
     /// Resolves staged edits in the tabs showing `object`, then runs `proceed`.
-    private func resolveEdits(on object: DatabaseObject, before action: String, then proceed: @escaping () -> Void) {
+    func resolveEdits(on object: DatabaseObject, before action: String, then proceed: @escaping () -> Void) {
         guard let tab = tabs(showing: object).first(where: \.hasPendingEdits) else { return proceed() }
         if let i = content.tabs.firstIndex(where: { $0 === tab }) { content.select(i) }
         tab.resolvePendingEdits(before: action) { [weak self] in self?.resolveEdits(on: object, before: action, then: proceed) }
@@ -135,6 +135,7 @@ extension WorkspaceWindowController {
     }
 
     func configure(_ tab: TableTabViewController) -> TableTabViewController {
+        tab.safety = environment.safety
         tab.knownTables = { [weak self] in
             self?.environment.catalog.objects.filter { $0.kind == .table }.map(\.ref) ?? []
         }
@@ -149,9 +150,12 @@ extension WorkspaceWindowController {
     /// Applies a plan, reloads the sidebar and runs `done`; shows the error otherwise.
     private func run(_ plan: @escaping () throws -> DDLPlan, failure: String, done: @escaping () -> Void) {
         let connection = connection
+        let safety = environment.safety
         Task {
             do {
-                try await connection.apply(try plan())
+                let plan = try plan()
+                guard await safety.approve(plan.setup + plan.statements + plan.teardown) else { return }
+                try await connection.apply(plan)
                 sidebar.reload()
                 done()
             } catch {

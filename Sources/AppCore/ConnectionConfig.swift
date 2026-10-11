@@ -64,6 +64,30 @@ public enum PasswordMode: String, Codable, Sendable, CaseIterable {
     case none
 }
 
+/// A colour that marks a connection in the list and on its workspace window.
+public enum ConnectionColor: String, Codable, Sendable, CaseIterable {
+    case red, orange, yellow, green, blue, purple, gray
+
+    public var title: String { rawValue.capitalized }
+}
+
+/// What a connection is for. Each tag suggests a colour.
+public enum ConnectionTag: String, Codable, Sendable, CaseIterable {
+    case local, testing, development, staging, production
+
+    public var title: String { rawValue.capitalized }
+
+    public var suggestedColor: ConnectionColor {
+        switch self {
+        case .local: .gray
+        case .testing: .purple
+        case .development: .blue
+        case .staging: .orange
+        case .production: .red
+        }
+    }
+}
+
 /// A saved connection. Passwords never live here; they go to a `SecretStore`.
 public struct ConnectionConfig: Codable, Hashable, Sendable, Identifiable {
     public var id: UUID
@@ -101,6 +125,10 @@ public struct ConnectionConfig: Codable, Hashable, Sendable, Identifiable {
     public var sshPasswordMode: PasswordMode
     /// A private key file; empty lets ssh choose (~/.ssh/config, the agent, the default keys).
     public var sshKeyPath: String
+    /// What the workspace asks before sending statements.
+    public var safeMode: SafeMode
+    public var color: ConnectionColor?
+    public var tag: ConnectionTag?
 
     public init(
         id: UUID = UUID(), name: String = "", driver: DriverKind = .sqlite,
@@ -109,7 +137,8 @@ public struct ConnectionConfig: Codable, Hashable, Sendable, Identifiable {
         tlsCAPath: String = "", tlsCertPath: String = "", tlsKeyPath: String = "",
         readOnly: Bool = false, rowsPerPage: Int = Paging.defaultPageSize,
         overSSH: Bool = false, sshHost: String = "", sshPort: Int? = nil, sshUser: String = "",
-        sshPasswordMode: PasswordMode = .keychain, sshKeyPath: String = ""
+        sshPasswordMode: PasswordMode = .keychain, sshKeyPath: String = "",
+        safeMode: SafeMode = .silent, color: ConnectionColor? = nil, tag: ConnectionTag? = nil
     ) {
         self.id = id
         self.name = name
@@ -132,12 +161,16 @@ public struct ConnectionConfig: Codable, Hashable, Sendable, Identifiable {
         self.sshUser = sshUser
         self.sshPasswordMode = sshPasswordMode
         self.sshKeyPath = sshKeyPath
+        self.safeMode = safeMode
+        self.color = color
+        self.tag = tag
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, name, driver, filePath, host, port, user, database, passwordMode
         case tlsMode, tlsCAPath, tlsCertPath, tlsKeyPath, readOnly, rowsPerPage
         case overSSH, sshHost, sshPort, sshUser, sshPasswordMode, sshKeyPath
+        case safeMode, color, tag
     }
 
     // Fields added in later versions get defaults, so older files keep loading.
@@ -164,6 +197,11 @@ public struct ConnectionConfig: Codable, Hashable, Sendable, Identifiable {
         sshUser = try c.decodeIfPresent(String.self, forKey: .sshUser) ?? ""
         sshPasswordMode = try c.decodeIfPresent(PasswordMode.self, forKey: .sshPasswordMode) ?? .keychain
         sshKeyPath = try c.decodeIfPresent(String.self, forKey: .sshKeyPath) ?? ""
+        // Values a newer version may add don't fail the file. An unknown safe mode errs on the
+        // side of asking.
+        safeMode = c.contains(.safeMode) ? (try? c.decode(SafeMode.self, forKey: .safeMode)) ?? .alert : .silent
+        color = try? c.decodeIfPresent(ConnectionColor.self, forKey: .color)
+        tag = try? c.decodeIfPresent(ConnectionTag.self, forKey: .tag)
     }
 
     /// Whether connecting goes through SSH (servers only).
@@ -203,6 +241,7 @@ public struct ConnectionConfig: Codable, Hashable, Sendable, Identifiable {
             parts.append((expandedFilePath as NSString).abbreviatingWithTildeInPath)
         }
         if readOnly { parts.append("read-only") }
+        if safeMode != .silent { parts.append("safe mode") }
         return parts.joined(separator: " · ")
     }
 
@@ -226,7 +265,9 @@ public struct ConnectionConfig: Codable, Hashable, Sendable, Identifiable {
 
 extension ConnectionConfig {
     /// `postgres://user:password@host:port/database?sslmode=require`, `mysql://…`, `mariadb://…`.
-    /// Returns the connection (not saved) and the password in the URL, if any.
+    /// Also reads `name`, `color` (or `statusColor`), `tag` (or `env`) and `safeMode` (a level
+    /// name, or `safeModeLevel` 0–4). Returns the connection (not saved) and the password in the
+    /// URL, if any.
     public static func parse(url text: String) -> (ConnectionConfig, password: String?)? {
         guard let u = URLComponents(string: text), let scheme = u.scheme?.lowercased() else { return nil }
         let driver: DriverKind
@@ -249,6 +290,15 @@ extension ConnectionConfig {
                 "verify-full": .verifyFull, "verify_identity": .verifyFull,
             ]
             if let m = modes[mode.lowercased()] { c.tlsMode = m }
+        }
+        func item(_ names: String...) -> String? {
+            u.queryItems?.first { names.contains($0.name.lowercased()) }?.value
+        }
+        if let name = item("name") { c.name = name }
+        if let color = item("color", "statuscolor") { c.color = ConnectionColor(rawValue: color.lowercased()) }
+        if let tag = item("tag", "env", "environment") { c.tag = ConnectionTag(rawValue: tag.lowercased()) }
+        if let level = item("safemode", "safemodelevel") {
+            c.safeMode = Int(level).flatMap(SafeMode.init(level:)) ?? SafeMode(rawValue: level) ?? c.safeMode
         }
         let password = u.password
         c.passwordMode = password == nil ? .none : .keychain

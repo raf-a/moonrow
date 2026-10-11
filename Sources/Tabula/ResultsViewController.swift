@@ -13,6 +13,9 @@ final class ResultsViewController: NSViewController {
     private var messages: NSTextView { messagesScroll.documentView as! NSTextView }
     private let statusLabel = NSTextField(labelWithString: "")
     private let placeholder = NSTextField(labelWithString: "Run a query with ⌘↩ (current) or ⇧⌘↩ (all)")
+    private let exportButton = NSButton(title: "Export…", target: nil, action: #selector(TabulaActions.exportData(_:)))
+    /// For Copy Rows As ▸ SQL INSERT.
+    var dialect: any Dialect = SQLiteDialect()
 
     private(set) var results: [ResultGridController] = []
     private var statements: [SQLStatementRange] = []
@@ -40,7 +43,12 @@ final class ResultsViewController: NSViewController {
         statusLabel.lineBreakMode = .byTruncatingTail
         statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        let bottom = NSStackView(views: [statusLabel])
+        exportButton.bezelStyle = .accessoryBarAction
+        exportButton.controlSize = .small
+        exportButton.font = .systemFont(ofSize: 11)
+        exportButton.toolTip = "Export the shown result (⌘E)"
+        exportButton.isHidden = true
+        let bottom = NSStackView(views: [statusLabel, exportButton])
         bottom.edgeInsets = NSEdgeInsets(top: 0, left: 8, bottom: 0, right: 8)
         bottom.heightAnchor.constraint(equalToConstant: 24).isActive = true
         let line = NSBox()
@@ -101,6 +109,7 @@ final class ResultsViewController: NSViewController {
             status(statements.count > 1 ? "Running statement \(i + 1) of \(statements.count)…" : "Running…")
         case .columns(let i, let columns):
             let result = ResultGridController(columns: columns, statement: statements[i].text, number: results.count + 1)
+            result.dialect = dialect
             results.append(result)
             resultForStatement[i] = result
             addChild(result)
@@ -166,6 +175,7 @@ final class ResultsViewController: NSViewController {
         showsMessages = false
         messagesScroll.isHidden = true
         shown = result
+        exportButton.isHidden = false
         container.addSubview(result.view)
         result.view.translatesAutoresizingMaskIntoConstraints = false
         result.view.pin(to: container)
@@ -176,6 +186,7 @@ final class ResultsViewController: NSViewController {
     func showMessages() {
         shown?.view.removeFromSuperview()
         shown = nil
+        exportButton.isHidden = true
         showsMessages = true
         messagesScroll.isHidden = false
         placeholder.isHidden = true
@@ -263,6 +274,7 @@ final class ResultGridController: NSViewController, NSTableViewDataSource, NSTab
     private(set) var rows: [[DBValue]] = []
     var outcome: ScriptRunner.Outcome?
     var wasCancelled = false
+    var dialect: any Dialect = SQLiteDialect()
     let grid = DataGrid()
     private var columnsSized = false
     private static let copyLimit = 100_000
@@ -293,6 +305,9 @@ final class ResultGridController: NSViewController, NSTableViewDataSource, NSTab
         grid.delegate = self
         let menu = NSMenu()
         menu.addItem(withTitle: "Copy Rows", action: #selector(copy(_:)), keyEquivalent: "").target = self
+        menu.addItem(CopyFormat.menuItem(target: self, action: #selector(copyRowsAs(_:))))
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Export…", action: #selector(TabulaActions.exportData(_:)), keyEquivalent: "")
         grid.menu = menu
         for (i, c) in columns.enumerated() {
             let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(String(i)))
@@ -345,13 +360,23 @@ final class ResultGridController: NSViewController, NSTableViewDataSource, NSTab
     }
 
     /// Copies the selected rows as tab-separated text, in the grid's column order.
-    @objc func copy(_ sender: Any?) {
+    @objc func copy(_ sender: Any?) { copyRows(as: nil) }
+
+    /// Copy Rows As ▸ CSV, JSON, SQL INSERT (into `result`), Markdown.
+    @objc func copyRowsAs(_ sender: Any?) {
+        guard let tag = (sender as? NSMenuItem)?.tag, CopyFormat.allCases.indices.contains(tag) else { return }
+        copyRows(as: CopyFormat.allCases[tag])
+    }
+
+    private func copyRows(as format: CopyFormat?) {
         var selection = grid.selectedRowIndexes
         if grid.clickedRow >= 0, !selection.contains(grid.clickedRow) { selection = [grid.clickedRow] }
         guard !selection.isEmpty else { return NSSound.beep() }
         guard selection.count <= Self.copyLimit else { return NSSound.beep() }
         let order = grid.tableColumns.compactMap { Int($0.identifier.rawValue) }
-        let text = CellText.tsv(selection.map { r in order.map { rows[r][$0] } })
+        let ordered = selection.map { r in order.map { rows[r][$0] } }
+        let text = format?.text(columns: order.map { columns[$0].name }, rows: ordered, dialect: dialect, table: nil)
+            ?? CellText.tsv(ordered)
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
     }

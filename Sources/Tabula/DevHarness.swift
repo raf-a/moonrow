@@ -12,6 +12,10 @@ import Darwin
 ///     TABULA_CONNECT=postgres://…@tabula-test-pg:5432/postgres TABULA_SSH=ssh://tabula:tabula@127.0.0.1:52222 TABULA_STORE=… Tabula
 ///     TABULA_FORM=mysql TABULA_STORE=… TABULA_SNAPSHOTS=… Tabula
 ///     TABULA_STRUCTURE=users TABULA_STORE=… TABULA_SNAPSHOTS=… Tabula /tmp/copy-of-sample.sqlite
+///     TABULA_SAFETY=users TABULA_STORE=… TABULA_SNAPSHOTS=… Tabula build/sample.sqlite
+///     TABULA_PREFS=users TABULA_STORE=… TABULA_SNAPSHOTS=… Tabula build/sample.sqlite
+///     TABULA_EXPORT=events TABULA_STORE=… TABULA_SNAPSHOTS=build/snapshots Tabula build/sample.sqlite
+///     TABULA_IMPORT=empty_table=/tmp/rows.csv TABULA_STORE=… TABULA_SNAPSHOTS=… Tabula /tmp/copy-of-sample.sqlite
 ///
 /// The bench opens the table in the first workspace with every row in one page, scrolls it like
 /// a fast trackpad, jumps to far-apart rows, prints timings and quits. The demo drives the grid's
@@ -21,8 +25,16 @@ import Darwin
 /// history; it only reads the database but writes history and saved queries next to
 /// `TABULA_STORE`, which it requires. The structure demo edits a table's columns and indexes
 /// through the structure editor, commits, then designs and creates a new table; it COMMITS DDL,
-/// so point it at a copy (or a TABULA_CONNECT scratch database). Snapshots are rendered
-/// in-process (no screen-recording permission needed).
+/// so point it at a copy (or a TABULA_CONNECT scratch database). The safety demo walks safe mode's
+/// levels in a query tab (reads pass, writes ask, a wrong password is refused, lowering the level
+/// asks); its writes go to a TEMP table, so the file isn't changed. The preferences demo shows
+/// each pane, rebinds Run All from the Keymap pane, switches theme, appearance and grid font, and
+/// snapshots a workspace in the new style; it writes `settings.json` next to `TABULA_STORE`,
+/// which the safety and preferences demos require. The export demo opens the table, filters it,
+/// and exports it through the export sheet as CSV, JSON and SQL into `TABULA_SNAPSHOTS`
+/// (snapshotting the sheet for each format). The import demo opens the table, loads the CSV file
+/// into the import sheet, snapshots it and imports; it COMMITS, so point it at a copy. Snapshots
+/// are rendered in-process (no screen-recording permission needed).
 @MainActor
 enum DevHarness {
     static func runIfRequested(_ app: AppDelegate) {
@@ -79,12 +91,49 @@ enum DevHarness {
             }
             return
         }
+        for (key, demo) in [("TABULA_SAFETY", safetyDemo), ("TABULA_PREFS", preferencesDemo)] as [(String, (AppDelegate, String, URL?) async throws -> Void)] {
+            guard let table = env[key] else { continue }
+            Task {
+                do {
+                    guard env["TABULA_STORE"] != nil else { throw HarnessError("\(key) needs TABULA_STORE") }
+                    try await demo(app, table, snapshots)
+                } catch {
+                    print("\(key) demo failed: \(error)")
+                }
+                NSApp.terminate(nil)
+            }
+            return
+        }
         if let table = env["TABULA_STRUCTURE"] {
             Task {
                 do {
                     try await structureDemo(app, table: table, snapshots: snapshots)
                 } catch {
                     print("structure demo failed: \(error)")
+                }
+                NSApp.terminate(nil)
+            }
+            return
+        }
+        if let table = env["TABULA_EXPORT"] {
+            Task {
+                do {
+                    try await exportDemo(app, table: table, snapshots: snapshots)
+                } catch {
+                    print("export demo failed: \(error)")
+                }
+                NSApp.terminate(nil)
+            }
+            return
+        }
+        if let spec = env["TABULA_IMPORT"] {
+            Task {
+                do {
+                    let parts = spec.split(separator: "=", maxSplits: 1).map(String.init)
+                    guard parts.count == 2 else { throw HarnessError("TABULA_IMPORT=<table>=<csv path>") }
+                    try await importDemo(app, table: parts[0], file: URL(filePath: (parts[1] as NSString).expandingTildeInPath), snapshots: snapshots)
+                } catch {
+                    print("import demo failed: \(error)")
                 }
                 NSApp.terminate(nil)
             }
@@ -379,6 +428,144 @@ enum DevHarness {
         snap("7-created.png", window)
     }
 
+    /// Safe mode in a query tab: what passes, what asks, what a wrong password does.
+    private static func safetyDemo(_ app: AppDelegate, table: String, snapshots: URL?) async throws {
+        if let snapshots { try FileManager.default.createDirectory(at: snapshots, withIntermediateDirectories: true) }
+        func snap(_ name: String, _ window: NSWindow?) {
+            window?.displayIfNeeded()
+            if let snapshots, let window { snapshot(window, to: snapshots.appending(path: name)) }
+        }
+        let workspace = try await waitFor("workspace") { app.workspaces.first }
+        let window = try require(workspace.window, "workspace window")
+        let gate = workspace.safety
+        workspace.newQueryTab(nil)
+        let query = try require(workspace.queryController, "query tab")
+        func run(_ sql: String) {
+            query.setText(sql)
+            query.runAllQueries(nil)
+        }
+        func finished() async throws -> String {
+            _ = try await waitFor("run to finish") { query.isRunning ? nil : true }
+            try await Task.sleep(for: .milliseconds(50))
+            return query.results.messagesText.split(separator: "\n").last.map(String.init) ?? ""
+        }
+        func prompt() async throws -> SafetyPrompt {
+            try await waitFor("safe mode prompt") { gate.prompt.flatMap { $0.sheet.isVisible ? $0 : nil } }
+        }
+
+        // What the password levels want: the password in TABULA_CONNECT, else the connection's name.
+        let answer = gate.credential.kind == .password
+            ? ProcessInfo.processInfo.environment["TABULA_CONNECT"].flatMap { ConnectionConfig.parse(url: $0)?.password } ?? ""
+            : gate.connectionName
+        /// Changes the level, giving the password when lowering it asks for one.
+        func setLevel(_ level: SafeMode) async throws {
+            let change = Task { await gate.change(to: level) }
+            while gate.level != level {
+                if let p = gate.prompt, p.sheet.isVisible { p.respond(password: answer) }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            await change.value
+        }
+        print("starting level: \(gate.level.title)")
+        try await setLevel(.alertWrites)
+        print("level: \(gate.level.title)")
+        run("select count(*) from \(table)")
+        print("read under \(gate.level.title): prompt \(gate.prompt != nil ? "shown" : "not shown"); \(try await finished())")
+
+        let script = "create temp table tabula_safety_demo (x integer);\ninsert into tabula_safety_demo values (1);\nselect * from tabula_safety_demo"
+        run(script)
+        var p = try await prompt()
+        snap("s1-confirm.png", window)
+        snap("s1-confirm-sheet.png", p.sheet)
+        p.cancel(nil)
+        try await Task.sleep(for: .milliseconds(100))
+        print("cancelled: running \(query.isRunning), results \(query.results.results.count)")
+        run(script)
+        p = try await prompt()
+        p.respond(password: nil)
+        print("confirmed: \(try await finished()); result rows \(query.results.results.first?.rows.count ?? -1)")
+
+        try await setLevel(.password)
+        print("level: \(gate.level.title) (credential: \(gate.credential.kind))")
+        run("select count(*) from \(table)")
+        p = try await prompt()
+        p.respond(password: "wrong")
+        print("wrong answer: sheet still open \(p.sheet.isVisible), error shown \(p.errorShown)")
+        snap("s2-password.png", window)
+        snap("s2-password-sheet.png", p.sheet)
+        p.respond(password: answer)
+        print("right answer: \(try await finished())")
+
+        let lowering = Task { await gate.change(to: .silent) }
+        p = try await prompt()
+        snap("s3-lowering-sheet.png", p.sheet)
+        p.respond(password: answer)
+        await lowering.value
+        print("lowered to: \(gate.level.title)")
+        snap("s4-toolbar.png", window)
+    }
+
+    /// Each settings pane, a rebinding from the Keymap pane, then a workspace in another style.
+    private static func preferencesDemo(_ app: AppDelegate, table: String, snapshots: URL?) async throws {
+        if let snapshots { try FileManager.default.createDirectory(at: snapshots, withIntermediateDirectories: true) }
+        func snap(_ name: String, _ window: NSWindow?) {
+            window?.displayIfNeeded()
+            if let snapshots, let window { snapshot(window, to: snapshots.appending(path: name)) }
+        }
+        let workspace = try await waitFor("workspace") { app.workspaces.first }
+        app.showPreferences(nil)
+        let prefs = try await waitFor("settings window") { NSApp.windows.first { $0.windowController is PreferencesWindowController && $0.isVisible } }
+        let controller = try require(prefs.windowController as? PreferencesWindowController, "settings controller")
+        for (i, name) in ["p1-general", "p2-fonts", "p3-keymap"].enumerated() {
+            controller.show(pane: i)
+            try await Task.sleep(for: .milliseconds(300))
+            snap("\(name).png", prefs)
+        }
+
+        // Rebind Run All to ⌃⌘R with the recorder, as a key press would.
+        let runAll = try require(Keymap.command("runAllQueries:"), "Run All command")
+        let event = try require(NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: [.command, .control], timestamp: 0, windowNumber: prefs.windowNumber,
+            context: nil, characters: "\u{12}", charactersIgnoringModifiers: "r", isARepeat: false, keyCode: 15), "key event")
+        print("recorded: \(ShortcutRecorder.key(for: event) ?? "?") with \(KeyBinding.Modifiers(event.modifierFlags))")
+        controller.keymap.assign(KeyBinding(ShortcutRecorder.key(for: event) ?? "r", .init(event.modifierFlags)), to: runAll)
+        // ⌘C is Copy's and is refused.
+        controller.keymap.assign(KeyBinding("c"), to: runAll)
+        try await Task.sleep(for: .milliseconds(200))
+        snap("p4-keymap-changed.png", prefs)
+        let item = menuItem(NSApp.mainMenu, action: #selector(TabulaActions.runAllQueries(_:)))
+        print("Run All in the menu: \(item.map { KeyBinding($0.keyEquivalent, .init($0.keyEquivalentModifierMask)).display } ?? "missing")")
+
+        try app.settings.update {
+            $0.appearance = .dark
+            $0.editorTheme = EditorTheme.paper.id
+            $0.editorFontSize = 15
+            $0.gridFontSize = 14
+            $0.alternatingRows = false
+        }
+        prefs.close()
+        let window = try require(workspace.window, "workspace window")
+        _ = workspace.sidebar.select(named: table)
+        let data = try await waitFor("table tab") { workspace.tableController }
+        _ = try await waitFor("rows") { data.cache.flatMap { visibleLoaded(data.grid, $0) ? true : nil } }
+        print("grid row height: \(data.grid.rowHeight)")
+        snap("p5-dark-grid.png", window)
+        workspace.newQueryTab(nil)
+        let query = try require(workspace.queryController, "query tab")
+        query.setText("-- paper theme, dark\nselect id, 'text' as s, 42 from \(table) where id > $1;")
+        try await Task.sleep(for: .milliseconds(200))
+        snap("p6-dark-editor.png", window)
+        try app.settings.update { $0 = AppSettings() }
+    }
+
+    private static func menuItem(_ menu: NSMenu?, action: Selector) -> NSMenuItem? {
+        for item in menu?.items ?? [] {
+            if item.action == action { return item }
+            if let found = menuItem(item.submenu, action: action) { return found }
+        }
+        return nil
+    }
+
     /// Types a script into a query tab with autocomplete, runs it, cancels, saves, shows history.
     private static func queryDemo(_ app: AppDelegate, table: String, snapshots: URL?) async throws {
         if let snapshots { try FileManager.default.createDirectory(at: snapshots, withIntermediateDirectories: true) }
@@ -472,6 +659,74 @@ enum DevHarness {
         window.displayIfNeeded()
         print("tabs: \(workspace.content.tabs.map(\.tabItem.title))")
         snap("q8-tabs.png", window)
+    }
+
+    /// Exports a filtered table as CSV, JSON and SQL through the export sheet.
+    private static func exportDemo(_ app: AppDelegate, table: String, snapshots: URL?) async throws {
+        let dir = try require(snapshots, "TABULA_SNAPSHOTS (where the files go)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let workspace = try await waitFor("workspace") { app.workspaces.first }
+        let window = try require(workspace.window, "workspace window")
+        _ = try await waitFor("sidebar item \(table)") { workspace.sidebar.select(named: table) ? true : nil }
+        let data = try await waitFor("table view") { workspace.tableController }
+        _ = try await waitFor("rows") { data.cache.flatMap { visibleLoaded(data.grid, $0) ? true : nil } }
+        // Rows whose id ends in 7, newest first.
+        let before = data.cache.map(ObjectIdentifier.init)
+        data.toggleFilters(nil)
+        data.filterBar.apply(FilterCondition(.column("id"), .hasSuffix, "7"))
+        _ = try await waitFor("filtered page") { data.cache.map(ObjectIdentifier.init) != before ? true : nil }
+        _ = try await waitFor("filtered rows") { data.cache.flatMap { visibleLoaded(data.grid, $0) ? true : nil } }
+        window.displayIfNeeded()
+        print("filter: \(data.query.filter!) → \(data.total) rows")
+
+        workspace.exportData(nil)
+        let sheet = try await waitFor("export sheet") { window.attachedSheet?.windowController as? ExportSheetController }
+        for (i, ext) in ["csv", "json", "sql"].enumerated() {
+            sheet.selectFormat(i)
+            snapshot(sheet.window!, to: dir.appending(path: "export-\(i + 1)-\(ext)-sheet.png"))
+            let url = dir.appending(path: "\(table).\(ext)")
+            var outcome: Result<Int, any Error>?
+            sheet.onFinish = { outcome = $0 }
+            sheet.export(to: url)
+            let result = try await waitFor("\(ext) export") { outcome }
+            let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
+            print("\(ext): \(try result.get()) rows, \(size) bytes → \(url.path)")
+            if i == 2 { snapshot(sheet.window!, to: dir.appending(path: "export-4-done.png")) }
+        }
+        sheet.close()
+    }
+
+    /// Imports a CSV file into a table through the import sheet.
+    private static func importDemo(_ app: AppDelegate, table: String, file: URL, snapshots: URL?) async throws {
+        if let snapshots { try FileManager.default.createDirectory(at: snapshots, withIntermediateDirectories: true) }
+        let workspace = try await waitFor("workspace") { app.workspaces.first }
+        let window = try require(workspace.window, "workspace window")
+        _ = try await waitFor("sidebar item \(table)") { workspace.sidebar.select(named: table) ? true : nil }
+        let tab = try await waitFor("table tab") { workspace.tableTab }
+        let data = try await waitFor("table view") { tab.data }
+        _ = try await waitFor("rows") { data.cache }
+        let before = data.total
+        let sheet = try require(workspace.importCSV(into: DatabaseObject(tab.table, kind: .table), file: file), "import sheet")
+        let csv = try await waitFor("parsed file") { sheet.csv }
+        print("file: \(csv.rows.count) rows, columns \(csv.columnNames), encoding \(csv.encoding), delimiter \(csv.delimiter.debugDescription)")
+        print("mapping: \(zip(sheet.columns.map(\.name), sheet.mapping).map { "\($0) ← \($1.map { csv.columnNames[$0] } ?? "-")" })")
+        try await Task.sleep(for: .milliseconds(200))
+        if let snapshots { snapshot(sheet.window!, to: snapshots.appending(path: "import-1-sheet.png")) }
+        var outcome: Result<Int, any Error>?
+        sheet.onFinish = { outcome = $0 }
+        sheet.startImport()
+        let result = try await waitFor("import") { outcome }
+        switch result {
+        case .success(let n): print("imported \(n) rows")
+        case .failure(let error):
+            if let snapshots { snapshot(sheet.window!, to: snapshots.appending(path: "import-2-failed.png")) }
+            throw error
+        }
+        let reloaded = try await waitFor("reloaded rows") { tab.data.flatMap { $0.cache != nil && $0.total != before ? $0 : nil } }
+        _ = try await waitFor("rows on screen") { reloaded.cache.flatMap { visibleLoaded(reloaded.grid, $0) ? true : nil } }
+        window.displayIfNeeded()
+        print("\(table): \(before) → \(reloaded.total) rows")
+        if let snapshots { snapshot(window, to: snapshots.appending(path: "import-2-table.png")) }
     }
 
     private static func key(_ characters: String, code: UInt16) throws -> NSEvent {

@@ -19,6 +19,8 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
     var leadingAccessory: NSView?
     /// Why the grid can't be edited (a view, a read-only connection), or nil.
     let readOnlyReason: String?
+    /// Asks before a commit is sent.
+    var safety: SafetyGate?
     var isEditable: Bool { readOnlyReason == nil }
 
     private let connection: any DatabaseConnection
@@ -527,6 +529,10 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
         showStatus("Committing…")
         Task {
             defer { isCommitting = false }
+            if let safety, await !safety.approve(browser.preview(edits)) {
+                showStatus("")
+                return
+            }
             do {
                 try await browser.commit(edits)
                 if let proceed {
@@ -784,6 +790,11 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
         }
         menu.addItem(.separator())
         menu.addItem(withTitle: "Copy Rows", action: #selector(copy(_:)), keyEquivalent: "").target = self
+        menu.addItem(CopyFormat.menuItem(target: self, action: #selector(copyRowsAs(_:))))
+        menu.addItem(.separator())
+        // Sent up the responder chain to the workspace.
+        menu.addItem(withTitle: "Export…", action: #selector(TabulaActions.exportData(_:)), keyEquivalent: "")
+        menu.addItem(withTitle: "Import CSV…", action: #selector(TabulaActions.importCSV(_:)), keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: "Reload", action: #selector(reloadCurrentTab(_:)), keyEquivalent: "").target = self
         return menu
@@ -794,7 +805,7 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
         let typing = view.window?.firstResponder is NSTextView
         let hasRows = !targetRows.isEmpty
         switch item.action {
-        case #selector(copy(_:)): return hasRows
+        case #selector(copy(_:)), #selector(copyRowsAs(_:)): return hasRows
         case #selector(commitChanges(_:)), #selector(discardChanges(_:)), #selector(previewChanges(_:)):
             if item.action == #selector(commitChanges(_:)) { item.title = "Commit Changes" }
             return !edits.isEmpty || editing != nil
@@ -815,7 +826,15 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
 
     /// Copies selected rows as tab-separated text, as shown (staged edits included), in the
     /// grid's current column order.
-    @objc func copy(_ sender: Any?) {
+    @objc func copy(_ sender: Any?) { copyRows(as: nil) }
+
+    /// Copy Rows As ▸ CSV, JSON, SQL INSERT, Markdown; the item's tag picks the format.
+    @objc func copyRowsAs(_ sender: Any?) {
+        guard let tag = (sender as? NSMenuItem)?.tag, CopyFormat.allCases.indices.contains(tag) else { return }
+        copyRows(as: CopyFormat.allCases[tag])
+    }
+
+    private func copyRows(as format: CopyFormat?) {
         guard let cache, let first = targetRows.first, let last = targetRows.last else {
             NSSound.beep()
             return
@@ -823,7 +842,7 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
         guard last - first < Self.copyLimit else {
             let alert = NSAlert()
             alert.messageText = "Too many rows to copy"
-            alert.informativeText = "Select fewer than \(Self.copyLimit.formatted(.number)) rows. Export arrives in a later version."
+            alert.informativeText = "Select fewer than \(Self.copyLimit.formatted(.number)) rows, or use Export… (⌘E)."
             if let window = view.window { alert.beginSheetModal(for: window) }
             return
         }
@@ -839,7 +858,10 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
                     guard row - first < span.count else { return nil }
                     return overlay(span[row - first], row: row)
                 }
-                let text = CellText.tsv(rows.map { row in order.map { row[$0] } })
+                let ordered = rows.map { row in order.map { row[$0] } }
+                let names = order.map { browser?.columns[$0].name ?? "" }
+                let text = format?.text(columns: names, rows: ordered, dialect: connection.dialect, table: table)
+                    ?? CellText.tsv(ordered)
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(text, forType: .string)
             } catch {

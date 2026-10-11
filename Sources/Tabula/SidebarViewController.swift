@@ -18,6 +18,9 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     var onTruncate: ((DatabaseObject) -> Void)?
     var onDelete: ((DatabaseObject) -> Void)?
     var onCopyScript: ((DatabaseObject, Script) -> Void)?
+    var onExport: ((DatabaseObject) -> Void)?
+    /// Nil on read-only connections.
+    var onImportCSV: ((DatabaseObject) -> Void)?
     /// After the object list (re)loads.
     var onObjectsLoaded: (([DatabaseObject]) -> Void)?
     /// Set while the selection follows the open tab, so it doesn't open anything.
@@ -86,6 +89,9 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         menu.addItem(withTitle: "Rename…", action: #selector(renameItem(_:)), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Truncate…", action: #selector(truncateItem(_:)), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Delete…", action: #selector(deleteItem(_:)), keyEquivalent: "").target = self
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Export…", action: #selector(exportItem(_:)), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Import CSV…", action: #selector(importCSVItem(_:)), keyEquivalent: "").target = self
         menu.addItem(.separator())
         menu.addItem(withTitle: "Copy Name", action: #selector(copyName(_:)), keyEquivalent: "").target = self
         let scripts = NSMenuItem(title: "Copy Script As", action: nil, keyEquivalent: "")
@@ -233,6 +239,10 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             return kind != nil && kind != .function
         case #selector(truncateItem(_:)):
             return kind == .table
+        case #selector(exportItem(_:)):
+            return kind == .table || kind == .view || kind == .materializedView
+        case #selector(importCSVItem(_:)):
+            return kind == .table && onImportCSV != nil
         case #selector(copyScript(_:)):
             guard let kind else { return false }
             return item.tag == 2 ? kind == .table : true
@@ -257,6 +267,14 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     @objc private func deleteItem(_ sender: Any?) {
         if let object = targetObject { onDelete?(object) }
+    }
+
+    @objc private func exportItem(_ sender: Any?) {
+        if let object = targetObject { onExport?(object) }
+    }
+
+    @objc private func importCSVItem(_ sender: Any?) {
+        if let object = targetObject { onImportCSV?(object) }
     }
 
     @objc private func copyScript(_ sender: NSMenuItem) {

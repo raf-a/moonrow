@@ -1,9 +1,11 @@
+import AppCore
 import AppKit
 
 /// Actions sent through the responder chain (nil target). Implemented by whichever window
 /// controller or the app delegate handles them.
 @MainActor @objc protocol TabulaActions {
     @objc optional func newConnection(_ sender: Any?)
+    @objc optional func showPreferences(_ sender: Any?)
     @objc optional func showConnections(_ sender: Any?)
     @objc optional func reloadWorkspace(_ sender: Any?)
     @objc optional func focusItemFilter(_ sender: Any?)
@@ -41,16 +43,49 @@ import AppKit
     @objc optional func toggleLineComment(_ sender: Any?)
     @objc optional func showSavedQueries(_ sender: Any?)
     @objc optional func showQueryHistory(_ sender: Any?)
+
+    // Export and import
+    @objc optional func exportData(_ sender: Any?)
+    @objc optional func importCSV(_ sender: Any?)
+    @objc optional func copyRowsAs(_ sender: Any?)
 }
 
 @MainActor
 enum MainMenu {
-    static func build() -> NSMenu {
+    /// Shortcuts of the commands in `Keymap` come from there, with the user's `keyBindings`.
+    static func build(keyBindings: [String: KeyBinding] = [:]) -> NSMenu {
+        let menu = buildMenus()
+        applyKeymap(menu, keyBindings)
+        return menu
+    }
+
+    private static func applyKeymap(_ menu: NSMenu, _ overrides: [String: KeyBinding]) {
+        for item in menu.items {
+            if let sub = item.submenu { applyKeymap(sub, overrides) }
+            guard let action = item.action, let binding = Keymap.binding(for: NSStringFromSelector(action), overrides: overrides) else { continue }
+            item.keyEquivalent = binding.key
+            item.keyEquivalentModifierMask = binding.modifierFlags
+        }
+    }
+
+    /// Every shortcut in `menu` outside `Keymap`, for conflict checks.
+    static func fixedShortcuts(in menu: NSMenu?) -> [(title: String, binding: KeyBinding)] {
+        guard let menu else { return [] }
+        return menu.items.flatMap { item -> [(title: String, binding: KeyBinding)] in
+            if let sub = item.submenu { return fixedShortcuts(in: sub) }
+            guard !item.keyEquivalent.isEmpty, !(item.action.map { Keymap.command(NSStringFromSelector($0)) != nil } ?? false) else { return [] }
+            return [(item.title, KeyBinding(item.keyEquivalent, .init(item.keyEquivalentModifierMask)))]
+        }
+    }
+
+    private static func buildMenus() -> NSMenu {
         let main = NSMenu()
         let appName = ProcessInfo.processInfo.processName
 
         main.addSubmenu("") { m in
             m.add("About \(appName)", #selector(NSApplication.orderFrontStandardAboutPanel(_:)))
+            m.addItem(.separator())
+            m.add("Settings…", #selector(TabulaActions.showPreferences(_:)), ",")
             m.addItem(.separator())
             let services = m.add("Services", nil)
             services.submenu = NSMenu()
@@ -73,6 +108,9 @@ enum MainMenu {
             m.add("Close Window", #selector(NSWindow.performClose(_:)), "w", [.command, .shift])
             m.addItem(.separator())
             m.add("Save Query As…", #selector(TabulaActions.saveQueryAs(_:)), "s", [.command, .shift])
+            m.addItem(.separator())
+            m.add("Export…", #selector(TabulaActions.exportData(_:)), "e")
+            m.add("Import CSV…", #selector(TabulaActions.importCSV(_:)))
         }
 
         main.addSubmenu("Edit") { m in
@@ -106,7 +144,8 @@ enum MainMenu {
                 ("Find and Replace…", .showReplaceInterface, "f", [.command, .option]),
                 ("Find Next", .nextMatch, "g", .command),
                 ("Find Previous", .previousMatch, "g", [.command, .shift]),
-                ("Use Selection for Find", .setSearchString, "e", .command),
+                // ⌘E is Export.
+                ("Use Selection for Find", .setSearchString, "", .command),
             ] {
                 find.submenu!.add(title, #selector(NSTextView.performFindPanelAction(_:)), key, mods).tag = action.rawValue
             }
@@ -183,5 +222,26 @@ extension NSMenu {
         item.keyEquivalentModifierMask = modifiers
         addItem(item)
         return item
+    }
+}
+
+extension KeyBinding {
+    var modifierFlags: NSEvent.ModifierFlags {
+        var flags: NSEvent.ModifierFlags = []
+        if modifiers.contains(.command) { flags.insert(.command) }
+        if modifiers.contains(.shift) { flags.insert(.shift) }
+        if modifiers.contains(.option) { flags.insert(.option) }
+        if modifiers.contains(.control) { flags.insert(.control) }
+        return flags
+    }
+}
+
+extension KeyBinding.Modifiers {
+    init(_ flags: NSEvent.ModifierFlags) {
+        self = []
+        if flags.contains(.command) { insert(.command) }
+        if flags.contains(.shift) { insert(.shift) }
+        if flags.contains(.option) { insert(.option) }
+        if flags.contains(.control) { insert(.control) }
     }
 }

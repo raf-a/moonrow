@@ -271,6 +271,7 @@ private final class ConnectionCell: NSTableCellView {
     private let title = NSTextField(labelWithString: "")
     private let detail = NSTextField(labelWithString: "")
     private let glyph = NSImageView()
+    private let tagLabel = NSTextField(labelWithString: "")
 
     init() {
         super.init(frame: .zero)
@@ -291,7 +292,10 @@ private final class ConnectionCell: NSTableCellView {
         text.orientation = .vertical
         text.alignment = .leading
         text.spacing = 1
-        let row = NSStackView(views: [glyph, text])
+        tagLabel.font = .systemFont(ofSize: 9, weight: .bold)
+        tagLabel.setContentHuggingPriority(.required, for: .horizontal)
+        tagLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        let row = NSStackView(views: [glyph, text, NSView(), tagLabel])
         row.spacing = 10
         row.edgeInsets = NSEdgeInsets(top: 0, left: 4, bottom: 0, right: 4)
         addSubview(row)
@@ -308,6 +312,11 @@ private final class ConnectionCell: NSTableCellView {
         toolTip = c.driver.isServer ? c.summary : c.expandedFilePath
         glyph.image = NSImage(
             systemSymbolName: c.driver.isServer ? "server.rack" : "cylinder.split.1x2", accessibilityDescription: c.driver.displayName)
+        // The connection's colour marks it; uncoloured ones keep the accent colour.
+        glyph.contentTintColor = c.markColor ?? .controlAccentColor
+        tagLabel.stringValue = c.tag?.title.uppercased() ?? ""
+        tagLabel.textColor = c.markColor ?? .secondaryLabelColor
+        tagLabel.isHidden = c.tag == nil
     }
 }
 
