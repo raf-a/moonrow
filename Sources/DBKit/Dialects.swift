@@ -44,6 +44,14 @@ public struct SQLiteDialect: Dialect {
         }
         return "\(expression)\(not) LIKE " + .value(.text(likePattern(kind, value))) + " ESCAPE '\\'"
     }
+
+    /// SQLite has no `SET x = DEFAULT`; write the declared default instead.
+    public func defaultValue(for column: ColumnInfo) -> String {
+        guard let d = column.defaultExpression, !d.isEmpty else { return "NULL" }
+        // pragma_table_info gives the expression as written; a bare function call such as
+        // CURRENT_TIMESTAMP is fine, anything else is parenthesized to keep it one term.
+        return d.first == "(" || d.allSatisfy({ $0.isLetter || $0 == "_" }) ? d : "(\(d))"
+    }
 }
 
 public struct PostgresDialect: Dialect {

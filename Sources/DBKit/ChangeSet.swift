@@ -1,11 +1,22 @@
 public struct ColumnValue: Sendable, Hashable {
     public var column: String
     public var value: DBValue
+    /// SQL written in place of `value`, such as `DEFAULT`. Comes from the dialect or the
+    /// table's structure, never from what the user typed. Not allowed in keys.
+    public var expression: String?
 
     public init(_ column: String, _ value: DBValue) {
         self.column = column
         self.value = value
     }
+
+    public static func expression(_ column: String, _ sql: String) -> ColumnValue {
+        var c = ColumnValue(column, .null)
+        c.expression = sql
+        return c
+    }
+
+    var fragment: SQLFragment { expression.map { SQLFragment($0) } ?? .value(value) }
 }
 
 /// An edited row: how to find it, and what changed.
@@ -55,13 +66,13 @@ extension Dialect {
     public func insert(into table: TableRef, _ values: [ColumnValue]) -> SQLFragment {
         guard !values.isEmpty else { return SQLFragment(insertDefaultValues(into: qualified(table))) }
         let columns = values.map { quoteIdentifier($0.column) }.joined(separator: ", ")
-        let placeholders = values.map { SQLFragment.value($0.value) }.joined(separator: ", ")
+        let placeholders = values.map(\.fragment).joined(separator: ", ")
         return "INSERT INTO \(qualified(table)) (\(columns)) VALUES (" + placeholders + ")"
     }
 
     public func update(_ table: TableRef, _ row: RowUpdate) -> SQLFragment {
         let assignments = row.changes
-            .map { "\(quoteIdentifier($0.column)) = " + .value($0.value) }
+            .map { "\(quoteIdentifier($0.column)) = " + $0.fragment }
             .joined(separator: ", ")
         return "UPDATE \(qualified(table)) SET " + assignments + " WHERE " + keyPredicate(row.key)
     }
@@ -72,6 +83,7 @@ extension Dialect {
 
     public func keyPredicate(_ key: [ColumnValue]) -> SQLFragment {
         precondition(!key.isEmpty, "refusing to build an unrestricted UPDATE/DELETE")
+        precondition(key.allSatisfy { $0.expression == nil }, "keys are values, not expressions")
         return key.map { kv -> SQLFragment in
             let column = quoteIdentifier(kv.column)
             return kv.value.isNull ? SQLFragment("\(column) IS NULL") : "\(column) = " + .value(kv.value)

@@ -41,6 +41,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TabulaActions {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
+    /// Staged grid edits are never dropped silently: ask, one workspace at a time, then quit again.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let workspace = workspaces.first(where: \.hasPendingEdits) else { return .terminateNow }
+        workspace.resolvePendingEdits(before: "Quitting") { NSApp.terminate(nil) }
+        return .terminateCancel
+    }
+
     // MARK: - Actions
 
     @objc func showConnections(_ sender: Any?) {

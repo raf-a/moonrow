@@ -83,6 +83,20 @@ private func makeDB() async throws -> SQLiteConnection {
         #expect(try await db.count(users) == 1)
     }
 
+    @Test func verifyRollsBackAndStatementLogShowsValues() async throws {
+        let db = try await makeDB()
+        let log = Lines()
+        await db.setStatementLog { log.append($0) }
+        await #expect(throws: DatabaseError.self) {
+            _ = try await db.transaction([
+                SQLStatement("INSERT INTO users (name, email) VALUES (?, ?)", bindings: [.text("it's"), .text("i@x")]),
+                SQLStatement("DELETE FROM users"),
+            ]) { i, _ in if i == 1 { throw DatabaseError("stop") } }
+        }
+        #expect(try await db.count(TableRef("users")) == 0)
+        #expect(log.all.prefix(4) == ["BEGIN", "INSERT INTO users (name, email) VALUES ('it''s', 'i@x')", "DELETE FROM users", "ROLLBACK"])
+    }
+
     @Test func streamsInBatches() async throws {
         let db = try SQLiteConnection(path: ":memory:")
         let sql = "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 2500) SELECT i FROM n"
@@ -140,4 +154,11 @@ private func makeDB() async throws -> SQLiteConnection {
         #expect(r.rowsAffected == 2)
         #expect(r.columns.isEmpty)
     }
+}
+
+private final class Lines: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lines: [String] = []
+    func append(_ s: String) { lock.withLock { lines.append(s) } }
+    var all: [String] { lock.withLock { lines } }
 }

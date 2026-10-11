@@ -328,13 +328,13 @@ final class KeyTableView: NSTableView {
 
 extension NSView {
     /// Pins all four edges to `container`.
-    func pin(to container: NSView) {
+    func pin(to container: NSView, inset: CGFloat = 0) {
         translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            topAnchor.constraint(equalTo: container.topAnchor),
-            bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: inset),
+            trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -inset),
+            topAnchor.constraint(equalTo: container.topAnchor, constant: inset),
+            bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -inset),
         ])
     }
 }

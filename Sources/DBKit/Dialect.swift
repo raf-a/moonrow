@@ -25,6 +25,8 @@ public protocol Dialect: Sendable {
     ) -> SQLFragment
     func limitClause(limit: Int?, offset: Int) -> String
     func insertDefaultValues(into table: String) -> String
+    /// What `SET column = …` writes to restore the column's default.
+    func defaultValue(for column: ColumnInfo) -> String
 
     var beginTransaction: String { get }
     var commitTransaction: String { get }
@@ -63,6 +65,8 @@ extension Dialect {
     public func insertDefaultValues(into table: String) -> String {
         "INSERT INTO \(table) DEFAULT VALUES"
     }
+
+    public func defaultValue(for column: ColumnInfo) -> String { "DEFAULT" }
 
     public var beginTransaction: String { "BEGIN" }
     public var commitTransaction: String { "COMMIT" }

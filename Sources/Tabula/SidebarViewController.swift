@@ -87,8 +87,14 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     /// Selects (and so opens) the item with this name. False if the list has no such item yet.
     @discardableResult
     func select(named name: String) -> Bool {
+        select { $0.ref.name == name }
+    }
+
+    /// Selects (and so opens) the first item matching `predicate`.
+    @discardableResult
+    func select(where predicate: (DatabaseObject) -> Bool) -> Bool {
         for g in groups {
-            if let item = g.items.first(where: { $0.object.ref.name == name }) {
+            if let item = g.items.first(where: { predicate($0.object) }) {
                 outline.selectRowIndexes([outline.row(forItem: item)], byExtendingSelection: false)
                 return true
             }

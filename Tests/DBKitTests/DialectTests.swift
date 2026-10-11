@@ -105,4 +105,16 @@ private let my = MySQLDialect()
         ])
         #expect(my.insert(into: users, []).inlined(for: my) == "INSERT INTO `users` () VALUES ()")
     }
+
+    @Test func defaultValues() {
+        let update = RowUpdate(key: [.init("id", .integer(1))], changes: [.expression("n", "DEFAULT")])
+        #expect(pg.update(users, update).statement(for: pg) == SQLStatement(#"UPDATE "users" SET "n" = DEFAULT WHERE "id" = $1"#, bindings: [.integer(1)]))
+        func column(_ d: String?) -> ColumnInfo { ColumnInfo(name: "n", typeName: "", defaultExpression: d) }
+        #expect(my.defaultValue(for: column("5")) == "DEFAULT")
+        // SQLite can't SET x = DEFAULT, so the declared default is written out.
+        #expect(sqlite.defaultValue(for: column(nil)) == "NULL")
+        #expect(sqlite.defaultValue(for: column("CURRENT_TIMESTAMP")) == "CURRENT_TIMESTAMP")
+        #expect(sqlite.defaultValue(for: column("'a' || 'b'")) == "('a' || 'b')")
+        #expect(sqlite.defaultValue(for: column("(random())")) == "(random())")
+    }
 }

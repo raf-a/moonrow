@@ -16,6 +16,7 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
     private let nameField = NSTextField()
     private let pathField = NSTextField()
     private let readOnlyBox = NSButton(checkboxWithTitle: "Open read-only", target: nil, action: nil)
+    private let pageSizeField = NSTextField()
     private let status = NSTextField(wrappingLabelWithString: "")
     private let spinner = NSProgressIndicator()
     private var testTask: Task<Void, Never>?
@@ -25,7 +26,7 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         self.isNew = isNew
         self.store = store
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 200),
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 230),
             styleMask: [.titled, .closable], backing: .buffered, defer: true)
         window.isReleasedWhenClosed = false
         window.title = isNew ? "New SQLite Connection" : "Edit \(config.displayName)"
@@ -58,6 +59,7 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
             [label("Name"), nameField],
             [label("Database file"), pathRow],
             [NSGridCell.emptyContentView, readOnlyBox],
+            [label("Rows per page"), pageSizeRow()],
         ])
         grid.rowSpacing = 10
         grid.columnSpacing = 10
@@ -96,6 +98,18 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         return root
     }
 
+    private func pageSizeRow() -> NSView {
+        pageSizeField.placeholderString = "All"
+        pageSizeField.alignment = .right
+        pageSizeField.widthAnchor.constraint(equalToConstant: 80).isActive = true
+        let hint = NSTextField(labelWithString: "Empty or 0 shows every row")
+        hint.textColor = .secondaryLabelColor
+        hint.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        let row = NSStackView(views: [pageSizeField, hint])
+        row.spacing = 8
+        return row
+    }
+
     private func label(_ text: String) -> NSTextField {
         NSTextField(labelWithString: text)
     }
@@ -106,6 +120,7 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         nameField.stringValue = c.name
         pathField.stringValue = c.filePath
         readOnlyBox.state = c.readOnly ? .on : .off
+        pageSizeField.stringValue = c.rowsPerPage > 0 ? String(c.rowsPerPage) : ""
     }
 
     /// The config as the fields currently describe it.
@@ -115,6 +130,7 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         c.name = nameField.stringValue.trimmingCharacters(in: .whitespaces)
         if c.name.isEmpty { c.name = (c.filePath as NSString).lastPathComponent }
         c.readOnly = readOnlyBox.state == .on
+        c.rowsPerPage = Int(pageSizeField.stringValue.filter(\.isNumber)) ?? 0
         return c
     }
 

@@ -57,7 +57,7 @@ private func tempDB(rows: Int) async throws -> URL {
         #expect(browser.columns.map(\.name) == ["id", "label"])
         #expect(try await browser.count() == 2500)
 
-        let rows = try await browser.fetcher()(2000, 500)
+        let rows = try await browser.fetcher(GridQuery(page: Paging(pageSize: nil)))(2000, 500)
         #expect(rows.count == 500)
         #expect(rows.first == [.integer(2001), .text("row 2001")])
         #expect(rows.last == [.integer(2500), .text("row 2500")])

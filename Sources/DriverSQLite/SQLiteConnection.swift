@@ -11,6 +11,7 @@ public actor SQLiteConnection: DatabaseConnection {
     private var cursors: [Int: Cursor] = [:]
     private var nextCursorID = 0
     private var isClosed = false
+    private var statementLog: StatementLog?
 
     public init(path: String, readOnly: Bool = false) throws {
         var raw: OpaquePointer?
@@ -33,10 +34,30 @@ public actor SQLiteConnection: DatabaseConnection {
 
     public func close() {
         guard !isClosed else { return }
+        sqlite3_trace_v2(db.raw, 0, nil, nil)
         for cursor in cursors.values { sqlite3_finalize(cursor.stmt) }
         cursors.removeAll()
         sqlite3_close_v2(db.raw)
         isClosed = true
+    }
+
+    /// Reports every statement as it starts running, with bound values written inline (SQLite's
+    /// expanded SQL), the way a server's statement log would. Nil turns it off.
+    public func setStatementLog(_ log: (@Sendable (String) -> Void)?) {
+        statementLog = log.map(StatementLog.init)
+        guard let box = statementLog else {
+            sqlite3_trace_v2(db.raw, 0, nil, nil)
+            return
+        }
+        sqlite3_trace_v2(db.raw, UInt32(SQLITE_TRACE_STMT), { _, ctx, p, x in
+            guard let ctx, let p else { return 0 }
+            // Statements run by triggers are reported as "-- <sql>"; only top-level ones count.
+            if let x, x.assumingMemoryBound(to: CChar.self).pointee == 0x2D { return 0 }
+            guard let expanded = sqlite3_expanded_sql(OpaquePointer(p)) else { return 0 }
+            defer { sqlite3_free(expanded) }
+            Unmanaged<StatementLog>.fromOpaque(ctx).takeUnretainedValue().write(String(cString: expanded))
+            return 0
+        }, Unmanaged.passUnretained(box).toOpaque())
     }
 
     // MARK: - Streaming
@@ -119,10 +140,16 @@ public actor SQLiteConnection: DatabaseConnection {
 
     // MARK: - Transactions
 
-    public func transaction(_ statements: [SQLStatement]) throws -> [Int] {
+    public func transaction(
+        _ statements: [SQLStatement], verify: @Sendable (Int, Int) throws -> Void
+    ) throws -> [Int] {
         try run(SQLStatement(dialect.beginTransaction))
         do {
-            let counts = try statements.map(run)
+            let counts = try statements.enumerated().map { i, statement in
+                let n = try run(statement)
+                try verify(i, n)
+                return n
+            }
             try run(SQLStatement(dialect.commitTransaction))
             return counts
         } catch {
@@ -284,6 +311,11 @@ private struct Cursor {
     let stmt: OpaquePointer
     let columns: [ResultColumn]
     let cancel: CancelFlag
+}
+
+private final class StatementLog: Sendable {
+    let write: @Sendable (String) -> Void
+    init(_ write: @escaping @Sendable (String) -> Void) { self.write = write }
 }
 
 private final class CancelFlag: @unchecked Sendable {

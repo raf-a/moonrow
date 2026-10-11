@@ -7,6 +7,21 @@ import AppKit
     @objc optional func showConnections(_ sender: Any?)
     @objc optional func reloadWorkspace(_ sender: Any?)
     @objc optional func focusItemFilter(_ sender: Any?)
+
+    // Data grid
+    @objc optional func commitChanges(_ sender: Any?)
+    @objc optional func discardChanges(_ sender: Any?)
+    @objc optional func previewChanges(_ sender: Any?)
+    @objc optional func addRow(_ sender: Any?)
+    @objc optional func duplicateRows(_ sender: Any?)
+    @objc optional func deleteRows(_ sender: Any?)
+    @objc optional func setNull(_ sender: Any?)
+    @objc optional func setEmpty(_ sender: Any?)
+    @objc optional func setDefault(_ sender: Any?)
+    @objc optional func toggleFilters(_ sender: Any?)
+    @objc optional func nextPage(_ sender: Any?)
+    @objc optional func previousPage(_ sender: Any?)
+    @objc optional func reloadCurrentTab(_ sender: Any?)
 }
 
 @MainActor
@@ -40,11 +55,25 @@ enum MainMenu {
             m.add("Undo", Selector(("undo:")), "z")
             m.add("Redo", Selector(("redo:")), "z", [.command, .shift])
             m.addItem(.separator())
+            m.add("Commit Changes", #selector(TabulaActions.commitChanges(_:)), "s")
+            m.add("Discard Changes", #selector(TabulaActions.discardChanges(_:)), "\u{8}", [.command, .shift])
+            m.add("Preview Changes", #selector(TabulaActions.previewChanges(_:)), "p", [.command, .shift])
+            m.addItem(.separator())
+            m.add("Add Row", #selector(TabulaActions.addRow(_:)), "i")
+            m.add("Duplicate Rows", #selector(TabulaActions.duplicateRows(_:)), "d")
+            m.add("Delete Rows", #selector(TabulaActions.deleteRows(_:)), "\u{8}")
+            let setValue = m.add("Set Value", nil)
+            setValue.submenu = NSMenu(title: "Set Value")
+            setValue.submenu!.add("NULL", #selector(TabulaActions.setNull(_:)))
+            setValue.submenu!.add("Empty String", #selector(TabulaActions.setEmpty(_:)))
+            setValue.submenu!.add("DEFAULT", #selector(TabulaActions.setDefault(_:)))
+            m.addItem(.separator())
             m.add("Cut", #selector(NSText.cut(_:)), "x")
             m.add("Copy", #selector(NSText.copy(_:)), "c")
             m.add("Paste", #selector(NSText.paste(_:)), "v")
             m.add("Select All", #selector(NSText.selectAll(_:)), "a")
             m.addItem(.separator())
+            m.add("Show Filters", #selector(TabulaActions.toggleFilters(_:)), "f")
             m.add("Filter Items", #selector(TabulaActions.focusItemFilter(_:)), "f", [.command, .shift])
         }
 
@@ -56,8 +85,14 @@ enum MainMenu {
 
         main.addSubmenu("Connection") { m in
             m.add("Reload", #selector(TabulaActions.reloadWorkspace(_:)), "r")
+            m.add("Reload Table", #selector(TabulaActions.reloadCurrentTab(_:)), "r", [.command, .option])
             m.addItem(.separator())
             m.add("Show Connections", #selector(TabulaActions.showConnections(_:)), "k", [.command, .shift])
+        }
+
+        main.addSubmenu("Navigate") { m in
+            m.add("Previous Page", #selector(TabulaActions.previousPage(_:)), "\u{F702}")
+            m.add("Next Page", #selector(TabulaActions.nextPage(_:)), "\u{F703}")
         }
 
         let window = main.addSubmenu("Window") { m in

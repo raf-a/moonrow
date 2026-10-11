@@ -7,8 +7,11 @@ public protocol DatabaseConnection: Sendable {
     func stream(_ statement: SQLStatement, batchSize: Int) -> AsyncThrowingStream<ResultBatch, any Error>
 
     /// Runs statements atomically: all of them commit, or none do.
-    /// Returns rows affected per statement.
-    func transaction(_ statements: [SQLStatement]) async throws -> [Int]
+    /// `verify` sees each statement's index and rows affected right after it runs; throwing
+    /// from it rolls everything back. Returns rows affected per statement.
+    func transaction(
+        _ statements: [SQLStatement], verify: @Sendable (_ index: Int, _ rowsAffected: Int) throws -> Void
+    ) async throws -> [Int]
 
     func objects(schema: String?) async throws -> [DatabaseObject]
     func columns(of table: TableRef) async throws -> [ColumnInfo]
@@ -17,6 +20,10 @@ public protocol DatabaseConnection: Sendable {
 }
 
 extension DatabaseConnection {
+    public func transaction(_ statements: [SQLStatement]) async throws -> [Int] {
+        try await transaction(statements, verify: { _, _ in })
+    }
+
     public func execute(_ statement: SQLStatement) async throws -> QueryResult {
         var result = QueryResult()
         for try await batch in stream(statement, batchSize: 1000) {
@@ -50,9 +57,19 @@ extension DatabaseConnection {
         return Int(n)
     }
 
-    /// Applies grid edits in one transaction.
+    /// Applies grid edits in one transaction. Every statement targets one row, so one that
+    /// changes no row (it was deleted meanwhile) or several (a table without a key holding
+    /// duplicates) rolls the whole set back.
     @discardableResult
     public func commit(_ changes: ChangeSet) async throws -> [Int] {
-        try await transaction(dialect.statements(for: changes).map { $0.statement(for: dialect) })
+        let fragments = dialect.statements(for: changes)
+        let dialect = dialect
+        return try await transaction(fragments.map { $0.statement(for: dialect) }) { i, affected in
+            guard affected != 1 else { return }
+            let what = affected == 0 ? "matched no row; it may have been changed or deleted meanwhile"
+                : "would change \(affected) rows instead of one"
+            throw DatabaseError("Nothing was saved: statement \(i + 1) \(what).",
+                                sql: fragments[i].inlined(for: dialect))
+        }
     }
 }

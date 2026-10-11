@@ -26,6 +26,6 @@ let package = Package(
         .testTarget(name: "SQLScriptTests", dependencies: ["SQLScript"]),
         .testTarget(name: "DBKitTests", dependencies: ["DBKit"]),
         .testTarget(name: "DriverSQLiteTests", dependencies: ["DriverSQLite"]),
-        .testTarget(name: "AppCoreTests", dependencies: ["AppCore"]),
+        .testTarget(name: "AppCoreTests", dependencies: ["AppCore", "DriverSQLite"]),
     ]
 )

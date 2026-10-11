@@ -90,7 +90,8 @@ public final class RowCache {
             while !Task.isCancelled {
                 guard let self, let b = self.nextMissingBlock() else { break }
                 do {
-                    let rows = try await self.fetch(b * self.blockSize, self.blockSize)
+                    let start = b * self.blockSize
+                    let rows = try await self.fetch(start, min(self.blockSize, self.rowCount - start))
                     guard !Task.isCancelled else { break }
                     self.store(rows, block: b)
                 } catch {
