@@ -8,6 +8,8 @@ let package = Package(
         .library(name: "SQLScript", targets: ["SQLScript"]),
         .library(name: "DBKit", targets: ["DBKit"]),
         .library(name: "DriverSQLite", targets: ["DriverSQLite"]),
+        .library(name: "AppCore", targets: ["AppCore"]),
+        .executable(name: "Tabula", targets: ["Tabula"]),
     ],
     targets: [
         .target(name: "SQLScript"),
@@ -17,8 +19,13 @@ let package = Package(
             dependencies: ["DBKit"],
             linkerSettings: [.linkedLibrary("sqlite3")]
         ),
+        // App logic without AppKit, so `swift test` covers it.
+        .target(name: "AppCore", dependencies: ["DBKit", "DriverSQLite"]),
+        // The AppKit app. `scripts/build-app.sh` wraps it into Tabula.app.
+        .executableTarget(name: "Tabula", dependencies: ["AppCore"]),
         .testTarget(name: "SQLScriptTests", dependencies: ["SQLScript"]),
         .testTarget(name: "DBKitTests", dependencies: ["DBKit"]),
         .testTarget(name: "DriverSQLiteTests", dependencies: ["DriverSQLite"]),
+        .testTarget(name: "AppCoreTests", dependencies: ["AppCore"]),
     ]
 )
