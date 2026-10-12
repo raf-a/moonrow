@@ -62,6 +62,8 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
             contentRect: NSRect(x: 0, y: 0, width: 540, height: 300),
             styleMask: [.titled, .closable], backing: .buffered, defer: true)
         window.isReleasedWhenClosed = false
+        // Only workspace windows merge into native tabs.
+        window.tabbingMode = .disallowed
         super.init(window: window)
         window.delegate = self
         window.contentView = makeContent()

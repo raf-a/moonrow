@@ -64,6 +64,8 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
     let readOnlyReason: String?
     /// When staged changes appear or go away.
     var onPendingChange: (() -> Void)?
+    /// The user staged a change (a preview tab becomes regular).
+    var onUse: (() -> Void)?
     /// Tables the foreign-key editor offers.
     var knownTables: () -> [TableRef] = { [] }
     /// Names of the schema's tables and views, for checking a new name.
@@ -591,6 +593,7 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
     fileprivate func change(_ name: String, _ edit: (inout StructureEditor) -> Void) {
         guard var e = editor else { return }
         edit(&e)
+        if e != editor { onUse?() }
         let place = self.place
         changes.perform(name, at: place) {
             if let newTableID { changes.setNewTable(newTableID, e) } else { changes.setStructure(e) }

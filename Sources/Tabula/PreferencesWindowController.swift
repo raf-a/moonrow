@@ -31,6 +31,8 @@ final class PreferencesWindowController: NSWindowController {
         window.styleMask = [.titled, .closable]
         window.isReleasedWhenClosed = false
         window.title = "Settings"
+        // Only workspace windows merge into native tabs.
+        window.tabbingMode = .disallowed
         window.toolbarStyle = .preference
         super.init(window: window)
         if let pane = tabs.tabViewItems.first?.viewController?.view { window.fit(to: pane) }
@@ -105,6 +107,7 @@ final class GeneralPreferences: NSViewController {
     let appearancePopup = NSPopUpButton()
     let safeModePopup = NSPopUpButton()
     private let safeModeHint = hint("")
+    let reopenCheckbox = NSButton(checkboxWithTitle: "Reopen workspaces at launch", target: nil, action: nil)
 
     init(settings: SettingsStore) {
         self.settings = settings
@@ -121,8 +124,13 @@ final class GeneralPreferences: NSViewController {
         safeModePopup.addItems(withTitles: SafeMode.allCases.map(\.title))
         safeModePopup.target = self
         safeModePopup.action = #selector(changed(_:))
+        reopenCheckbox.target = self
+        reopenCheckbox.action = #selector(changed(_:))
         let grid = formGrid([
             ("Appearance", appearancePopup),
+            ("Startup", reopenCheckbox),
+            ("", hint("The workspaces open when you quit come back with their tabs, unsaved queries included.")),
+
             ("Safe mode for new connections", safeModePopup),
             ("", safeModeHint),
             ("", hint("Each connection keeps its own level: set it in the connection's form, or from the shield in a workspace's toolbar.")),
@@ -140,14 +148,17 @@ final class GeneralPreferences: NSViewController {
         appearancePopup.selectItem(at: AppSettings.Appearance.allCases.firstIndex(of: s.appearance) ?? 0)
         safeModePopup.selectItem(at: SafeMode.allCases.firstIndex(of: s.defaultSafeMode) ?? 0)
         safeModeHint.stringValue = s.defaultSafeMode.detail
+        reopenCheckbox.state = s.reopenWorkspaces ? .on : .off
     }
 
     @objc private func changed(_ sender: Any?) {
         let appearance = AppSettings.Appearance.allCases[max(0, appearancePopup.indexOfSelectedItem)]
         let safeMode = SafeMode.allCases[max(0, safeModePopup.indexOfSelectedItem)]
+        let reopen = reopenCheckbox.state == .on
         save(settings, in: view) {
             $0.appearance = appearance
             $0.defaultSafeMode = safeMode
+            $0.reopenWorkspaces = reopen
         }
         refresh()
         // Safe-mode hints run from one line to two; the grid is pinned top and bottom.

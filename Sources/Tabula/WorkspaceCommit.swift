@@ -71,6 +71,7 @@ extension WorkspaceWindowController: NSMenuItemValidation {
             if let id = tab.newTableID, let name = created[id] { tab.becomeTable(TableRef(schema: tab.table.schema, name)) }
         }
         changes.clearAfterCommit()
+        forgetHistory(of: dropped.union(renamed.keys))
         sidebar.reload()
         for tab in tableTabs {
             if dropped.contains(tab.table) {

@@ -129,6 +129,8 @@ public struct ConnectionConfig: Codable, Hashable, Sendable, Identifiable {
     public var safeMode: SafeMode
     public var color: ConnectionColor?
     public var tag: ConnectionTag?
+    /// The welcome window's group (`ConnectionStore.groups`); nil when ungrouped.
+    public var groupID: UUID?
 
     public init(
         id: UUID = UUID(), name: String = "", driver: DriverKind = .sqlite,
@@ -138,7 +140,7 @@ public struct ConnectionConfig: Codable, Hashable, Sendable, Identifiable {
         readOnly: Bool = false, rowsPerPage: Int = Paging.defaultPageSize,
         overSSH: Bool = false, sshHost: String = "", sshPort: Int? = nil, sshUser: String = "",
         sshPasswordMode: PasswordMode = .keychain, sshKeyPath: String = "",
-        safeMode: SafeMode = .silent, color: ConnectionColor? = nil, tag: ConnectionTag? = nil
+        safeMode: SafeMode = .silent, color: ConnectionColor? = nil, tag: ConnectionTag? = nil, groupID: UUID? = nil
     ) {
         self.id = id
         self.name = name
@@ -164,13 +166,14 @@ public struct ConnectionConfig: Codable, Hashable, Sendable, Identifiable {
         self.safeMode = safeMode
         self.color = color
         self.tag = tag
+        self.groupID = groupID
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, name, driver, filePath, host, port, user, database, passwordMode
         case tlsMode, tlsCAPath, tlsCertPath, tlsKeyPath, readOnly, rowsPerPage
         case overSSH, sshHost, sshPort, sshUser, sshPasswordMode, sshKeyPath
-        case safeMode, color, tag
+        case safeMode, color, tag, groupID
     }
 
     // Fields added in later versions get defaults, so older files keep loading.
@@ -202,6 +205,7 @@ public struct ConnectionConfig: Codable, Hashable, Sendable, Identifiable {
         safeMode = c.contains(.safeMode) ? (try? c.decode(SafeMode.self, forKey: .safeMode)) ?? .alert : .silent
         color = try? c.decodeIfPresent(ConnectionColor.self, forKey: .color)
         tag = try? c.decodeIfPresent(ConnectionTag.self, forKey: .tag)
+        groupID = try? c.decodeIfPresent(UUID.self, forKey: .groupID)
     }
 
     /// Whether connecting goes through SSH (servers only).

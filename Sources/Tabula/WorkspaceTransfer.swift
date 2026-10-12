@@ -29,7 +29,7 @@ extension WorkspaceWindowController {
 
     /// A table or view; the grid's filter and sort apply when a tab shows it.
     func export(_ object: DatabaseObject) {
-        let data = content.tabs.lazy.compactMap { $0 as? TableTabViewController }.first { $0.table == object.ref }?.data
+        let data = tableTabs.first { $0.table == object.ref }?.data
         let query = data?.query
         let shown = data.flatMap { $0.cache == nil ? nil : $0.total }
         presentExport(.table(object.ref, kind: object.kind, filter: query?.filter, sort: query?.sort ?? [], shownRows: shown))

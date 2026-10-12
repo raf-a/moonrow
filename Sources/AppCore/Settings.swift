@@ -26,6 +26,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var defaultSafeMode: SafeMode = .silent
     /// Shortcuts changed in the Keymap preferences, by command id; `.empty` removes one.
     public var keyBindings: [String: KeyBinding] = [:]
+    /// Reopen the workspaces that were open at quit, with their tabs.
+    public var reopenWorkspaces: Bool = true
 
     public init() {}
 
@@ -36,7 +38,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case appearance, editorTheme, editorFontName, editorFontSize, gridFontSize, alternatingRows
-        case defaultSafeMode, keyBindings
+        case defaultSafeMode, keyBindings, reopenWorkspaces
     }
 
     // Each value is read on its own: one that's missing or not understood keeps its default
@@ -55,6 +57,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         alternatingRows = value(.alternatingRows, d.alternatingRows)
         defaultSafeMode = value(.defaultSafeMode, d.defaultSafeMode)
         keyBindings = value(.keyBindings, d.keyBindings)
+        reopenWorkspaces = value(.reopenWorkspaces, d.reopenWorkspaces)
     }
 }
 

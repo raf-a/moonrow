@@ -9,7 +9,7 @@ import DBKit
 
 extension WorkspaceWindowController {
     func connectSidebarActions() {
-        sidebar.onOpenStructure = { [weak self] object in self?.open(object, newTab: false, mode: .structure) }
+        sidebar.onOpenStructure = { [weak self] object in self?.open(object, intent: .regular, mode: .structure) }
         sidebar.onNewTable = config.readOnly ? nil : { [weak self] in self?.newTable(nil) }
         sidebar.onRename = { [weak self] object in self?.rename(object) }
         sidebar.onRenameNewTable = { [weak self] id in self?.renameNewTable(id) }
@@ -230,10 +230,12 @@ extension WorkspaceWindowController {
 
     // MARK: - Helpers
 
-    func makeTab(_ object: DatabaseObject, mode: TableTabViewController.Mode) -> TableTabViewController {
-        configure(TableTabViewController(
+    func makeTab(_ object: DatabaseObject, mode: TableTabViewController.Mode, preview: Bool = false) -> TableTabViewController {
+        let tab = configure(TableTabViewController(
             connection: connection, changes: changes, object: object, readOnlyConnection: config.readOnly,
             pageSize: config.pageSize, mode: mode))
+        tab.isPreview = preview
+        return tab
     }
 
     func configure(_ tab: TableTabViewController) -> TableTabViewController {

@@ -18,17 +18,28 @@ public struct KeyBinding: Codable, Hashable, Sendable {
     public var modifiers: Modifiers
 
     public init(_ key: String, _ modifiers: Modifiers = .command) {
-        self.key = key.count == 1 && key.first!.isLetter ? key.lowercased() : key
+        var key = key.count == 1 && key.first!.isLetter ? key.lowercased() : key
+        // A recorded ⇧⌘] arrives as "}"; it's kept as the key pressed, "]" with ⇧.
+        if modifiers.contains(.shift), let base = Self.unshifted[key] { key = base }
+        self.key = key
         self.modifiers = modifiers
     }
 
+    /// US-layout punctuation and its shifted character.
+    static let shifted: [String: String] = [
+        "[": "{", "]": "}", "\\": "|", ";": ":", "'": "\"", ",": "<", ".": ">", "/": "?", "`": "~", "-": "_", "=": "+",
+    ]
+    static let unshifted = Dictionary(uniqueKeysWithValues: shifted.map { ($1, $0) })
+
     public static let empty = KeyBinding("", [])
 
-    /// The key as a menu item's `keyEquivalent`. AppKit tells a shifted letter by its case and
-    /// ignores the Shift flag for letters, so ⇧⌘S must be "S": with "s" the item would also
-    /// catch a plain ⌘S, and miss ⇧⌘S.
+    /// The key as a menu item's `keyEquivalent`. AppKit matches the character typed: a shifted
+    /// letter by its case, so ⇧⌘S must be "S" (with "s" the item would also catch a plain ⌘S,
+    /// and miss ⇧⌘S), and shifted punctuation by its shifted character, so ⇧⌘] is "}".
     public var menuKey: String {
-        modifiers.contains(.shift) && key.count == 1 && key.first!.isLetter ? key.uppercased() : key
+        guard modifiers.contains(.shift) else { return key }
+        if key.count == 1 && key.first!.isLetter { return key.uppercased() }
+        return Self.shifted[key] ?? key
     }
 
     public var isEmpty: Bool { key.isEmpty }
@@ -101,7 +112,8 @@ public struct KeyCommand: Sendable, Hashable, Identifiable {
 public enum Keymap {
     public static let commands: [KeyCommand] = [
         KeyCommand("newConnection:", "New Connection", "General", "n"),
-        KeyCommand("showConnections:", "Show Connections", "General", "k", [.command, .shift]),
+        KeyCommand("showConnections:", "Open Connection", "General", "k", [.command, .shift]),
+        KeyCommand("newWindow:", "New Window", "General", "n", [.command, .option]),
         KeyCommand("reloadWorkspace:", "Reload Workspace", "General", "r"),
         KeyCommand("focusItemFilter:", "Filter Items in Sidebar", "General", "f", [.command, .shift]),
         KeyCommand("showQueryHistory:", "Show Query History", "General", "y", [.command, .shift]),
@@ -109,6 +121,17 @@ public enum Keymap {
         KeyCommand("undo:", "Undo", "General", "z"),
         KeyCommand("redo:", "Redo", "General", "z", [.command, .shift]),
         KeyCommand("toggleRightSidebar:", "Toggle Right Sidebar", "General", " ", []),
+        KeyCommand("toggleSidebar:", "Toggle Left Sidebar", "General", "0"),
+
+        KeyCommand("quickOpen:", "Quick Open", "Navigate", "p"),
+        KeyCommand("openDatabase:", "Open Database", "Navigate", "k"),
+        KeyCommand("goBack:", "Back", "Navigate", "\u{F702}", [.command, .control]),
+        KeyCommand("goForward:", "Forward", "Navigate", "\u{F703}", [.command, .control]),
+        KeyCommand("splitPaneRight:", "Split Pane Right", "Navigate", "d", [.command, .shift]),
+        KeyCommand("selectNextPane:", "Select Next Pane", "Navigate", "]", [.command, .option]),
+        KeyCommand("selectPreviousPane:", "Select Previous Pane", "Navigate", "[", [.command, .option]),
+        KeyCommand("selectNextWorkspace:", "Select Next Workspace", "Navigate", "]", [.command, .shift]),
+        KeyCommand("selectPreviousWorkspace:", "Select Previous Workspace", "Navigate", "[", [.command, .shift]),
 
         KeyCommand("newQueryTab:", "New Query Tab", "Tabs", "t"),
         KeyCommand("closeTab:", "Close Tab", "Tabs", "w"),

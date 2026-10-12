@@ -11,8 +11,9 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     /// SQL the context menu's "Copy Script As" writes.
     enum Script { case create, drop, truncate, select }
 
-    var onOpen: ((DatabaseObject) -> Void)?
-    var onOpenInNewTab: ((DatabaseObject) -> Void)?
+    /// A single click or arrow key previews (`.preview`), a double-click opens a regular tab,
+    /// "Open in New Tab" always adds one.
+    var onOpen: ((DatabaseObject, TabPlacement.Intent) -> Void)?
     var onOpenStructure: ((DatabaseObject) -> Void)?
     var onNewTable: (() -> Void)? {
         didSet { newTableButton.isEnabled = onNewTable != nil }
@@ -39,6 +40,10 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     var onOpenNewTable: ((UUID) -> Void)?
     /// Set while the selection follows the open tab, so it doesn't open anything.
     private var isRevealing = false
+    /// Selected (without opening) once the next list has loaded: Quick Open's choice in another schema.
+    var revealAfterReload: TableRef?
+    /// A schema to switch to once the schemas have loaded (restoring a session).
+    var schemaToRestore: String?
 
     private let connection: any DatabaseConnection
     private let outline = SidebarOutline()
@@ -248,15 +253,15 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     @objc private func doubleClicked(_ sender: Any?) {
         guard outline.clickedRow >= 0, let item = outline.item(atRow: outline.clickedRow) as? Item else { return }
-        open(item)
+        open(item, intent: .regular)
     }
 
-    private func open(_ item: Item) {
+    private func open(_ item: Item, intent: TabPlacement.Intent) {
         if let id = item.newTableID {
             onOpenNewTable?(id)
             return
         }
-        if Self.opensInGrid(item.object) { onOpen?(item.object) }
+        if Self.opensInGrid(item.object) { onOpen?(item.object, intent) }
     }
 
     /// Redraws staged marks and the staged new tables.
@@ -269,6 +274,9 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     static func opensInGrid(_ object: DatabaseObject) -> Bool {
         [.table, .view, .materializedView].contains(object.kind)
     }
+
+    /// The schemas (Postgres) or databases (MySQL) the switcher offers; empty for SQLite.
+    var schemaNames: [String] { schemaPopup.isHidden ? [] : schemaPopup.itemTitles }
 
     /// Lists another schema, as if picked from the switcher. False if there is no such schema.
     @discardableResult
@@ -296,7 +304,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     }
 
     @objc private func openInNewTab(_ sender: Any?) {
-        if let object = targetObject, Self.opensInGrid(object) { onOpenInNewTab?(object) }
+        if let object = targetObject, Self.opensInGrid(object) { onOpen?(object, .newTab) }
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
@@ -408,6 +416,10 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             do {
                 if !schemasLoaded {
                     try await loadSchemas()
+                    if let wanted = schemaToRestore {
+                        schemaToRestore = nil
+                        if wanted != schema, switchSchema(to: wanted) { return }
+                    }
                 }
                 // MySQL without a default database: nothing to list until one is chosen.
                 if schema == nil, !schemaPopup.isHidden {
@@ -422,6 +434,10 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                 self.objects = objects
                 rebuild()
                 onObjectsLoaded?(objects)
+                if let ref = revealAfterReload {
+                    revealAfterReload = nil
+                    reveal([ref])
+                }
             } catch {
                 guard !Task.isCancelled else { return }
                 objects = []
@@ -623,7 +639,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     func outlineViewSelectionDidChange(_ notification: Notification) {
         guard !isRevealing, outline.selectedRowIndexes.count == 1,
               let item = outline.item(atRow: outline.selectedRow) as? Item else { return }
-        open(item)
+        open(item, intent: .preview)
     }
 }
 

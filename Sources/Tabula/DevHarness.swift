@@ -18,6 +18,10 @@ import Darwin
 ///     TABULA_IMPORT=empty_table=/tmp/rows.csv TABULA_STORE=… TABULA_SNAPSHOTS=… Tabula /tmp/copy-of-sample.sqlite
 ///     TABULA_STAGED=users TABULA_STORE=… TABULA_SNAPSHOTS=… Tabula build/sample.sqlite
 ///     TABULA_EDITING=notes TABULA_STORE=… TABULA_SNAPSHOTS=… Tabula /tmp/copy-with-a-small-table.sqlite
+///     TABULA_NAVIGATE=users TABULA_STORE=… TABULA_SNAPSHOTS=… Tabula build/sample.sqlite
+///     TABULA_SESSION=check TABULA_STORE=… TABULA_SNAPSHOTS=… Tabula        (after TABULA_NAVIGATE)
+///     TABULA_CONNECT=postgres://… TABULA_OPENDB=far_away TABULA_STORE=… TABULA_SNAPSHOTS=… Tabula
+///     TABULA_WELCOME=1 TABULA_STORE=<empty dir>/connections.json TABULA_SNAPSHOTS=… Tabula
 ///
 /// The bench opens the table in the first workspace with every row in one page, scrolls it like
 /// a fast trackpad, jumps to far-apart rows, prints timings and quits. The demo drives the grid's
@@ -39,6 +43,12 @@ import Darwin
 /// are rendered in-process (no screen-recording permission needed).
 @MainActor
 enum DevHarness {
+    /// Saved workspaces reopen at launch only outside the harnesses (and in the relaunch check).
+    static var allowsSessionRestore: Bool {
+        let quiet: Set = ["TABULA_STORE", "TABULA_SNAPSHOTS", "TABULA_SESSION"]
+        return !ProcessInfo.processInfo.environment.keys.contains { $0.hasPrefix("TABULA_") && !quiet.contains($0) }
+    }
+
     static func runIfRequested(_ app: AppDelegate) {
         setvbuf(stdout, nil, _IOLBF, 0)
         let env = ProcessInfo.processInfo.environment
@@ -114,6 +124,57 @@ enum DevHarness {
                     try await stagedDemo(app, table: table, snapshots: snapshots)
                 } catch {
                     print("staged demo failed: \(error)")
+                }
+                NSApp.terminate(nil)
+            }
+            return
+        }
+        // Preview tabs, Open in New Tab, Quick Open, Back / Forward, panes and workspaces, then the
+        // session it leaves for `TABULA_SESSION=check`. It never commits.
+        if let table = env["TABULA_NAVIGATE"] {
+            Task {
+                do {
+                    guard env["TABULA_STORE"] != nil else { throw HarnessError("TABULA_NAVIGATE needs TABULA_STORE") }
+                    try await navigationDemo(app, table: table, snapshots: snapshots)
+                } catch {
+                    print("navigation demo failed: \(error)")
+                }
+                NSApp.terminate(nil)
+            }
+            return
+        }
+        if let table = env["TABULA_OPENDB"] {
+            Task {
+                do {
+                    try await openDatabaseDemo(app, table: table, snapshots: snapshots)
+                } catch {
+                    print("open database demo failed: \(error)")
+                }
+                NSApp.terminate(nil)
+            }
+            return
+        }
+        // Connection groups in the welcome window. It writes connections into TABULA_STORE.
+        if env["TABULA_WELCOME"] != nil {
+            Task {
+                do {
+                    guard env["TABULA_STORE"] != nil else { throw HarnessError("TABULA_WELCOME needs TABULA_STORE") }
+                    try await welcomeDemo(app, snapshots: snapshots)
+                } catch {
+                    print("welcome demo failed: \(error)")
+                }
+                NSApp.terminate(nil)
+            }
+            return
+        }
+        // Run after TABULA_NAVIGATE with the same TABULA_STORE and no file: the workspace it left
+        // must come back as it was.
+        if env["TABULA_SESSION"] == "check" {
+            Task {
+                do {
+                    try await sessionCheck(app, snapshots: snapshots)
+                } catch {
+                    print("session check failed: \(error)")
                 }
                 NSApp.terminate(nil)
             }
@@ -464,8 +525,7 @@ enum DevHarness {
         }
         let workspace = try await waitFor("workspace") { app.workspaces.first }
         let window = try require(workspace.window, "workspace window")
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate()
+        try await makeKey(window)
         let changes = workspace.changes
         let undo = changes.undoManager
         /// A key press sent through the app, so menus' key equivalents see it first.
@@ -641,7 +701,7 @@ enum DevHarness {
         snap("7-committed.png", window)
     }
 
-    private static func descendant<T: NSView>(of view: NSView, _ type: T.Type, where match: (T) -> Bool = { _ in true }) -> T? {
+    static func descendant<T: NSView>(of view: NSView, _ type: T.Type, where match: (T) -> Bool = { _ in true }) -> T? {
         if let v = view as? T, match(v) { return v }
         for sub in view.subviews { if let found = descendant(of: sub, type, where: match) { return found } }
         return nil
@@ -895,7 +955,7 @@ enum DevHarness {
         try app.settings.update { $0 = AppSettings() }
     }
 
-    private static func menuItem(_ menu: NSMenu?, action: Selector) -> NSMenuItem? {
+    static func menuItem(_ menu: NSMenu?, action: Selector) -> NSMenuItem? {
         for item in menu?.items ?? [] {
             if item.action == action { return item }
             if let found = menuItem(item.submenu, action: action) { return found }
@@ -1066,19 +1126,29 @@ enum DevHarness {
         if let snapshots { snapshot(window, to: snapshots.appending(path: "import-2-table.png")) }
     }
 
-    private static func key(_ characters: String, code: UInt16) throws -> NSEvent {
+    static func key(_ characters: String, code: UInt16) throws -> NSEvent {
         try require(NSEvent.keyEvent(
             with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil,
             characters: characters, charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code), "key event")
     }
 
-    private static func visibleLoaded(_ grid: NSTableView, _ cache: RowCache) -> Bool {
+    static func visibleLoaded(_ grid: NSTableView, _ cache: RowCache) -> Bool {
         let r = grid.rows(in: grid.visibleRect)
         guard r.length > 0 else { return true }
         return cache.row(at: r.location) != nil && cache.row(at: min(cache.rowCount - 1, r.location + r.length - 1)) != nil
     }
 
-    private static func waitFor<T>(_ what: String, _ probe: () -> T?) async throws -> T {
+    /// Synthetic events only reach the key window, and a click on another window only makes it key.
+    static func makeKey(_ window: NSWindow) async throws {
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate()
+        _ = try await waitFor("key window") {
+            if !window.isKeyWindow { NSApp.activate(ignoringOtherApps: true); window.makeKeyAndOrderFront(nil) }
+            return window.isKeyWindow ? true : nil
+        }
+    }
+
+    static func waitFor<T>(_ what: String, _ probe: () -> T?) async throws -> T {
         let deadline = Date().addingTimeInterval(15)
         while true {
             if let value = probe() { return value }
@@ -1087,13 +1157,13 @@ enum DevHarness {
         }
     }
 
-    private static func require<T>(_ value: T?, _ what: String) throws -> T {
+    static func require<T>(_ value: T?, _ what: String) throws -> T {
         guard let value else { throw HarnessError("no \(what)") }
         return value
     }
 
     /// Renders the window's frame view, toolbar included.
-    private static func snapshot(_ window: NSWindow, to url: URL) {
+    static func snapshot(_ window: NSWindow, to url: URL) {
         guard let view = window.contentView?.superview ?? window.contentView,
               let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
         view.cacheDisplay(in: view.bounds, to: rep)
@@ -1112,7 +1182,7 @@ enum DevHarness {
     }
 }
 
-private struct HarnessError: Error, CustomStringConvertible {
+struct HarnessError: Error, CustomStringConvertible {
     let description: String
     init(_ description: String) { self.description = description }
 }

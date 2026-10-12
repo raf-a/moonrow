@@ -11,6 +11,8 @@ final class TabStrip: NSView {
         var toolTip: String?
         /// Drawn in the accent colour, e.g. a tab whose query failed.
         var tint: NSColor?
+        /// A preview tab: the title is in italics.
+        var italic = false
     }
 
     var items: [Item] = [] {
@@ -21,6 +23,12 @@ final class TabStrip: NSView {
     }
     var onSelect: ((Int) -> Void)?
     var onClose: ((Int) -> Void)?
+    /// A double-click on a tab (keeps a preview tab).
+    var onDoubleClick: ((Int) -> Void)?
+    /// False for the tabs of a pane that isn't the active one: the selected tab's line is grey.
+    var isActive = true {
+        didSet { if isActive != oldValue { for v in tabViews { v.isActive = isActive } } }
+    }
     /// Shows a + button when set.
     var onAdd: (() -> Void)? {
         didSet { addButton.isHidden = onAdd == nil }
@@ -105,6 +113,11 @@ final class TabStrip: NSView {
                 guard let self, let v, let i = self.tabViews.firstIndex(of: v) else { return }
                 self.onClose?(i)
             }
+            v.onDoubleClick = { [weak self, weak v] in
+                guard let self, let v, let i = self.tabViews.firstIndex(of: v) else { return }
+                self.onDoubleClick?(i)
+            }
+            v.isActive = isActive
             tabViews.append(v)
             stack.addArrangedSubview(v)
         }
@@ -134,8 +147,10 @@ private final class FlippedView: NSView {
 private final class TabView: NSView {
     var onClick: (() -> Void)?
     var onClose: (() -> Void)?
+    var onDoubleClick: (() -> Void)?
     var item = TabStrip.Item(title: "") { didSet { update() } }
     var isSelected = false { didSet { if isSelected != oldValue { update() } } }
+    var isActive = true { didSet { if isActive != oldValue { update() } } }
     private var isHovered = false { didSet { if isHovered != oldValue { update() } } }
 
     private let icon = NSImageView()
@@ -179,6 +194,10 @@ private final class TabView: NSView {
 
     private func update() {
         label.stringValue = item.title
+        let size: CGFloat = 12
+        label.font = item.italic
+            ? NSFontManager.shared.convert(.systemFont(ofSize: size), toHaveTrait: .italicFontMask)
+            : .systemFont(ofSize: size)
         toolTip = item.toolTip ?? item.title
         icon.image = item.symbol.flatMap { NSImage(systemSymbolName: $0, accessibilityDescription: nil) }
         icon.isHidden = icon.image == nil
@@ -197,7 +216,7 @@ private final class TabView: NSView {
         NSColor.separatorColor.setFill()
         NSRect(x: bounds.maxX - 1, y: 5, width: 1, height: bounds.height - 10).fill()
         if isSelected {
-            NSColor.controlAccentColor.setFill()
+            (isActive ? NSColor.controlAccentColor : NSColor.tertiaryLabelColor).setFill()
             NSRect(x: 0, y: 0, width: bounds.width - 1, height: 2).fill()
         }
     }
@@ -205,7 +224,9 @@ private final class TabView: NSView {
     override func mouseEntered(with event: NSEvent) { isHovered = true }
     override func mouseExited(with event: NSEvent) { isHovered = false }
 
-    override func mouseDown(with event: NSEvent) { onClick?() }
+    override func mouseDown(with event: NSEvent) {
+        if event.clickCount == 2 { onDoubleClick?() } else { onClick?() }
+    }
 
     override func otherMouseUp(with event: NSEvent) {
         if event.buttonNumber == 2, item.closable { onClose?() }

@@ -15,7 +15,15 @@ final class TableTabViewController: NSViewController, WorkspaceTab, NSMenuItemVa
     private let changes: StagedChanges
     private let readOnlyConnection: Bool
     private let pageSize: Int?
+    let tabID = UUID()
     var onTabItemChange: (() -> Void)?
+    /// A preview tab (italic title) becomes a regular one once it's used: paging, sorting,
+    /// filtering, switching to Structure, or staging a change on its table.
+    var isPreview = false {
+        didSet { if isPreview != oldValue { onTabItemChange?() } }
+    }
+    /// What was staged for the table when last checked; a new mark keeps a preview tab.
+    private var lastMark: StagedChanges.Mark?
     /// Tables the foreign-key editor offers.
     var knownTables: () -> [TableRef] = { [] }
     /// Names of the schema's tables and views, for checking a new name.
@@ -40,6 +48,16 @@ final class TableTabViewController: NSViewController, WorkspaceTab, NSMenuItemVa
         self.pageSize = pageSize
         self.mode = mode
         super.init(nibName: nil, bundle: nil)
+        lastMark = changes.mark(for: table)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(stagedChangesChanged), name: StagedChanges.didChange, object: changes)
+    }
+
+    @objc private func stagedChangesChanged() {
+        guard newTableID == nil else { return }
+        let mark = changes.mark(for: table)
+        if mark != nil, mark != lastMark { isPreview = false }
+        lastMark = mark
     }
 
     /// A tab for a staged new table; it becomes a regular table tab once committed.
@@ -62,6 +80,9 @@ final class TableTabViewController: NSViewController, WorkspaceTab, NSMenuItemVa
         view = NSView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
         show(mode)
     }
+
+    /// The table or view the tab shows; nil for a staged new table.
+    var object: DatabaseObject? { newTableID == nil ? DatabaseObject(table, kind: kind) : nil }
 
     /// The controller whose view is showing; menu commands go to it.
     var active: NSViewController? { mode == .data ? data : structure }
@@ -92,6 +113,7 @@ final class TableTabViewController: NSViewController, WorkspaceTab, NSMenuItemVa
         guard wanted != mode, !(wanted == .data && isNewTable) else { return }
         data?.endInlineEdit()
         structure?.endInlineEdit()
+        isPreview = false
         show(wanted)
     }
 
@@ -108,6 +130,7 @@ final class TableTabViewController: NSViewController, WorkspaceTab, NSMenuItemVa
                 d.leadingAccessory = makeSwitch()
                 d.safety = safety
                 d.onTabItemChange = { [weak self] in self?.onTabItemChange?() }
+                d.onUse = { [weak self] in self?.isPreview = false }
                 addChild(d)
                 data = d
             }
@@ -124,6 +147,7 @@ final class TableTabViewController: NSViewController, WorkspaceTab, NSMenuItemVa
                 s.knownTables = { [weak self] in self?.knownTables() ?? [] }
                 s.existingNames = { [weak self] in self?.existingNames() ?? [] }
                 s.onPendingChange = { [weak self] in self?.onTabItemChange?() }
+                s.onUse = { [weak self] in self?.isPreview = false }
                 addChild(s)
                 structure = s
             }
@@ -189,7 +213,8 @@ final class TableTabViewController: NSViewController, WorkspaceTab, NSMenuItemVa
         let symbol = isNewTable ? "plus.rectangle" : kind == .table ? "tablecells" : "eye"
         let staged = newTableID.flatMap { changes.newTable($0)?.name }
         let title = isNewTable ? staged.map { $0.isEmpty ? "New table" : $0 } ?? "New table" : table.name
-        return TabStrip.Item(title: title, symbol: symbol, toolTip: table.description)
+        let tip = isPreview ? "\(table) — preview tab; double-click to keep it" : table.description
+        return TabStrip.Item(title: title, symbol: symbol, toolTip: tip, italic: isPreview)
     }
 
     var preferredResponder: NSView {

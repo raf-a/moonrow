@@ -2,8 +2,8 @@ import AppCore
 import AppKit
 import DBKit
 
-/// One window per open connection: sidebar (items, saved queries, history) on the left, tabs
-/// of tables and query editors on the right.
+/// One window per open connection: sidebar (items, saved queries, history) on the left, panes
+/// of tabs (tables and query editors) on the right.
 @MainActor
 final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate, TabulaActions {
     let config: ConnectionConfig
@@ -15,7 +15,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     /// The tables and views list.
     let sidebar: SidebarViewController
     let leftSidebar: LeftSidebarController
-    let content = WorkspaceTabsController()
+    /// The panes of tabs side by side; `content` is the active one.
+    let panes = WorkspacePanesController()
+    var content: WorkspaceTabsController { panes.active }
     /// The right sidebar: the selected rows, columns or indexes as a form.
     let inspector = InspectorViewController()
     private let split = NSSplitViewController()
@@ -29,6 +31,16 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     var isCommitting = false
     /// The open preview sheet, if any.
     var previewSheet: NSWindowController?
+    /// Back / Forward over the tabs this window showed.
+    private(set) var history = NavigationHistory<NavigationPlace>()
+    private var isNavigating = false
+    /// After tabs, panes or query text change, so the app can save its session.
+    var onSessionChange: (() -> Void)?
+    /// Items recently chosen in Quick Open, most recent first.
+    var quickOpenRecent: [QuickOpen.Item] = []
+    /// Quick Open's items from the last time it listed every schema.
+    var quickOpenItems: [QuickOpen.Item] = []
+    var picker: PickerPanel?
 
     /// `password` is the database password the workspace logged in with; safe mode's password
     /// levels ask for it.
@@ -47,7 +59,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         sideItem.minimumThickness = 180
         sideItem.maximumThickness = 420
         split.addSplitViewItem(sideItem)
-        let mainItem = NSSplitViewItem(viewController: content)
+        let mainItem = NSSplitViewItem(viewController: panes)
         mainItem.minimumThickness = 300
         split.addSplitViewItem(mainItem)
         let inspectorItem = NSSplitViewItem(inspectorWithViewController: inspector)
@@ -67,7 +79,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         window.minSize = NSSize(width: 600, height: 360)
         window.title = config.displayName
         window.subtitle = config.summary
-        window.tabbingMode = .disallowed
+        // Workspaces can be merged into one window's tabs (Window ▸ Merge All Windows); the
+        // system's tab overview is View ▸ Show All Tabs.
+        window.tabbingMode = .automatic
+        window.tabbingIdentifier = "TabulaWorkspace"
         super.init(window: window)
         self.inspectorItem = inspectorItem
         inspectorItem.isCollapsed = !UserDefaults.standard.bool(forKey: Self.inspectorVisibleKey)
@@ -85,8 +100,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         window.center()
         window.setFrameAutosaveName("Workspace")
 
-        sidebar.onOpen = { [weak self] object in self?.open(object, newTab: false) }
-        sidebar.onOpenInNewTab = { [weak self] object in self?.open(object, newTab: true) }
+        // A single click previews and leaves the focus in the list; a double-click keeps the tab.
+        sidebar.onOpen = { [weak self] object, intent in self?.open(object, intent: intent, focus: intent != .preview) }
         sidebar.onObjectsLoaded = { [weak self] objects in self?.environment.catalog.setObjects(objects) }
         sidebar.markFor = { [weak self] table in self?.changes.mark(for: table) }
         sidebar.stagedNewTables = { [weak self] in
@@ -101,8 +116,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         leftSidebar.history.onInsert = { [weak self] text in self?.insertIntoEditor(text) }
         leftSidebar.history.onOpenInNewTab = { [weak self] text in self?.newQuery(text: text) }
         environment.onSchemaChange = { [weak self] in self?.sidebar.reload() }
-        content.onSelectionChange = { [weak self] in self?.tabChanged() }
-        content.onNewTab = { [weak self] in self?.newQueryTab(nil) }
+        panes.onActivate = { [weak self] in self?.tabChanged() }
+        // The first pane exists already (the window loaded its content); later ones come here.
+        for pane in panes.panes { setUp(pane) }
+        panes.onNewPane = { [weak self] pane in self?.setUp(pane) }
         connectSidebarActions()
         connectTransferActions()
         sidebar.reload()
@@ -116,27 +133,50 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     /// The selected tab's rows, if it shows a table's data.
     var tableController: TableDataViewController? { tableTab?.data }
     var queryController: QueryEditorViewController? { content.current as? QueryEditorViewController }
-    var tableTabs: [TableTabViewController] { content.tabs.compactMap { $0 as? TableTabViewController } }
+    /// Table tabs of every pane.
+    var tableTabs: [TableTabViewController] { panes.allTabs.compactMap { $0 as? TableTabViewController } }
+
+    private func setUp(_ pane: WorkspaceTabsController) {
+        pane.onSelectionChange = { [weak self, weak pane] in
+            guard let self, let pane else { return }
+            // A pane whose selection changes by itself (a tab closing) doesn't take over.
+            if pane === self.content { self.tabChanged() } else { self.onSessionChange?() }
+        }
+        pane.onNewTab = { [weak self, weak pane] in
+            guard let self, let pane, let i = self.panes.index(of: pane) else { return }
+            self.panes.activate(i, focus: false)
+            self.newQueryTab(nil)
+        }
+        pane.onDoubleClickTab = { [weak pane] i in
+            (pane?.tabs[safe: i] as? TableTabViewController)?.isPreview = false
+        }
+    }
 
     // MARK: - Opening
 
-    /// Opens a table or view. A tab already showing it is selected. Otherwise it replaces the
-    /// selected table tab, or opens a new tab when the selected tab is a query (or `newTab`).
-    /// Staged changes stay with the workspace, so replacing a tab never asks.
-    func open(_ object: DatabaseObject, newTab: Bool, mode: TableTabViewController.Mode = .data) {
-        if let i = content.tabs.firstIndex(where: {
-            ($0 as? TableTabViewController).map { $0.newTableID == nil && $0.table == object.ref } ?? false
-        }) {
-            content.select(i)
-            tableTab?.switchTo(mode)
-            return
+    /// Opens a table or view in the active pane, by `TabPlacement`'s rules: a tab already
+    /// showing it is selected; `.preview` uses the pane's preview tab; `.newTab` always adds a
+    /// tab. Staged changes stay with the workspace, so replacing a tab never asks. `focus` moves
+    /// the keyboard focus into the tab.
+    /// `mode` nil keeps an open tab on its side; new tabs then show the data.
+    func open(_ object: DatabaseObject, intent: TabPlacement.Intent = .regular, mode: TableTabViewController.Mode? = nil,
+              focus: Bool = true) {
+        let pane = content
+        let tabs = pane.tabs.map { TabPlacement.Tab(object: ($0 as? TableTabViewController)?.object, isPreview: $0.isPreview) }
+        switch TabPlacement.place(object, intent: intent, in: tabs, selected: pane.selectedIndex) {
+        case .select(let i):
+            pane.select(i, focus: focus)
+            if let mode { tableTab?.switchTo(mode) }
+        case .promote(let i):
+            (pane.tabs[i] as? TableTabViewController)?.isPreview = false
+            pane.select(i, focus: focus)
+            if let mode { tableTab?.switchTo(mode) }
+        case .replacePreview(let i):
+            (pane.tabs[i] as? TableTabViewController)?.endEditing()
+            pane.replace(at: i, with: makeTab(object, mode: mode ?? .data, preview: true), focus: focus)
+        case .insert(let i, let preview):
+            pane.add(makeTab(object, mode: mode ?? .data, preview: preview), at: i, focus: focus)
         }
-        let tab = makeTab(object, mode: mode)
-        guard !newTab, let current = tableTab, let i = content.tabs.firstIndex(where: { $0 === current }) else {
-            return content.add(tab)
-        }
-        current.endEditing()
-        content.replace(at: i, with: tab)
     }
 
     /// Stages a new table and opens its structure; it is created on commit.
@@ -152,25 +192,63 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
 
     /// Selects the tab of a staged new table, or opens one.
     func openNewTable(_ id: UUID) {
-        if let i = content.tabs.firstIndex(where: { ($0 as? TableTabViewController)?.newTableID == id }) {
-            return content.select(i)
+        for (n, pane) in panes.panes.enumerated() {
+            if let i = pane.tabs.firstIndex(where: { ($0 as? TableTabViewController)?.newTableID == id }) {
+                panes.activate(n, focus: false)
+                return pane.select(i, force: true)
+            }
         }
         content.add(configure(TableTabViewController(
             connection: connection, changes: changes, newTable: id, schema: sidebar.schema, pageSize: config.pageSize)))
     }
 
     @discardableResult
-    func newQuery(text: String = "", saved: SavedQueries.Query? = nil) -> QueryEditorViewController {
+    func newQuery(text: String = "", saved: SavedQueries.Query? = nil, file: URL? = nil) -> QueryEditorViewController {
         queryCount += 1
-        let editor = QueryEditorViewController(environment: environment, number: queryCount, text: text, savedQuery: saved)
+        let editor = QueryEditorViewController(environment: environment, number: queryCount, text: text, savedQuery: saved,
+                                               file: file)
         editor.results.dialect = connection.dialect
+        editor.onEdit = { [weak self] in self?.onSessionChange?() }
         content.add(editor)
         return editor
     }
 
-    private func openSavedQuery(_ query: SavedQueries.Query) {
-        if let i = content.tabs.firstIndex(where: { ($0 as? QueryEditorViewController)?.savedQuery?.url == query.url }) {
-            return content.select(i)
+    /// File ▸ Open…: the SQL file in a new query tab, or the tab that already has it. The text is
+    /// read as UTF-8, else Windows-1252; files over 20 MB are refused (dump import is M11).
+    func openSQLFile(_ url: URL) {
+        let url = url.standardizedFileURL
+        for (n, pane) in panes.panes.enumerated() {
+            if let i = pane.tabs.firstIndex(where: { ($0 as? QueryEditorViewController)?.fileURL?.standardizedFileURL == url }) {
+                panes.activate(n, focus: false)
+                return pane.select(i, force: true)
+            }
+        }
+        do {
+            let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+            guard size <= Self.sqlFileLimit else {
+                throw CocoaError(.fileReadTooLarge, userInfo: [
+                    NSLocalizedDescriptionKey: "“\(url.lastPathComponent)” is \(ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file)), too large to edit. Files up to 20 MB open in a query tab.",
+                ])
+            }
+            let data = try Data(contentsOf: url)
+            guard let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .windowsCP1252) else {
+                throw CocoaError(.fileReadInapplicableStringEncoding)
+            }
+            window?.makeKeyAndOrderFront(nil)
+            newQuery(text: text, file: url)
+        } catch {
+            present(error, title: "Couldn't open “\(url.lastPathComponent)”", in: window)
+        }
+    }
+
+    static let sqlFileLimit = 20 * 1024 * 1024
+
+    func openSavedQuery(_ query: SavedQueries.Query) {
+        for (n, pane) in panes.panes.enumerated() {
+            if let i = pane.tabs.firstIndex(where: { ($0 as? QueryEditorViewController)?.savedQuery?.url == query.url }) {
+                panes.activate(n, focus: false)
+                return pane.select(i, force: true)
+            }
         }
         do {
             newQuery(text: try environment.savedQueries.text(of: query), saved: query)
@@ -189,7 +267,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     }
 
     private func savedQueryChanged(_ old: SavedQueries.Query, to new: SavedQueries.Query?) {
-        for case let editor as QueryEditorViewController in content.tabs where editor.savedQuery?.url == old.url {
+        for case let editor as QueryEditorViewController in panes.allTabs where editor.savedQuery?.url == old.url {
             editor.savedQueryChanged(to: new)
         }
     }
@@ -205,6 +283,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         } else {
             window?.subtitle = config.summary
         }
+        if !isNavigating, let tab = content.current { history.visit(NavigationPlace(tab)) }
+        onSessionChange?()
     }
 
     // MARK: - Staged changes
@@ -216,7 +296,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         for tab in tableTabs {
             if let id = tab.newTableID, changes.newTable(id) == nil { closeWithoutAsking(tab) }
         }
-        content.refreshTabItems()
+        for pane in panes.panes { pane.refreshTabItems() }
         updateChangesItem()
         inspector.refresh()
     }
@@ -235,7 +315,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
                 guard changes.newTable(id) != nil else { return }
                 openNewTable(id)
             } else if let table = place.table {
-                open(DatabaseObject(table, kind: place.kind), newTab: false, mode: mode)
+                open(DatabaseObject(table, kind: place.kind), intent: .preview, mode: mode)
             }
             switch mode {
             case .data: tableTab?.data?.restoreSelection(place)
@@ -245,7 +325,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     }
 
     func closeWithoutAsking(_ tab: TableTabViewController) {
-        if let i = content.tabs.firstIndex(where: { $0 === tab }) { content.close(i) }
+        if let pane = panes.pane(of: tab), let i = pane.index(of: tab) { pane.close(i) }
     }
 
     /// Asks to commit or discard everything staged before `action` (closing, quitting), then
@@ -296,7 +376,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     func windowWillClose(_ notification: Notification) {
         // Dragging the divider can hide the right sidebar too.
         UserDefaults.standard.set(isInspectorVisible, forKey: Self.inspectorVisibleKey)
-        content.closeAll()
+        for pane in panes.panes { pane.closeAll() }
+        panes.tearDown()
+        picker?.close()
         let connection = connection
         Task { await connection.close() }
         onClose?()
@@ -320,16 +402,91 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         newQuery()
     }
 
-    /// ⌘W closes the selected tab; with no tabs left it closes the window.
+    /// ⌘W closes the selected tab. An empty pane closes (unless it's the only one); with no
+    /// tabs left the window closes.
     @objc func closeTab(_ sender: Any?) {
         guard let i = content.selectedIndex else {
+            if panes.panes.count > 1 { return panes.remove(at: panes.activeIndex) }
             window?.performClose(sender)
             return
         }
         content.close(i)
     }
 
+    // MARK: - Panes
+
+    /// ⇧⌘D: a new pane to the right of the active one, showing the same table (in a regular
+    /// tab, on the same side) or a new query tab.
+    @objc func splitPaneRight(_ sender: Any?) {
+        let current = content.current
+        tableTab?.endEditing()
+        let pane = panes.addPane()
+        if let tab = current as? TableTabViewController {
+            if let id = tab.newTableID {
+                pane.add(configure(TableTabViewController(
+                    connection: connection, changes: changes, newTable: id, schema: tab.table.schema, pageSize: config.pageSize)))
+            } else if let object = tab.object {
+                pane.add(makeTab(object, mode: tab.mode, preview: false))
+            }
+        } else if current is QueryEditorViewController {
+            newQuery()
+        }
+        tabChanged()
+        if pane.tabs.isEmpty { window?.makeFirstResponder(pane.strip) }
+    }
+
+    /// ⌥⌘] / ⌥⌘[: the next or previous pane becomes active.
+    @objc func selectNextPane(_ sender: Any?) { activatePane(by: 1) }
+    @objc func selectPreviousPane(_ sender: Any?) { activatePane(by: -1) }
+
+    private func activatePane(by delta: Int) {
+        let n = panes.panes.count
+        guard n > 1 else { return NSSound.beep() }
+        panes.activate((panes.activeIndex + delta + n) % n, focus: true)
+    }
+
+    // MARK: - Back and forward
+
+    /// ⌃⌘←: the tab shown before, reopening its table if the tab was closed.
+    @objc func goBack(_ sender: Any?) { navigate { $0.goBack(where: canShow) } }
+    /// ⌃⌘→
+    @objc func goForward(_ sender: Any?) { navigate { $0.goForward(where: canShow) } }
+
+    private func navigate(_ step: (inout NavigationHistory<NavigationPlace>) -> NavigationPlace?) {
+        guard let place = step(&history) else { return NSSound.beep() }
+        isNavigating = true
+        defer { isNavigating = false }
+        if let (n, i) = locate(place) {
+            panes.activate(n, focus: false)
+            content.select(i, force: true)
+        } else if let object = place.object {
+            open(object, intent: .preview)
+        }
+        // A reopened table is a new tab; it stands for the place from now on.
+        if let tab = content.current { history.replaceCurrent(with: NavigationPlace(tab)) }
+        tabChanged()
+    }
+
+    /// Back / Forward stop offering tables that were dropped.
+    func forgetHistory(of tables: Set<TableRef>) {
+        history.removeAll { $0.object.map { tables.contains($0.ref) } ?? false }
+    }
+
+    /// The pane and tab index still showing `place`.
+    private func locate(_ place: NavigationPlace) -> (Int, Int)? {
+        for (n, pane) in panes.panes.enumerated() {
+            if let i = pane.tabs.firstIndex(where: { NavigationPlace($0) == place }) { return (n, i) }
+        }
+        return nil
+    }
+
+    /// A tab that's still open, or a table that can open again.
+    private func canShow(_ place: NavigationPlace) -> Bool {
+        locate(place) != nil || place.object != nil
+    }
+
     @objc func selectNextTab(_ sender: Any?) { content.selectNext(by: 1) }
+
     @objc func selectPreviousTab(_ sender: Any?) { content.selectNext(by: -1) }
 
     /// ⌘1…⌘9; ⌘9 is always the last tab.
@@ -479,6 +636,18 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         inspectorItem.isCollapsed.toggle()
         UserDefaults.standard.set(!inspectorItem.isCollapsed, forKey: Self.inspectorVisibleKey)
         inspector.refresh()
+    }
+}
+
+/// A tab the window showed, for Back / Forward: the tab, and the table it showed then.
+struct NavigationPlace: Hashable, Sendable {
+    var tab: UUID
+    var object: DatabaseObject?
+
+    @MainActor
+    init(_ tab: any WorkspaceTab) {
+        self.tab = tab.tabID
+        object = (tab as? TableTabViewController)?.object
     }
 }
 

@@ -24,7 +24,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TabulaActions {
     /// Dev harness only: accept unknown SSH host keys without asking.
     var autoTrustHostKeys = false
 
-    private var welcome: WelcomeWindowController?
+    /// The workspaces to reopen at the next launch.
+    lazy var sessions = SessionStore(fileURL: SessionStore.fileURL(root: dataRoot))
+    private var sessionSave: Task<Void, Never>?
+    private var isTerminating = false
+
+    private(set) var welcome: WelcomeWindowController?
+    /// The open connection picker, if any.
+    private(set) var picker: ConnectionPicker?
     private var forms: [ConnectionFormWindowController] = []
     private(set) var workspaces: [WorkspaceWindowController] = []
 
@@ -50,22 +57,88 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TabulaActions {
     func applicationDidFinishLaunching(_ notification: Notification) {
         loadStore()
         // Database paths on the command line open directly: `Tabula ~/data/app.db`.
-        for arg in CommandLine.arguments.dropFirst() where !arg.hasPrefix("-") {
-            let url = URL(filePath: (arg as NSString).expandingTildeInPath)
-            if FileManager.default.fileExists(atPath: url.path) { openFile(url) }
+        let files = CommandLine.arguments.dropFirst().filter { !$0.hasPrefix("-") }
+            .map { URL(filePath: ($0 as NSString).expandingTildeInPath) }
+            .filter { FileManager.default.fileExists(atPath: $0.path) }
+        for url in files { openFile(url) }
+        // The workspaces open at the last quit come back, unless files were named or a dev
+        // harness is running.
+        var reopening = 0
+        if files.isEmpty, settings.settings.reopenWorkspaces, DevHarness.allowsSessionRestore {
+            reopening = reopenWorkspaces()
         }
-        if workspaces.isEmpty { showConnections(nil) }
+        if workspaces.isEmpty, reopening == 0 { showWelcome(nil) }
         NSApp.activate()
         DevHarness.runIfRequested(self)
     }
 
-    /// Files dropped on the Dock icon or opened from Finder.
+    func applicationWillTerminate(_ notification: Notification) {
+        isTerminating = true
+        saveSession()
+    }
+
+    // MARK: - Session
+
+    /// Reconnects each saved workspace and reopens its tabs. Returns how many it tries.
+    private func reopenWorkspaces() -> Int {
+        var count = 0
+        for session in sessions.load() {
+            let config: ConnectionConfig
+            if let saved = store.connection(id: session.connectionID) {
+                config = saved
+            } else if let path = session.filePath, FileManager.default.fileExists(atPath: path) {
+                var file = ConnectionConfig.sqliteFile(URL(filePath: path))
+                file.safeMode = settings.settings.defaultSafeMode
+                config = file
+            } else {
+                continue  // the connection was deleted since
+            }
+            count += 1
+            connect(config, presentingErrorsIn: nil,
+                    onOpen: { workspace in workspace.restore(session) },
+                    onFailure: { [weak self] in if self?.workspaces.isEmpty ?? false { self?.showWelcome(nil) } })
+        }
+        return count
+    }
+
+    /// Writes what every workspace shows, a second after the last change.
+    func scheduleSessionSave() {
+        sessionSave?.cancel()
+        sessionSave = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            guard !Task.isCancelled else { return }
+            self?.saveSession()
+        }
+    }
+
+    func saveSession() {
+        sessionSave?.cancel()
+        sessionSave = nil
+        let open = workspaces.compactMap { w -> WorkspaceSession? in
+            if store.connection(id: w.config.id) != nil { return w.sessionSnapshot(filePath: nil) }
+            // A file opened directly isn't saved; its path brings it back. Unsaved server
+            // connections (dev switches) aren't kept.
+            if w.config.driver == .sqlite { return w.sessionSnapshot(filePath: w.config.expandedFilePath) }
+            return nil
+        }
+        do { try sessions.save(open) } catch { print("couldn't save the session: \(error)") }
+    }
+
+    /// Files dropped on the Dock icon or opened from Finder: SQL files open in query tabs,
+    /// anything else as a SQLite database.
     func application(_ application: NSApplication, open urls: [URL]) {
-        for url in urls { openFile(url) }
+        for url in urls {
+            if url.pathExtension.lowercased() == "sql" {
+                guard let workspace = frontmostWorkspace else { return needWorkspace(for: url) }
+                workspace.openSQLFile(url)
+            } else {
+                openFile(url)
+            }
+        }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if !flag { showConnections(nil) }
+        if !flag { showWelcome(nil) }
         return true
     }
 
@@ -80,11 +153,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TabulaActions {
 
     // MARK: - Actions
 
-    @objc func showConnections(_ sender: Any?) {
+    /// The welcome window: at launch, from the Dock, File ▸ New Window and Window ▸ Connections.
+    @objc func showWelcome(_ sender: Any?) {
         if welcome == nil {
             welcome = WelcomeWindowController(store: store, app: self)
         }
         welcome?.showWindow(nil)
+    }
+
+    /// Open Connection… (⇧⌘K): the connection picker; the choice opens as a tab of the
+    /// frontmost workspace window.
+    @objc func showConnections(_ sender: Any?) {
+        showPicker(title: "Open Connection", placement: .tab)
+    }
+
+    /// File ▸ New Window (⌥⌘N): the welcome window, whose connections open in windows of their own.
+    @objc func newWindow(_ sender: Any?) {
+        showWelcome(sender)
+    }
+
+    /// A sheet on the frontmost workspace window, or a window of its own when none is open.
+    private func showPicker(title: String, placement: WorkspacePlacement) {
+        if let open = picker {
+            open.window.makeKeyAndOrderFront(nil)
+            return
+        }
+        let main = NSApp.mainWindow ?? NSApp.keyWindow
+        let host = workspaces.first { $0.window === main }?.window ?? workspaces.last?.window
+        let picker = ConnectionPicker(store: store, title: title, placement: placement)
+        picker.onConnect = { [weak self] config, placement in
+            self?.connect(config, presentingErrorsIn: self?.frontmostWorkspace?.window, placement: placement)
+        }
+        picker.onNewConnection = { [weak self] in self?.newConnection(nil) }
+        picker.onEdit = { [weak self] config in self?.editConnection(config, isNew: false) }
+        picker.onClose = { [weak self, weak picker] in if self?.picker === picker { self?.picker = nil } }
+        self.picker = picker
+        // A window busy with another sheet gets a free-standing picker.
+        picker.show(on: host?.attachedSheet == nil ? host : nil)
+    }
+
+    /// ⇧⌘] / ⇧⌘[: the next or previous workspace window, in tab order where windows are merged.
+    @objc func selectNextWorkspace(_ sender: Any?) { cycleWorkspaces(by: 1) }
+    @objc func selectPreviousWorkspace(_ sender: Any?) { cycleWorkspaces(by: -1) }
+
+    private func cycleWorkspaces(by delta: Int) {
+        let mine = Set(workspaces.compactMap(\.window).map(ObjectIdentifier.init))
+        var ordered: [NSWindow] = []
+        for window in workspaces.compactMap(\.window) where !ordered.contains(window) {
+            ordered += (window.tabbedWindows ?? [window]).filter { mine.contains(ObjectIdentifier($0)) && !ordered.contains($0) }
+        }
+        guard ordered.count > 1 else { return NSSound.beep() }
+        let current = ordered.firstIndex { $0.isKeyWindow || $0 === NSApp.mainWindow } ?? 0
+        let next = ordered[(current + delta + ordered.count) % ordered.count]
+        if let group = next.tabGroup, group.windows.count > 1 { group.selectedWindow = next }
+        next.makeKeyAndOrderFront(nil)
     }
 
     /// ⌘W outside a workspace closes the window.
@@ -101,7 +223,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TabulaActions {
         preferences?.showWindow(nil)
     }
 
+    /// File ▸ Open… (⌘O): SQL files, each in a new query tab of the frontmost workspace.
     @objc func openDocument(_ sender: Any?) {
+        guard let workspace = frontmostWorkspace else { return needWorkspace(for: nil) }
+        let panel = NSOpenPanel()
+        panel.message = "Choose SQL files to open in \(workspace.config.displayName)"
+        panel.allowedContentTypes = Self.sqlTypes
+        panel.allowsMultipleSelection = true
+        panel.begin { [weak workspace] response in
+            guard response == .OK else { return }
+            for url in panel.urls { workspace?.openSQLFile(url) }
+        }
+    }
+
+    /// File ▸ Open Database File…, and the welcome window's button: SQLite databases.
+    @objc func openDatabaseFile(_ sender: Any?) {
         let panel = NSOpenPanel()
         panel.message = "Choose a SQLite database"
         panel.allowsMultipleSelection = true
@@ -109,6 +245,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TabulaActions {
             guard response == .OK else { return }
             for url in panel.urls { self?.openFile(url) }
         }
+    }
+
+    static let sqlTypes = [UTType(filenameExtension: "sql") ?? .plainText, .plainText]
+
+    /// The workspace SQL files open in: the frontmost one, else the one opened last.
+    var frontmostWorkspace: WorkspaceWindowController? {
+        let main = NSApp.mainWindow ?? NSApp.keyWindow
+        return workspaces.first { $0.window === main } ?? workspaces.last
+    }
+
+    /// A SQL file needs a connection to run against.
+    private func needWorkspace(for url: URL?) {
+        let alert = NSAlert()
+        alert.messageText = url.map { "Connect to a database to open “\($0.lastPathComponent)”" } ?? "Connect to a database first"
+        alert.informativeText = "SQL files open in a query tab of a connection's workspace. Open a connection, then choose File ▸ Open… again."
+        alert.runModal()
+        showWelcome(nil)
     }
 
     // MARK: - Windows
@@ -142,8 +295,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TabulaActions {
     /// or as an alert when there is none. `password` is what the form had typed; without it the
     /// password comes from the connection's password mode. Over SSH, `sshPassword` overrides the
     /// saved one.
+    /// The workspace opens as a tab of the frontmost workspace window unless `placement` says
+    /// otherwise.
     func connect(_ config: ConnectionConfig, password: String?? = nil, sshPassword: String? = nil,
-                 presentingErrorsIn window: NSWindow?) {
+                 presentingErrorsIn window: NSWindow?, placement: WorkspacePlacement = .tab,
+                 onOpen: ((WorkspaceWindowController) -> Void)? = nil, onFailure: (() -> Void)? = nil) {
         Task {
             do {
                 let login: String?
@@ -154,14 +310,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TabulaActions {
                     case .keychain: login = config.driver.isServer ? try secrets.password(for: config.id) : nil
                     case .none: login = nil
                     case .ask:
-                        guard let typed = await askPassword(for: config, in: window) else { return }
+                        guard let typed = await askPassword(for: config, in: window) else {
+                            onFailure?()
+                            return
+                        }
                         login = typed
                     }
                 }
                 let ssh = sshLogin(for: config, password: sshPassword, in: window)
-                openWorkspace(config, try await ConnectionFactory.open(config, password: login, ssh: ssh), password: login)
+                let workspace = openWorkspace(
+                    config, try await ConnectionFactory.open(config, password: login, ssh: ssh), password: login, placement: placement)
+                onOpen?(workspace)
             } catch {
                 present(error, title: "Couldn't connect to \(config.displayName)", in: window)
+                onFailure?()
             }
         }
     }
@@ -220,7 +382,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TabulaActions {
         secrets.copyAll(from: id, to: copy.id)
     }
 
-    private func openWorkspace(_ config: ConnectionConfig, _ connection: any DatabaseConnection, password: String?) {
+    @discardableResult
+    private func openWorkspace(_ config: ConnectionConfig, _ connection: any DatabaseConnection, password: String?,
+                               placement: WorkspacePlacement) -> WorkspaceWindowController {
         let history = histories[config.id] ?? QueryHistory(fileURL: QueryHistory.fileURL(root: dataRoot, connection: config.id))
         let saved = savedQueries[config.id] ?? SavedQueries(directory: SavedQueries.directory(root: dataRoot, connection: config.id))
         histories[config.id] = history
@@ -234,12 +398,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TabulaActions {
             do { try self.store.save(saved) } catch { present(error, title: "Couldn't save the safe mode", in: nil) }
         }
         workspace.onClose = { [weak self, weak workspace] in
-            self?.workspaces.removeAll { $0 === workspace }
+            guard let self else { return }
+            self.workspaces.removeAll { $0 === workspace }
+            // Closed by hand, it won't come back; open at quit, it will.
+            if !self.isTerminating { self.saveSession() }
         }
+        workspace.onSessionChange = { [weak self] in self?.scheduleSessionSave() }
+        show(workspace, placement)
         workspaces.append(workspace)
-        workspace.showWindow(nil)
         welcome?.close()
         forms.first { $0.config.id == config.id }?.close()
+        scheduleSessionSave()
+        return workspace
+    }
+
+    /// A new workspace joins the frontmost workspace window as a tab, or (from the welcome
+    /// window, or with no workspace open) opens a window of its own.
+    private func show(_ workspace: WorkspaceWindowController, _ placement: WorkspacePlacement) {
+        guard let window = workspace.window else { return }
+        if placement == .tab, let frontmost = frontmostWorkspace?.window {
+            frontmost.addTabbedWindow(window, ordered: .above)
+            window.makeKeyAndOrderFront(nil)
+        } else {
+            // Its own window, whatever the system's "Prefer tabs" setting says; it can still be
+            // merged later (Window ▸ Merge All Windows) or dragged into another window's tabs.
+            window.tabbingMode = .disallowed
+            workspace.showWindow(nil)
+            window.tabbingMode = .automatic
+        }
     }
 
     private func loadStore() {

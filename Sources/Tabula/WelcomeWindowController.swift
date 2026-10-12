@@ -1,28 +1,31 @@
 import AppCore
 import AppKit
 
-/// The launch window: app identity on the left, saved connections on the right.
+/// The launch window: app identity on the left, saved connections on the right, filed in
+/// groups (folders) that can be collapsed, renamed and dragged into.
 @MainActor
-final class WelcomeWindowController: NSWindowController, NSWindowDelegate, NSTableViewDataSource,
-    NSTableViewDelegate, NSSearchFieldDelegate, NSMenuDelegate
-{
+final class WelcomeWindowController: NSWindowController, NSWindowDelegate, NSSearchFieldDelegate, NSMenuDelegate {
     private let store: ConnectionStore
     private unowned let app: AppDelegate
 
-    private let table = KeyTableView()
-    private let search = NSSearchField()
-    private let emptyLabel = NSTextField(wrappingLabelWithString: "")
-    private var shown: [ConnectionConfig] = []
+    /// The connections, as Open Connection shows them; here they can also be dragged into groups.
+    let list: ConnectionList
+    var outline: KeyOutlineView { list.outline }
+    let search = NSSearchField()
 
     init(store: ConnectionStore, app: AppDelegate) {
         self.store = store
         self.app = app
+        list = ConnectionList(store: store)
+        list.emptyText = "No saved connections.\nClick + to add one, or drop a database file on the Dock icon."
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 680, height: 460),
             styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
             backing: .buffered, defer: true)
         window.isReleasedWhenClosed = false
         window.titlebarAppearsTransparent = true
+        // Only workspace windows merge into native tabs.
+        window.tabbingMode = .disallowed
         window.titleVisibility = .hidden
         window.isMovableByWindowBackground = true
         window.title = "Connections"
@@ -32,9 +35,7 @@ final class WelcomeWindowController: NSWindowController, NSWindowDelegate, NSTab
         window.center()
         window.setFrameAutosaveName("Welcome")
 
-        NotificationCenter.default.addObserver(
-            self, selector: #selector(storeChanged), name: ConnectionStore.didChange, object: store)
-        reload()
+        list.onMove = { [weak self] ids, group in self?.move(ids, to: group) ?? false }
     }
 
     @available(*, unavailable)
@@ -42,7 +43,7 @@ final class WelcomeWindowController: NSWindowController, NSWindowDelegate, NSTab
 
     override func showWindow(_ sender: Any?) {
         super.showWindow(sender)
-        window?.makeFirstResponder(table)
+        window?.makeFirstResponder(outline)
     }
 
     // MARK: - Layout
@@ -67,7 +68,7 @@ final class WelcomeWindowController: NSWindowController, NSWindowDelegate, NSTab
         version.textColor = .secondaryLabelColor
 
         let newButton = NSButton(title: "New Connection…", target: nil, action: #selector(TabulaActions.newConnection(_:)))
-        let openButton = NSButton(title: "Open Database File…", target: nil, action: #selector(AppDelegate.openDocument(_:)))
+        let openButton = NSButton(title: "Open Database File…", target: nil, action: #selector(AppDelegate.openDatabaseFile(_:)))
         for b in [newButton, openButton] {
             b.controlSize = .large
             b.widthAnchor.constraint(equalToConstant: 190).isActive = true
@@ -83,43 +84,26 @@ final class WelcomeWindowController: NSWindowController, NSWindowDelegate, NSTab
         sideStack.pin(to: side)
 
         // Right: search, add, the list.
-        search.placeholderString = "Search connections"
+        search.placeholderString = "Search names, hosts and tags"
         search.delegate = self
         search.sendsSearchStringImmediately = true
+        let newGroup = NSButton(image: NSImage(systemSymbolName: "folder.badge.plus", accessibilityDescription: "New group")!,
+                                target: self, action: #selector(newGroupClicked(_:)))
+        newGroup.bezelStyle = .accessoryBarAction
+        newGroup.toolTip = "New group"
         let add = NSButton(image: NSImage(systemSymbolName: "plus", accessibilityDescription: "New connection")!,
                            target: nil, action: #selector(TabulaActions.newConnection(_:)))
         add.bezelStyle = .accessoryBarAction
         add.toolTip = "New connection"
-        let header = NSStackView(views: [search, add])
+        let header = NSStackView(views: [search, newGroup, add])
         header.spacing = 6
 
-        let column = NSTableColumn(identifier: .init("connection"))
-        table.addTableColumn(column)
-        table.headerView = nil
-        table.rowHeight = 44
-        table.style = .inset
-        table.dataSource = self
-        table.delegate = self
-        table.target = self
-        table.doubleAction = #selector(connectClicked(_:))
-        table.menu = makeContextMenu()
-        table.onReturn = { [weak self] in self?.connectSelected() }
-        table.onDelete = { [weak self] in self?.deleteClicked(nil) }
-        let scroll = NSScrollView()
-        scroll.documentView = table
-        scroll.hasVerticalScroller = true
-        scroll.drawsBackground = false
-        table.backgroundColor = .clear
-
-        emptyLabel.alignment = .center
-        emptyLabel.textColor = .secondaryLabelColor
-        scroll.addSubview(emptyLabel)
-        emptyLabel.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            emptyLabel.centerXAnchor.constraint(equalTo: scroll.centerXAnchor),
-            emptyLabel.centerYAnchor.constraint(equalTo: scroll.centerYAnchor),
-            emptyLabel.widthAnchor.constraint(lessThanOrEqualTo: scroll.widthAnchor, constant: -60),
-        ])
+        outline.target = self
+        outline.doubleAction = #selector(connectClicked(_:))
+        outline.menu = makeContextMenu()
+        outline.onReturn = { [weak self] in self?.returnPressed() }
+        outline.onDelete = { [weak self] in self?.deleteClicked(nil) }
+        let scroll = list.scrollView
 
         let main = NSStackView(views: [header, scroll])
         main.orientation = .vertical
@@ -154,14 +138,31 @@ final class WelcomeWindowController: NSWindowController, NSWindowDelegate, NSTab
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
-        if clickedConnection != nil {
+        if let c = clickedNode?.connection {
             menu.add("Connect", #selector(connectClicked(_:))).target = self
             menu.add("Edit…", #selector(editClicked(_:))).target = self
             menu.add("Duplicate", #selector(duplicateClicked(_:))).target = self
+            let move = menu.add("Move to Group", nil)
+            move.submenu = NSMenu(title: "Move to Group")
+            for g in store.groups {
+                let item = move.submenu!.add(g.name, #selector(moveToGroup(_:)))
+                item.target = self
+                item.representedObject = g.id
+                item.state = c.groupID == g.id ? .on : .off
+            }
+            if !store.groups.isEmpty { move.submenu!.addItem(.separator()) }
+            let none = move.submenu!.add("No Group", #selector(moveToGroup(_:)))
+            none.target = self
+            none.state = store.group(id: c.groupID ?? UUID()) == nil ? .on : .off
             menu.addItem(.separator())
             menu.add("Delete…", #selector(deleteClicked(_:))).target = self
             menu.addItem(.separator())
+        } else if clickedNode?.group != nil {
+            menu.add("Rename Group…", #selector(renameGroupClicked(_:))).target = self
+            menu.add("Delete Group…", #selector(deleteClicked(_:))).target = self
+            menu.addItem(.separator())
         }
+        menu.add("New Group…", #selector(newGroupClicked(_:))).target = self
         menu.add("New Connection…", #selector(TabulaActions.newConnection(_:)))
     }
 
@@ -169,170 +170,145 @@ final class WelcomeWindowController: NSWindowController, NSWindowDelegate, NSTab
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
     }
 
-    // MARK: - Data
+    // MARK: - Search
 
-    @objc private func storeChanged() { reload() }
-
-    private func reload() {
-        let selected = selectedConnection?.id
-        let query = search.stringValue.trimmingCharacters(in: .whitespaces)
-        shown = query.isEmpty ? store.connections : store.connections.filter {
-            $0.displayName.localizedCaseInsensitiveContains(query)
-                || $0.summary.localizedCaseInsensitiveContains(query)
-        }
-        table.reloadData()
-        if let selected, let row = shown.firstIndex(where: { $0.id == selected }) {
-            table.selectRowIndexes([row], byExtendingSelection: false)
-        } else if !shown.isEmpty {
-            table.selectRowIndexes([0], byExtendingSelection: false)
-        }
-        emptyLabel.stringValue = store.connections.isEmpty
-            ? "No saved connections.\nClick + to add one, or drop a database file on the Dock icon."
-            : "Nothing matches “\(query)”."
-        emptyLabel.isHidden = !shown.isEmpty
-    }
-
-    func controlTextDidChange(_ obj: Notification) { reload() }
+    func controlTextDidChange(_ obj: Notification) { list.query = search.stringValue }
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
         // Arrow keys and Return in the search field drive the list.
         switch selector {
         case #selector(NSResponder.moveDown(_:)), #selector(NSResponder.moveUp(_:)):
-            window?.makeFirstResponder(table)
-            table.keyDown(with: NSApp.currentEvent!)
+            window?.makeFirstResponder(outline)
+            outline.keyDown(with: NSApp.currentEvent!)
             return true
         case #selector(NSResponder.insertNewline(_:)):
-            connectSelected()
+            returnPressed()
             return true
         default:
             return false
         }
     }
 
-    func numberOfRows(in tableView: NSTableView) -> Int { shown.count }
-
-    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        let cell = tableView.makeView(withIdentifier: ConnectionCell.identifier, owner: nil) as? ConnectionCell
-            ?? ConnectionCell()
-        cell.show(shown[row])
-        return cell
+    /// Files connections into a group (nil: no group).
+    @discardableResult
+    func move(_ ids: [UUID], to group: UUID?) -> Bool {
+        do {
+            try store.move(ids, to: group)
+            return true
+        } catch {
+            present(error, title: "Couldn't move the connection", in: window)
+            return false
+        }
     }
 
     // MARK: - Commands
 
-    private var selectedConnection: ConnectionConfig? {
-        shown.indices.contains(table.selectedRow) ? shown[table.selectedRow] : nil
-    }
+    private var selectedNode: ConnectionList.Node? { list.selectedNode }
+    private var clickedNode: ConnectionList.Node? { list.clickedNode }
 
-    /// The right-clicked row if there is one, else the selection.
-    private var clickedConnection: ConnectionConfig? {
-        if table.clickedRow >= 0 { return shown.indices.contains(table.clickedRow) ? shown[table.clickedRow] : nil }
-        return selectedConnection
-    }
-
-    private func connectSelected() {
-        guard let c = selectedConnection else { return }
-        app.connect(c, presentingErrorsIn: window)
+    private func returnPressed() {
+        guard let node = selectedNode else { return }
+        if node.group != nil {
+            list.toggle(node)
+        } else if let c = node.connection {
+            connect(c)
+        }
     }
 
     @objc private func connectClicked(_ sender: Any?) {
-        guard let c = clickedConnection else { return }
-        app.connect(c, presentingErrorsIn: window)
+        guard let node = clickedNode else { return }
+        if node.group != nil, sender is NSOutlineView {
+            return list.toggle(node)
+        }
+        guard let c = node.connection else { return }
+        connect(c)
+    }
+
+    /// A connection opened here gets a window of its own (File ▸ New Window shows this window).
+    func connect(_ c: ConnectionConfig) {
+        app.connect(c, presentingErrorsIn: window, placement: .window)
     }
 
     @objc private func editClicked(_ sender: Any?) {
-        guard let c = clickedConnection else { return }
+        guard let c = clickedNode?.connection else { return }
         app.editConnection(c, isNew: false)
     }
 
     @objc private func duplicateClicked(_ sender: Any?) {
-        guard let c = clickedConnection else { return }
+        guard let c = clickedNode?.connection else { return }
         do { try app.duplicateConnection(c.id) } catch { present(error, title: "Couldn't duplicate", in: window) }
     }
 
-    @objc private func deleteClicked(_ sender: Any?) {
-        guard let c = clickedConnection, let window else { return }
+    @objc private func moveToGroup(_ sender: NSMenuItem) {
+        guard let c = clickedNode?.connection else { return }
+        move([c.id], to: sender.representedObject as? UUID)
+    }
+
+    @objc func newGroupClicked(_ sender: Any?) {
+        askName(title: "New Group", button: "Create", current: "") { [weak self] name in
+            guard let self else { return }
+            do {
+                let group = try self.store.addGroup(named: name)
+                // A selected connection outside any group goes into the new one.
+                if let c = self.selectedNode?.connection, self.store.group(id: c.groupID ?? UUID()) == nil, sender is NSMenuItem {
+                    self.move([c.id], to: group.id)
+                }
+            } catch {
+                present(error, title: "Couldn't create the group", in: self.window)
+            }
+        }
+    }
+
+    @objc private func renameGroupClicked(_ sender: Any?) {
+        guard let group = clickedNode?.group else { return }
+        askName(title: "Rename Group", button: "Rename", current: group.name) { [weak self] name in
+            do { try self?.store.renameGroup(group.id, to: name) } catch {
+                present(error, title: "Couldn't rename the group", in: self?.window)
+            }
+        }
+    }
+
+    private func askName(title: String, button: String, current: String, done: @escaping (String) -> Void) {
+        guard let window else { return }
         let alert = NSAlert()
-        alert.messageText = "Delete “\(c.displayName)”?"
-        alert.informativeText = "This removes the saved connection. The database itself is not touched."
+        alert.messageText = title
+        alert.addButton(withTitle: button)
+        alert.addButton(withTitle: "Cancel")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 22))
+        field.stringValue = current
+        field.placeholderString = "Group name"
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        alert.beginSheetModal(for: window) { response in
+            if response == .alertFirstButtonReturn { done(field.stringValue) }
+        }
+    }
+
+    @objc private func deleteClicked(_ sender: Any?) {
+        guard let node = clickedNode, let window else { return }
+        let alert = NSAlert()
+        if let group = node.group {
+            alert.messageText = "Delete the group “\(group.name)”?"
+            alert.informativeText = "Its connections are kept, outside any group."
+        } else if let c = node.connection {
+            alert.messageText = "Delete “\(c.displayName)”?"
+            alert.informativeText = "This removes the saved connection. The database itself is not touched."
+        } else {
+            return
+        }
         alert.addButton(withTitle: "Delete").hasDestructiveAction = true
         alert.addButton(withTitle: "Cancel")
         alert.beginSheetModal(for: window) { [weak self] response in
             guard response == .alertFirstButtonReturn, let self else { return }
-            do { try self.app.deleteConnection(c.id) } catch { present(error, title: "Couldn't delete", in: self.window) }
-        }
-    }
-
-}
-
-/// Name over a one-line summary, with a driver glyph.
-private final class ConnectionCell: NSTableCellView {
-    static let identifier = NSUserInterfaceItemIdentifier("ConnectionCell")
-    private let title = NSTextField(labelWithString: "")
-    private let detail = NSTextField(labelWithString: "")
-    private let glyph = NSImageView()
-    private let tagLabel = NSTextField(labelWithString: "")
-
-    init() {
-        super.init(frame: .zero)
-        identifier = Self.identifier
-        title.font = .systemFont(ofSize: 13, weight: .medium)
-        detail.font = .systemFont(ofSize: 11)
-        detail.textColor = .secondaryLabelColor
-        for f in [title, detail] {
-            f.lineBreakMode = .byTruncatingMiddle
-            f.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        }
-        glyph.image = NSImage(systemSymbolName: "cylinder.split.1x2", accessibilityDescription: nil)
-        glyph.symbolConfiguration = .init(pointSize: 18, weight: .regular)
-        glyph.contentTintColor = .controlAccentColor
-        glyph.setContentHuggingPriority(.required, for: .horizontal)
-
-        let text = NSStackView(views: [title, detail])
-        text.orientation = .vertical
-        text.alignment = .leading
-        text.spacing = 1
-        tagLabel.font = .systemFont(ofSize: 9, weight: .bold)
-        tagLabel.setContentHuggingPriority(.required, for: .horizontal)
-        tagLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
-        let row = NSStackView(views: [glyph, text, NSView(), tagLabel])
-        row.spacing = 10
-        row.edgeInsets = NSEdgeInsets(top: 0, left: 4, bottom: 0, right: 4)
-        addSubview(row)
-        row.pin(to: self)
-        textField = title
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError() }
-
-    func show(_ c: ConnectionConfig) {
-        title.stringValue = c.displayName
-        detail.stringValue = c.summary
-        toolTip = c.driver.isServer ? c.summary : c.expandedFilePath
-        glyph.image = NSImage(
-            systemSymbolName: c.driver.isServer ? "server.rack" : "cylinder.split.1x2", accessibilityDescription: c.driver.displayName)
-        // The connection's colour marks it; uncoloured ones keep the accent colour.
-        glyph.contentTintColor = c.markColor ?? .controlAccentColor
-        tagLabel.stringValue = c.tag?.title.uppercased() ?? ""
-        tagLabel.textColor = c.markColor ?? .secondaryLabelColor
-        tagLabel.isHidden = c.tag == nil
-    }
-}
-
-/// A table that reports Return and Delete instead of beeping.
-final class KeyTableView: NSTableView {
-    var onReturn: (() -> Void)?
-    var onDelete: (() -> Void)?
-
-    override func keyDown(with event: NSEvent) {
-        let plain = event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty
-        if plain, [36, 76].contains(event.keyCode), let onReturn {  // Return, keypad Enter
-            onReturn()
-        } else if plain, [51, 117].contains(event.keyCode), let onDelete {  // Delete, Forward Delete
-            onDelete()
-        } else {
-            super.keyDown(with: event)
+            do {
+                if let group = node.group {
+                    try self.store.deleteGroup(group.id)
+                } else if let c = node.connection {
+                    try self.app.deleteConnection(c.id)
+                }
+            } catch {
+                present(error, title: "Couldn't delete", in: self.window)
+            }
         }
     }
 }

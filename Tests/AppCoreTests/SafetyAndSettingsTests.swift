@@ -168,7 +168,12 @@ private func tempDir() -> URL {
         #expect(KeyBinding("s", [.command, .shift]).menuKey == "S")
         #expect(KeyBinding("s").menuKey == "s")
         #expect(KeyBinding("\u{8}", [.command, .shift]).menuKey == "\u{8}")
-        #expect(KeyBinding("]", [.command, .shift]).menuKey == "]")
+        // Shifted punctuation goes to the menu as the character typed: ⇧⌘] is "}".
+        #expect(KeyBinding("]", [.command, .shift]).menuKey == "}")
+        #expect(KeyBinding("]", [.command, .option]).menuKey == "]")
+        // A recorded ⇧⌘] ("}" with ⇧) is kept as "]" with ⇧, shown as ⇧⌘].
+        #expect(KeyBinding("}", [.command, .shift]) == KeyBinding("]", [.command, .shift]))
+        #expect(KeyBinding("}", [.command, .shift]).display == "⇧⌘]")
     }
 
     @Test func themes() {

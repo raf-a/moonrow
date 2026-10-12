@@ -16,6 +16,8 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
     let table: TableRef
     let kind: ObjectKind
     var onTabItemChange: (() -> Void)?
+    /// The user paged, sorted, filtered or staged an edit (a preview tab becomes regular).
+    var onUse: (() -> Void)?
     /// Shown first in the bottom bar (the Data / Structure switch).
     var leadingAccessory: NSView?
     /// Why the grid can't be edited (a view, a read-only connection), or nil.
@@ -77,11 +79,13 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
 
     /// Stages an edit as one undo step named `name`.
     fileprivate func updateEdits(_ name: String, _ body: (inout TableEdits) -> Void) {
+        let before = changes.edits(for: table)
         changes.perform(name, at: place) {
             var e = edits
             body(&e)
             changes.setEdits(e)
         }
+        if changes.edits(for: table) != before { onUse?() }
     }
 
     /// The table and selection, for undo.
@@ -487,6 +491,7 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
         endInlineEdit()
         query.cycleSort(tableColumn.title)
         query.page.offset = 0
+        onUse?()
         updateSortIndicators()
         reloadPage(recount: false)
     }
@@ -499,6 +504,7 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
         if filter != query.filter {
             query.filter = filter
             query.page.offset = 0
+            onUse?()
         }
         reloadPage(recount: true)
     }
@@ -518,6 +524,7 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
         guard page != query.page else { return }
         endInlineEdit()
         query.page = page
+        onUse?()
         reloadPage(recount: false)
     }
 

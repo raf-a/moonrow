@@ -3,6 +3,10 @@ import AppKit
 /// Something a workspace tab shows: a table's data or a query editor.
 @MainActor
 protocol WorkspaceTab: NSViewController {
+    /// Stays the same for the tab's life; Back / Forward find tabs by it.
+    var tabID: UUID { get }
+    /// The pane's preview tab: a single-clicked item that the next single click replaces.
+    var isPreview: Bool { get }
     var tabItem: TabStrip.Item { get }
     /// Set by the tab container; call when `tabItem` changes.
     var onTabItemChange: (() -> Void)? { get set }
@@ -14,7 +18,11 @@ protocol WorkspaceTab: NSViewController {
     func tabDidClose()
 }
 
-/// The workspace's tabs: a strip on top, the selected tab's view below.
+extension WorkspaceTab {
+    var isPreview: Bool { false }
+}
+
+/// One pane of the workspace: a strip of tabs on top, the selected tab's view below.
 @MainActor
 final class WorkspaceTabsController: NSViewController {
     let strip = TabStrip()
@@ -26,6 +34,10 @@ final class WorkspaceTabsController: NSViewController {
     var onSelectionChange: (() -> Void)?
     /// The + button.
     var onNewTab: (() -> Void)?
+    /// A double-click on a tab.
+    var onDoubleClickTab: ((Int) -> Void)?
+    /// After the last tab closed.
+    var onEmpty: (() -> Void)?
 
     var current: (any WorkspaceTab)? { selectedIndex.map { tabs[$0] } }
 
@@ -33,6 +45,7 @@ final class WorkspaceTabsController: NSViewController {
         strip.onSelect = { [weak self] i in self?.select(i) }
         strip.onClose = { [weak self] i in self?.close(i) }
         strip.onAdd = { [weak self] in self?.onNewTab?() }
+        strip.onDoubleClick = { [weak self] i in self?.onDoubleClickTab?(i) }
         strip.addToolTip = "New query tab (⌘T)"
         placeholder.textColor = .tertiaryLabelColor
         placeholder.font = .systemFont(ofSize: 14)
@@ -57,7 +70,7 @@ final class WorkspaceTabsController: NSViewController {
         view = root
     }
 
-    func add(_ tab: any WorkspaceTab, at index: Int? = nil) {
+    func add(_ tab: any WorkspaceTab, at index: Int? = nil, focus: Bool = true) {
         let i = min(index ?? tabs.count, tabs.count)
         tabs.insert(tab, at: i)
         addChild(tab)
@@ -65,21 +78,22 @@ final class WorkspaceTabsController: NSViewController {
             self?.updateStrip()
             self?.onSelectionChange?()
         }
-        select(i, force: true)
+        select(i, force: true, focus: focus)
     }
 
     /// Swaps the tab at `index` for `tab` (a table tab opening another table).
-    func replace(at index: Int, with tab: any WorkspaceTab) {
+    func replace(at index: Int, with tab: any WorkspaceTab, focus: Bool = true) {
         let old = tabs[index]
         old.tabDidClose()
         old.view.removeFromSuperview()
         old.removeFromParent()
         tabs.remove(at: index)
         if selectedIndex == index { selectedIndex = nil }
-        add(tab, at: index)
+        add(tab, at: index, focus: focus)
     }
 
-    func select(_ index: Int, force: Bool = false) {
+    /// Selects the tab and gives it the focus (`focus`, when the pane is the active one).
+    func select(_ index: Int, force: Bool = false, focus: Bool = true) {
         guard index >= 0, index < tabs.count else { return }
         if index == selectedIndex, !force { return }
         current?.view.removeFromSuperview()
@@ -90,9 +104,11 @@ final class WorkspaceTabsController: NSViewController {
         tab.view.pin(to: container)
         placeholder.isHidden = true
         updateStrip()
-        view.window?.makeFirstResponder(tab.preferredResponder)
+        if focus { view.window?.makeFirstResponder(tab.preferredResponder) }
         onSelectionChange?()
     }
+
+    func index(of tab: any WorkspaceTab) -> Int? { tabs.firstIndex { $0 === tab } }
 
     /// Closes the tab once it agrees to (staged edits get resolved first).
     func close(_ index: Int) {
@@ -113,7 +129,7 @@ final class WorkspaceTabsController: NSViewController {
             if s == index {
                 selectedIndex = nil
                 // Like most tabbed apps: the tab to the right, else the one to the left.
-                if !tabs.isEmpty { return select(min(index, tabs.count - 1), force: true) }
+                if !tabs.isEmpty { return select(min(index, tabs.count - 1), force: true, focus: isActive) }
             } else if s > index {
                 selectedIndex = s - 1
             }
@@ -121,6 +137,12 @@ final class WorkspaceTabsController: NSViewController {
         placeholder.isHidden = !tabs.isEmpty
         updateStrip()
         onSelectionChange?()
+        if tabs.isEmpty { onEmpty?() }
+    }
+
+    /// The pane the window's commands go to. Only its selected tab gets the accent line.
+    var isActive = true {
+        didSet { if isViewLoaded { strip.isActive = isActive } }
     }
 
     /// Stops every tab without asking. For a closing window.
@@ -138,6 +160,7 @@ final class WorkspaceTabsController: NSViewController {
     func refreshTabItems() { updateStrip() }
 
     private func updateStrip() {
+        guard isViewLoaded else { return }
         strip.items = tabs.map(\.tabItem)
         strip.selectedIndex = selectedIndex
     }

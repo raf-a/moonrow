@@ -7,6 +7,7 @@ import AppKit
     @objc optional func newConnection(_ sender: Any?)
     @objc optional func showPreferences(_ sender: Any?)
     @objc optional func showConnections(_ sender: Any?)
+    @objc optional func newWindow(_ sender: Any?)
     @objc optional func reloadWorkspace(_ sender: Any?)
     @objc optional func focusItemFilter(_ sender: Any?)
 
@@ -46,6 +47,17 @@ import AppKit
     @objc optional func toggleLineComment(_ sender: Any?)
     @objc optional func showSavedQueries(_ sender: Any?)
     @objc optional func showQueryHistory(_ sender: Any?)
+
+    // Navigation, panes and workspaces
+    @objc optional func quickOpen(_ sender: Any?)
+    @objc optional func openDatabase(_ sender: Any?)
+    @objc optional func goBack(_ sender: Any?)
+    @objc optional func goForward(_ sender: Any?)
+    @objc optional func splitPaneRight(_ sender: Any?)
+    @objc optional func selectNextPane(_ sender: Any?)
+    @objc optional func selectPreviousPane(_ sender: Any?)
+    @objc optional func selectNextWorkspace(_ sender: Any?)
+    @objc optional func selectPreviousWorkspace(_ sender: Any?)
 
     // Export and import
     @objc optional func exportData(_ sender: Any?)
@@ -103,9 +115,12 @@ enum MainMenu {
 
         main.addSubmenu("File") { m in
             m.add("New Connection…", #selector(TabulaActions.newConnection(_:)), "n")
+            m.add("New Window", #selector(TabulaActions.newWindow(_:)), "n", [.command, .option])
             m.add("New Query Tab", #selector(TabulaActions.newQueryTab(_:)), "t")
             m.add("New Table…", #selector(TabulaActions.newTable(_:)))
+            // ⌘O opens SQL files into query tabs; databases files have their own item.
             m.add("Open…", #selector(NSDocumentController.openDocument(_:)), "o")
+            m.add("Open Database File…", #selector(AppDelegate.openDatabaseFile(_:)))
             m.addItem(.separator())
             m.add("Close Tab", #selector(TabulaActions.closeTab(_:)), "w")
             m.add("Close Window", #selector(NSWindow.performClose(_:)), "w", [.command, .shift])
@@ -166,7 +181,12 @@ enum MainMenu {
             sidebars.submenu!.add("Left Sidebar", #selector(NSSplitViewController.toggleSidebar(_:)), "0")
             sidebars.submenu!.add("Right Sidebar", #selector(TabulaActions.toggleRightSidebar(_:)), " ", [])
             m.addItem(.separator())
-            m.add("Enter Full Screen", #selector(NSWindow.toggleFullScreen(_:)), "f", [.command, .control])
+            // Workspace windows can share one window's tabs (Window ▸ Merge All Windows).
+            m.add("Show Tab Bar", #selector(NSWindow.toggleTabBar(_:)))
+            m.add("Show All Tabs", #selector(NSWindow.toggleTabOverview(_:)), "\\", [.command, .shift])
+            m.addItem(.separator())
+            // fn-F, the system's shortcut; with any other AppKit adds a second item.
+            m.add("Enter Full Screen", #selector(NSWindow.toggleFullScreen(_:)), "f", .function)
         }
 
         main.addSubmenu("Connection") { m in
@@ -177,10 +197,15 @@ enum MainMenu {
             m.add("Run All Statements", #selector(TabulaActions.runAllQueries(_:)), "\r", [.command, .shift])
             m.add("Stop Query", #selector(TabulaActions.cancelQuery(_:)), ".")
             m.addItem(.separator())
-            m.add("Show Connections", #selector(TabulaActions.showConnections(_:)), "k", [.command, .shift])
+            m.add("Open Connection…", #selector(TabulaActions.showConnections(_:)), "k", [.command, .shift])
         }
 
         main.addSubmenu("Navigate") { m in
+            m.add("Quick Open…", #selector(TabulaActions.quickOpen(_:)), "p")
+            m.add("Open Database…", #selector(TabulaActions.openDatabase(_:)), "k")
+            m.add("Back", #selector(TabulaActions.goBack(_:)), "\u{F702}", [.command, .control])
+            m.add("Forward", #selector(TabulaActions.goForward(_:)), "\u{F703}", [.command, .control])
+            m.addItem(.separator())
             m.add("Show Table Data", #selector(TabulaActions.showTableData(_:)), "[", [.command, .control])
             m.add("Show Table Structure", #selector(TabulaActions.showTableStructure(_:)), "]", [.command, .control])
             m.addItem(.separator())
@@ -195,6 +220,13 @@ enum MainMenu {
                 tabs.submenu!.add(i == 9 ? "Last Tab" : "Tab \(i)", #selector(TabulaActions.selectTabByNumber(_:)), String(i)).tag = i
             }
             m.addItem(.separator())
+            m.add("Split Pane Right", #selector(TabulaActions.splitPaneRight(_:)), "d", [.command, .shift])
+            m.add("Select Next Pane", #selector(TabulaActions.selectNextPane(_:)), "]", [.command, .option])
+            m.add("Select Previous Pane", #selector(TabulaActions.selectPreviousPane(_:)), "[", [.command, .option])
+            m.addItem(.separator())
+            m.add("Select Next Workspace", #selector(TabulaActions.selectNextWorkspace(_:)), "]", [.command, .shift])
+            m.add("Select Previous Workspace", #selector(TabulaActions.selectPreviousWorkspace(_:)), "[", [.command, .shift])
+            m.addItem(.separator())
             m.add("Saved Queries", #selector(TabulaActions.showSavedQueries(_:)))
             m.add("Query History", #selector(TabulaActions.showQueryHistory(_:)), "y", [.command, .shift])
         }
@@ -202,6 +234,8 @@ enum MainMenu {
         let window = main.addSubmenu("Window") { m in
             m.add("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m")
             m.add("Zoom", #selector(NSWindow.performZoom(_:)))
+            m.addItem(.separator())
+            m.add("Connections", #selector(AppDelegate.showWelcome(_:)))
             m.addItem(.separator())
             m.add("Bring All to Front", #selector(NSApplication.arrangeInFront(_:)))
         }

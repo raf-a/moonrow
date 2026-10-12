@@ -80,11 +80,22 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
     }
 
     var onTabItemChange: (() -> Void)?
+    let tabID = UUID()
+    /// After the text changes (the workspace saves its session).
+    var onEdit: (() -> Void)?
 
-    init(environment: QueryEnvironment, number: Int, text: String = "", savedQuery: SavedQueries.Query? = nil) {
+    /// The SQL file the tab was opened from (File ▸ Open…) or last saved to (Save SQL As…). It
+    /// names the tab; the file is written only by Save SQL As….
+    private(set) var fileURL: URL? {
+        didSet { onTabItemChange?() }
+    }
+
+    init(environment: QueryEnvironment, number: Int, text: String = "", savedQuery: SavedQueries.Query? = nil,
+         file: URL? = nil) {
         self.environment = environment
         self.number = number
         self.savedQuery = savedQuery
+        self.fileURL = file
         self.highlighter = SQLHighlighter(dialect: environment.connection.dialect.lexer)
         super.init(nibName: nil, bundle: nil)
         editor.string = text
@@ -242,8 +253,12 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
     // MARK: - WorkspaceTab
 
     var tabItem: TabStrip.Item {
-        TabStrip.Item(title: savedQuery?.name ?? "Query \(number)", symbol: "terminal",
-                      toolTip: savedQuery.map { "Saved query “\($0.name)”" } ?? "Unsaved query")
+        if savedQuery == nil, let fileURL {
+            return TabStrip.Item(title: fileURL.lastPathComponent, symbol: "doc.text",
+                                 toolTip: (fileURL.path as NSString).abbreviatingWithTildeInPath)
+        }
+        return TabStrip.Item(title: savedQuery?.name ?? "Query \(number)", symbol: "terminal",
+                             toolTip: savedQuery.map { "Saved query “\($0.name)”" } ?? "Unsaved query")
     }
 
     var preferredResponder: NSView { editor }
@@ -391,6 +406,7 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
         updatePosition()
         updateStatementHighlight()
         if savedQuery != nil { scheduleAutosave() }
+        onEdit?()
     }
 
     /// The theme or font changed in the preferences.
@@ -468,12 +484,19 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
         guard let window = view.window else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.init(filenameExtension: "sql") ?? .plainText]
-        panel.nameFieldStringValue = (savedQuery?.name ?? tabItem.title) + ".sql"
+        // A tab opened from a file suggests that file.
+        if let fileURL, savedQuery == nil {
+            panel.directoryURL = fileURL.deletingLastPathComponent()
+            panel.nameFieldStringValue = fileURL.lastPathComponent
+        } else {
+            panel.nameFieldStringValue = (savedQuery?.name ?? tabItem.title) + ".sql"
+        }
         let text = editor.string
         panel.beginSheetModal(for: window) { [weak self] response in
             guard response == .OK, let url = panel.url else { return }
             do {
                 try Data(text.utf8).write(to: url, options: .atomic)
+                if self?.savedQuery == nil { self?.fileURL = url }
             } catch {
                 self?.presentError(error, title: "Couldn't save the SQL")
             }
