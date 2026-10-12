@@ -2,17 +2,22 @@ import AppCore
 import AppKit
 import DBKit
 
-// The sidebar's Rename, Truncate, Delete and Copy Script As. Each confirmation shows the SQL it
-// will run, updated as its options change. Truncate and Delete are staged with the workspace's
-// other changes; Rename runs at once.
+// The sidebar's Rename, Truncate, Delete and Copy Script As. Truncate's and Delete's dialogs
+// show the SQL, updated as their options change. All three are staged with the workspace's other
+// changes, each as one undo step; ⌫ marks items for deletion without a
+// dialog.
 
 extension WorkspaceWindowController {
     func connectSidebarActions() {
         sidebar.onOpenStructure = { [weak self] object in self?.open(object, newTab: false, mode: .structure) }
         sidebar.onNewTable = config.readOnly ? nil : { [weak self] in self?.newTable(nil) }
         sidebar.onRename = { [weak self] object in self?.rename(object) }
+        sidebar.onRenameNewTable = { [weak self] id in self?.renameNewTable(id) }
         sidebar.onTruncate = { [weak self] object in self?.truncate(object) }
         sidebar.onDelete = { [weak self] object in self?.delete(object) }
+        sidebar.onMarkForDeletion = config.readOnly ? nil : { [weak self] objects, newTables in
+            self?.markForDeletion(objects, newTables: newTables)
+        }
         sidebar.onCopyScript = { [weak self] object, script in self?.copyScript(object, script) }
     }
 
@@ -21,7 +26,7 @@ extension WorkspaceWindowController {
         tableTabs.filter { $0.newTableID == nil && $0.table == object.ref }
     }
 
-    /// For actions that run at once (rename, import): when `object` has staged changes, asks to
+    /// For actions that run at once (CSV import): when `object` has staged changes, asks to
     /// commit everything staged or discard what's staged for it, then runs `proceed`.
     func resolveEdits(on object: DatabaseObject, before action: String, then proceed: @escaping () -> Void) {
         for tab in tableTabs { tab.endEditing() }
@@ -46,31 +51,114 @@ extension WorkspaceWindowController {
         }
     }
 
-    private func rename(_ object: DatabaseObject) {
-        guard !config.readOnly else { return NSSound.beep() }
+    /// Names of the schema's tables and views, for checking new names.
+    var existingNames: [String] { environment.catalog.objects.map(\.ref.name) }
+
+    /// Asks for a new name, checked against the schema and what's staged. `done` gets it.
+    private func askName(title: String, current: String, check: @escaping (String) -> String?,
+                         done: @escaping (String) -> Void) {
+        guard let window else { return }
         let alert = NSAlert()
-        alert.messageText = "Rename \(object.ref.name)"
+        alert.messageText = title
         alert.informativeText = "New name:"
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
-        field.stringValue = object.ref.name
+        field.stringValue = current
         alert.accessoryView = field
         alert.addButton(withTitle: "Rename")
         alert.addButton(withTitle: "Cancel")
         alert.window.initialFirstResponder = field
-        guard let window else { return }
         alert.beginSheetModal(for: window) { [weak self] response in
             guard let self, response == .alertFirstButtonReturn else { return }
             let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard name != object.ref.name else { return }
-            self.resolveEdits(on: object, before: "Renaming") {
-                self.run({ try ObjectActions.renamePlan(object, to: name, on: self.connection) }, failure: "Couldn't rename \(object.ref.name)") {
-                    let renamed = DatabaseObject(TableRef(schema: object.ref.schema, name), kind: object.kind)
-                    for tab in self.tabs(showing: object) {
-                        if let i = self.content.tabs.firstIndex(where: { $0 === tab }) {
-                            self.content.replace(at: i, with: self.makeTab(renamed, mode: tab.mode))
-                        }
+            guard name != current else { return }
+            if let problem = check(name) {
+                DispatchQueue.main.async { present(DatabaseError(problem), title: "Can't rename to “\(name)”", in: self.window) }
+                return
+            }
+            done(name)
+        }
+    }
+
+    /// Stages a rename: a table's goes into its structure changes, a view's is its own action.
+    private func rename(_ object: DatabaseObject) {
+        guard !config.readOnly else { return NSSound.beep() }
+        let current = changes.stagedName(for: object.ref) ?? object.ref.name
+        askName(title: "Rename \(current)", current: current, check: { [weak self] name in
+            guard let self else { return nil }
+            // Back to its own name drops the rename.
+            if name == object.ref.name { return nil }
+            return self.changes.nameProblem(name, renaming: object.ref, existing: self.existingNames)
+        }) { [weak self] name in
+            self?.stageRename(object, to: name)
+        }
+    }
+
+    private func stageRename(_ object: DatabaseObject, to name: String) {
+        let place = EditPlace(side: .sidebar, objects: [object])
+        let what = object.kind == .table ? "Table" : "View"
+        if object.kind != .table {
+            do {
+                let plan = try ObjectActions.renamePlan(object, to: name, on: connection)
+                changes.perform("Rename \(what)", at: place) {
+                    if name == object.ref.name {
+                        changes.removeRename(of: object.ref)
+                    } else {
+                        changes.stage(StagedAction(.rename(to: name), object, plan: plan))
                     }
                 }
+            } catch {
+                present(error, title: "Couldn't rename \(object.ref.name)", in: window)
+            }
+            return
+        }
+        let connection = connection
+        Task {
+            do {
+                var editor = if let staged = changes.structure(for: object.ref) { staged } else {
+                    StructureEditor(try await connection.structure(of: object.ref))
+                }
+                editor.name = name
+                changes.perform("Rename \(what)", at: place) { changes.setStructure(editor) }
+            } catch {
+                present(error, title: "Couldn't rename \(object.ref.name)", in: window)
+            }
+        }
+    }
+
+    private func renameNewTable(_ id: UUID) {
+        guard let editor = changes.newTable(id) else { return }
+        askName(title: "Rename \(editor.name)", current: editor.name, check: { [weak self] name in
+            guard let self else { return nil }
+            return self.changes.nameProblem(name, newTable: id, existing: self.existingNames)
+        }) { [weak self] name in
+            guard let self, var e = self.changes.newTable(id) else { return }
+            e.name = name
+            self.changes.perform("Rename New Table", at: EditPlace(newTable: id, side: .sidebar)) { self.changes.setNewTable(id, e) }
+        }
+    }
+
+    /// ⌫ / ⌘⌫ in the sidebar: a plain DROP for each table and view (no CASCADE, foreign-key
+    /// checks kept), and staged new tables removed, as one undo step. Items already marked are
+    /// left as they are.
+    func markForDeletion(_ objects: [DatabaseObject], newTables: [UUID]) {
+        let objects = objects.filter { changes.mark(for: $0.ref) != .dropped }
+        guard !objects.isEmpty || !newTables.isEmpty else { return }
+        let kinds = Set(objects.map(\.kind)).union(newTables.isEmpty ? [] : [.table])
+        let name = objects.count + newTables.count > 1 ? "Delete Items" : kinds.contains(.table) ? "Delete Table" : "Delete View"
+        let place = EditPlace(newTable: newTables.first, side: .sidebar, objects: objects)
+        let connection = connection
+        Task {
+            do {
+                var plans: [(DatabaseObject, DDLPlan)] = []
+                for object in objects {
+                    plans.append((object, try await ObjectActions.dropPlan([object], options: DropOptions(), on: connection)))
+                }
+                changes.perform(name, at: place) {
+                    for id in newTables { changes.removeNewTable(id) }
+                    for (object, plan) in plans { changes.stage(StagedAction(.drop, object, plan: plan)) }
+                }
+            } catch {
+                present(error, title: "Couldn't delete", in: window)
             }
         }
     }
@@ -91,7 +179,9 @@ extension WorkspaceWindowController {
             for (i, option) in options.enumerated() where chosen.contains(i) { option.set(&o) }
             return try await ObjectActions.truncatePlan([object.ref], options: o, on: connection)
         } then: { [weak self] plan in
-            self?.changes.stage(StagedAction(.truncate, object, plan: plan))
+            self?.changes.perform("Truncate Table", at: EditPlace(side: .sidebar, objects: [object])) {
+                self?.changes.stage(StagedAction(.truncate, object, plan: plan))
+            }
         }
     }
 
@@ -111,7 +201,9 @@ extension WorkspaceWindowController {
             for (i, option) in options.enumerated() where chosen.contains(i) { option.set(&o) }
             return try await ObjectActions.dropPlan([object], options: o, on: connection)
         } then: { [weak self] plan in
-            self?.changes.stage(StagedAction(.drop, object, plan: plan))
+            self?.changes.perform(object.kind == .table ? "Delete Table" : "Delete View", at: EditPlace(side: .sidebar, objects: [object])) {
+                self?.changes.stage(StagedAction(.drop, object, plan: plan))
+            }
         }
     }
 
@@ -146,32 +238,11 @@ extension WorkspaceWindowController {
 
     func configure(_ tab: TableTabViewController) -> TableTabViewController {
         tab.safety = environment.safety
+        tab.existingNames = { [weak self] in self?.existingNames ?? [] }
         tab.knownTables = { [weak self] in
             self?.environment.catalog.objects.filter { $0.kind == .table }.map(\.ref) ?? []
         }
         return tab
-    }
-
-    /// Applies a plan, reloads the sidebar and runs `done`; shows the error otherwise.
-    private func run(_ plan: @escaping () throws -> DDLPlan, failure: String, done: @escaping () -> Void) {
-        let connection = connection
-        let safety = environment.safety
-        Task {
-            do {
-                let plan = try plan()
-                guard await safety.approve(plan.setup + plan.statements + plan.teardown) else { return }
-                try await connection.apply(plan)
-                sidebar.reload()
-                done()
-            } catch {
-                var e = error
-                if var d = error as? DatabaseError, let sql = d.sql {
-                    d.message += "\n\n\(sql)"
-                    e = d
-                }
-                present(e, title: failure, in: window)
-            }
-        }
     }
 
     /// A destructive confirmation with checkboxes and the SQL they produce.

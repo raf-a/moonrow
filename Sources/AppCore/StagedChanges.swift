@@ -1,9 +1,13 @@
 import DBKit
 import Foundation
 
-/// A sidebar Truncate or Delete, staged with the other changes and committed with them.
+/// A sidebar Truncate, Delete or view Rename, staged with the other changes and
+/// committed with them. Tables are renamed through their structure editor instead.
 public struct StagedAction: Sendable, Hashable {
-    public enum Kind: Sendable, Hashable { case truncate, drop }
+    public enum Kind: Sendable, Hashable {
+        case truncate, drop
+        case rename(to: String)
+    }
 
     public var kind: Kind
     public var object: DatabaseObject
@@ -15,6 +19,51 @@ public struct StagedAction: Sendable, Hashable {
         self.object = object
         self.plan = plan
     }
+
+    /// "truncate logs", for summaries and the preview.
+    public var title: String {
+        switch kind {
+        case .truncate: "truncate \(object.ref.name)"
+        case .drop: "delete \(object.ref.name)"
+        case .rename(let name): "rename \(object.ref.name) to \(name)"
+        }
+    }
+}
+
+/// Where an undoable change was made, so undo and redo can show it again: the table (or staged
+/// new table), the side of its tab, and what was selected there.
+public struct EditPlace: Sendable, Hashable {
+    public enum Side: Sendable, Hashable {
+        case data, structure
+        /// The items list: `objects` are the items that were selected.
+        case sidebar
+    }
+
+    public var table: TableRef?
+    public var kind: ObjectKind
+    public var newTable: UUID?
+    public var side: Side
+    /// Selected grid rows: data rows, or structure columns.
+    public var rows: IndexSet
+    /// The data grid's focused column (model index), or the selected structure indexes.
+    public var column: Int?
+    public var indexRows: IndexSet
+    /// Sidebar items the change was made on.
+    public var objects: [DatabaseObject]
+
+    public init(table: TableRef? = nil, kind: ObjectKind = .table, newTable: UUID? = nil, side: Side,
+                rows: IndexSet = [], column: Int? = nil, indexRows: IndexSet = [], objects: [DatabaseObject] = []) {
+        self.table = table
+        self.kind = kind
+        self.newTable = newTable
+        self.side = side
+        self.rows = rows
+        self.column = column
+        self.indexRows = indexRows
+        self.objects = objects
+    }
+
+    public static let sidebar = EditPlace(side: .sidebar)
 }
 
 /// Everything staged in a workspace: row edits per table, structure edits, new tables, and
@@ -22,10 +71,26 @@ public struct StagedAction: Sendable, Hashable {
 ///
 /// Changes belong to the table, not to a tab: closing a tab or opening another table keeps
 /// them, and reopening the table shows them again.
+///
+/// Every user action goes through `perform(_:at:_:)`, which makes it one step of `undoManager`.
+/// A step keeps the whole staged state from before it, so undoing an action that replaced other
+/// changes (a drop replacing row edits) brings those back too. A commit clears the steps.
 @MainActor
 public final class StagedChanges {
     /// Posted (object: self) whenever anything is staged or unstaged.
     public static let didChange = Notification.Name("StagedChanges.didChange")
+
+    /// Undo and redo for staged changes; the workspace window hands it to AppKit.
+    public let undoManager: UndoManager = {
+        let m = UndoManager()
+        // Steps are grouped by `perform`, not by run-loop pass, so tests behave like the app.
+        m.groupsByEvent = false
+        return m
+    }()
+    /// After an undo or redo restored the state: show where the step was made.
+    public var onRestore: ((EditPlace) -> Void)?
+    /// Bumped on every change, so `perform` can tell whether its body changed anything.
+    private var revision = 0
 
     public struct NewTable: Sendable {
         public let id: UUID
@@ -51,12 +116,106 @@ public final class StagedChanges {
         var parts = editOrder.compactMap { t in edits[t].map { "\(t.name): \($0.summary)" } }
         parts += structureOrder.map { "\($0.name): structure" }
         parts += newTables.map { "new table \($0.editor.name.isEmpty ? "(unnamed)" : $0.editor.name)" }
-        parts += actions.map { "\($0.kind == .truncate ? "truncate" : "delete") \($0.object.ref.name)" }
+        parts += actions.map(\.title)
         return parts.joined(separator: " · ")
     }
 
     private func changed() {
+        revision += 1
         NotificationCenter.default.post(name: Self.didChange, object: self)
+    }
+
+    // MARK: Undo
+
+    private struct Snapshot {
+        var edits: [TableRef: TableEdits]
+        var editOrder: [TableRef]
+        var structures: [TableRef: StructureEditor]
+        var structureOrder: [TableRef]
+        var newTables: [NewTable]
+        var actions: [StagedAction]
+    }
+
+    private var snapshot: Snapshot {
+        Snapshot(edits: edits, editOrder: editOrder, structures: structures, structureOrder: structureOrder,
+                 newTables: newTables, actions: actions)
+    }
+
+    private func restore(_ s: Snapshot) {
+        edits = s.edits
+        editOrder = s.editOrder
+        structures = s.structures
+        structureOrder = s.structureOrder
+        newTables = s.newTables
+        actions = s.actions
+        changed()
+    }
+
+    /// Runs one user action as one undo step named `name` ("Edit Cell"). A body that changes
+    /// nothing leaves no step. Nested calls join the outer step.
+    public func perform(_ name: String, at place: EditPlace, _ body: () -> Void) {
+        guard !isPerforming else { return body() }
+        let before = snapshot
+        let start = revision
+        isPerforming = true
+        body()
+        isPerforming = false
+        guard revision != start else { return }
+        undoManager.beginUndoGrouping()
+        register(before, name: name, place: place)
+        undoManager.endUndoGrouping()
+    }
+
+    private var isPerforming = false
+
+    private func register(_ state: Snapshot, name: String, place: EditPlace) {
+        undoManager.registerUndo(withTarget: self) { changes in
+            let current = changes.snapshot
+            changes.restore(state)
+            // Registered while undoing, this becomes the redo step (and the other way round).
+            changes.register(current, name: name, place: place)
+            changes.onRestore?(place)
+        }
+        undoManager.setActionName(name)
+    }
+
+    /// After a commit: nothing is staged, and nothing before it can be undone.
+    public func clearAfterCommit() {
+        undoManager.removeAllActions()
+        restore(Snapshot(edits: [:], editOrder: [], structures: [:], structureOrder: [], newTables: [], actions: []))
+    }
+
+    // MARK: Counting
+
+    /// How many changes are staged: each edited, new or deleted row, each structure change, each
+    /// new table, truncate, drop and rename. The toolbar shows it.
+    public var changeCount: Int {
+        edits.values.reduce(0) { $0 + $1.updatedRowCount + $1.insertedRowCount + $1.deletedRowCount }
+            + structures.values.reduce(0) { $0 + $1.changeCount }
+            + newTables.count + actions.count
+    }
+
+    /// The name a table or view will have after the commit, when a rename is staged.
+    public func stagedName(for table: TableRef) -> String? {
+        if let s = structures[table], s.name != table.name { return s.name }
+        for a in actions.reversed() where a.object.ref == table {
+            if case .rename(let name) = a.kind { return name }
+        }
+        return nil
+    }
+
+    /// Why `name` can't be given to a new table (`newTable`) or to `renaming`, or nil. `existing`
+    /// are the schema's table and view names. Names are compared ignoring case.
+    public func nameProblem(_ name: String, newTable: UUID? = nil, renaming: TableRef? = nil, existing: [String]) -> String? {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return "A table needs a name." }
+        let wanted = trimmed.lowercased()
+        var taken = existing.filter { $0.lowercased() != renaming?.name.lowercased() }.map { $0.lowercased() }
+        taken += newTables.filter { $0.id != newTable }.map { $0.editor.name.lowercased() }
+        for table in Set(structures.keys).union(actions.map(\.object.ref)) where table != renaming {
+            if let renamed = stagedName(for: table) { taken.append(renamed.lowercased()) }
+        }
+        return taken.contains(wanted) ? "There is already a table or view named “\(trimmed)”." : nil
     }
 
     // MARK: Rows
@@ -65,6 +224,7 @@ public final class StagedChanges {
 
     /// Stores a table's edits; empty edits unstage the table.
     public func setEdits(_ e: TableEdits) {
+        guard edits[e.table] != e else { return }
         if e.isEmpty {
             guard edits[e.table] != nil else { return }
             edits[e.table] = nil
@@ -83,6 +243,7 @@ public final class StagedChanges {
     /// Stores an existing table's structure edits; an editor without changes unstages them.
     public func setStructure(_ editor: StructureEditor) {
         let table = editor.original.table
+        guard structures[table] != editor else { return }
         if editor.hasChanges {
             if structures[table] == nil { structureOrder.append(table) }
             structures[table] = editor
@@ -99,7 +260,8 @@ public final class StagedChanges {
     public func newTable(_ id: UUID) -> StructureEditor? { newTables.first { $0.id == id }?.editor }
 
     /// Stages a new table named `untitled_table` (or `_2`, `_3`, … past `taken` names).
-    public func addNewTable(schema: String?, dialect: any Dialect, taken: Set<String>) -> UUID {
+    @discardableResult
+    public func addNewTable(id: UUID = UUID(), schema: String?, dialect: any Dialect, taken: Set<String>) -> UUID {
         let names = taken.union(newTables.map { $0.editor.name.lowercased() })
         var name = "untitled_table"
         var n = 2
@@ -107,7 +269,6 @@ public final class StagedChanges {
             name = "untitled_table_\(n)"
             n += 1
         }
-        let id = UUID()
         var editor = StructureEditor.newTable(TableRef(schema: schema, ""), dialect: dialect)
         editor.name = name
         newTables.append(NewTable(id: id, editor: editor))
@@ -116,12 +277,13 @@ public final class StagedChanges {
     }
 
     public func setNewTable(_ id: UUID, _ editor: StructureEditor) {
-        guard let i = newTables.firstIndex(where: { $0.id == id }) else { return }
+        guard let i = newTables.firstIndex(where: { $0.id == id }), newTables[i].editor != editor else { return }
         newTables[i].editor = editor
         changed()
     }
 
     public func removeNewTable(_ id: UUID) {
+        guard newTables.contains(where: { $0.id == id }) else { return }
         newTables.removeAll { $0.id == id }
         changed()
     }
@@ -130,13 +292,18 @@ public final class StagedChanges {
 
     /// The staged drop of a table, else its staged truncate.
     public func action(for table: TableRef) -> StagedAction? {
-        actions.last { $0.object.ref == table && $0.kind == .drop } ?? actions.last { $0.object.ref == table }
+        actions.last { $0.object.ref == table && $0.kind == .drop } ?? actions.last { $0.object.ref == table && $0.kind == .truncate }
     }
 
     /// A drop replaces everything staged for the object; a truncate replaces its row edits,
-    /// which it would wipe anyway.
+    /// which it would wipe anyway; a rename replaces an earlier rename.
     public func stage(_ action: StagedAction) {
         let table = action.object.ref
+        if case .rename = action.kind {
+            actions.removeAll { $0.object.ref == table && $0.isRename }
+            actions.append(action)
+            return changed()
+        }
         if edits[table] != nil {
             edits[table] = nil
             editOrder.removeAll { $0 == table }
@@ -145,14 +312,21 @@ public final class StagedChanges {
             structures[table] = nil
             structureOrder.removeAll { $0 == table }
         }
-        actions.removeAll { $0.object.ref == table }
+        actions.removeAll { $0.object.ref == table && (action.kind == .drop || !$0.isRename) }
         actions.append(action)
+        changed()
+    }
+
+    /// Unstages a view's rename (renamed back to its own name).
+    public func removeRename(of table: TableRef) {
+        guard actions.contains(where: { $0.object.ref == table && $0.isRename }) else { return }
+        actions.removeAll { $0.object.ref == table && $0.isRename }
         changed()
     }
 
     public func mark(for table: TableRef) -> Mark? {
         if let a = action(for: table) { return a.kind == .drop ? .dropped : .truncated }
-        return edits[table] != nil || structures[table] != nil ? .edited : nil
+        return edits[table] != nil || structures[table] != nil || stagedName(for: table) != nil ? .edited : nil
     }
 
     // MARK: Discarding
@@ -167,14 +341,10 @@ public final class StagedChanges {
         changed()
     }
 
+    /// Unstages everything (Discard All); undo brings it back.
     public func discardAll() {
-        edits = [:]
-        editOrder = []
-        structures = [:]
-        structureOrder = []
-        newTables = []
-        actions = []
-        changed()
+        guard !isEmpty else { return }
+        restore(Snapshot(edits: [:], editOrder: [], structures: [:], structureOrder: [], newTables: [], actions: []))
     }
 
     // MARK: Commit
@@ -199,9 +369,16 @@ public final class StagedChanges {
             sections.append(.init(title: "new table \(t.editor.name)", ddl: try t.editor.plan(for: dialect)))
         }
         for a in actions {
-            sections.append(.init(title: "\(a.kind == .truncate ? "truncate" : "delete") \(a.object.ref.name)", ddl: a.plan))
+            sections.append(.init(title: a.title, ddl: a.plan))
         }
         return CommitPlan(sections: sections, dialect: dialect)
+    }
+}
+
+extension StagedAction {
+    var isRename: Bool {
+        if case .rename = kind { return true }
+        return false
     }
 }
 

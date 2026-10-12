@@ -29,6 +29,8 @@ import AppKit
     @objc optional func showTableData(_ sender: Any?)
     @objc optional func showTableStructure(_ sender: Any?)
     @objc optional func newTable(_ sender: Any?)
+    @objc optional func truncateTable(_ sender: Any?)
+    @objc optional func toggleRightSidebar(_ sender: Any?)
 
     // Tabs and the query editor
     @objc optional func newQueryTab(_ sender: Any?)
@@ -39,7 +41,8 @@ import AppKit
     @objc optional func runCurrentQuery(_ sender: Any?)
     @objc optional func runAllQueries(_ sender: Any?)
     @objc optional func cancelQuery(_ sender: Any?)
-    @objc optional func saveQueryAs(_ sender: Any?)
+    @objc optional func saveSQLAs(_ sender: Any?)
+    @objc optional func addToQueries(_ sender: Any?)
     @objc optional func toggleLineComment(_ sender: Any?)
     @objc optional func showSavedQueries(_ sender: Any?)
     @objc optional func showQueryHistory(_ sender: Any?)
@@ -63,7 +66,7 @@ enum MainMenu {
         for item in menu.items {
             if let sub = item.submenu { applyKeymap(sub, overrides) }
             guard let action = item.action, let binding = Keymap.binding(for: NSStringFromSelector(action), overrides: overrides) else { continue }
-            item.keyEquivalent = binding.key
+            item.keyEquivalent = binding.menuKey
             item.keyEquivalentModifierMask = binding.modifierFlags
         }
     }
@@ -107,7 +110,8 @@ enum MainMenu {
             m.add("Close Tab", #selector(TabulaActions.closeTab(_:)), "w")
             m.add("Close Window", #selector(NSWindow.performClose(_:)), "w", [.command, .shift])
             m.addItem(.separator())
-            m.add("Save Query As…", #selector(TabulaActions.saveQueryAs(_:)), "s", [.command, .shift])
+            m.add("Add to Queries…", #selector(TabulaActions.addToQueries(_:)))
+            m.add("Save SQL As…", #selector(TabulaActions.saveSQLAs(_:)), "s", [.command, .shift])
             m.addItem(.separator())
             m.add("Export…", #selector(TabulaActions.exportData(_:)), "e")
             m.add("Import CSV…", #selector(TabulaActions.importCSV(_:)))
@@ -123,7 +127,9 @@ enum MainMenu {
             m.addItem(.separator())
             m.add("Add Row", #selector(TabulaActions.addRow(_:)), "i")
             m.add("Duplicate Rows", #selector(TabulaActions.duplicateRows(_:)), "d")
-            m.add("Delete Rows", #selector(TabulaActions.deleteRows(_:)), "\u{8}")
+            // Titled by whoever has the focus: Delete Rows, Delete Columns, Delete Table, …
+            m.add("Delete", #selector(TabulaActions.deleteRows(_:)), "\u{8}")
+            m.add("Truncate Table…", #selector(TabulaActions.truncateTable(_:)), "\u{8}", .option)
             let setValue = m.add("Set Value", nil)
             setValue.submenu = NSMenu(title: "Set Value")
             setValue.submenu!.add("NULL", #selector(TabulaActions.setNull(_:)))
@@ -155,7 +161,10 @@ enum MainMenu {
         }
 
         main.addSubmenu("View") { m in
-            m.add("Toggle Sidebar", #selector(NSSplitViewController.toggleSidebar(_:)), "0")
+            let sidebars = m.add("Sidebars", nil)
+            sidebars.submenu = NSMenu(title: "Sidebars")
+            sidebars.submenu!.add("Left Sidebar", #selector(NSSplitViewController.toggleSidebar(_:)), "0")
+            sidebars.submenu!.add("Right Sidebar", #selector(TabulaActions.toggleRightSidebar(_:)), " ", [])
             m.addItem(.separator())
             m.add("Enter Full Screen", #selector(NSWindow.toggleFullScreen(_:)), "f", [.command, .control])
         }
@@ -218,7 +227,7 @@ extension NSMenu {
         _ title: String, _ action: Selector?, _ key: String = "",
         _ modifiers: NSEvent.ModifierFlags = .command
     ) -> NSMenuItem {
-        let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: KeyBinding(key, .init(modifiers)).menuKey)
         item.keyEquivalentModifierMask = modifiers
         addItem(item)
         return item

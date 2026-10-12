@@ -55,6 +55,7 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
     private let runCurrentButton = NSButton(title: "Run Current", target: nil, action: nil)
     private let runAllButton = NSButton(title: "Run All", target: nil, action: nil)
     private let stopButton = NSButton(title: "Stop", target: nil, action: nil)
+    private let runMenuButton = NSPopUpButton(frame: .zero, pullsDown: true)
     private let limitPopup = NSPopUpButton()
     private let spinner = NSProgressIndicator()
     private let positionLabel = NSTextField(labelWithString: "")
@@ -202,6 +203,27 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
         stopButton.image = NSImage(systemSymbolName: "stop.fill", accessibilityDescription: nil)
         stopButton.imagePosition = .imageLeading
         stopButton.isHidden = true
+        runMenuButton.pullsDown = true
+        runMenuButton.isBordered = false
+        runMenuButton.toolTip = "More run and save commands"
+        let menu = runMenuButton.menu!
+        // A pull-down shows its first item, so that item carries the button's image.
+        let titleItem = menu.addItem(withTitle: "", action: nil, keyEquivalent: "")
+        titleItem.image = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: "More")
+        (runMenuButton.cell as? NSPopUpButtonCell)?.arrowPosition = .noArrow
+        runMenuButton.imagePosition = .imageOnly
+        runMenuButton.controlSize = .small
+        for (title, action, key, mods) in [
+            ("Run All", #selector(runAllQueries(_:)), "\r", NSEvent.ModifierFlags([.command, .shift])),
+            ("Run Current", #selector(runCurrentQuery(_:)), "\r", .command),
+            ("Add to Queries…", #selector(addToQueries(_:)), "", .command),
+            ("Save SQL As…", #selector(saveSQLAs(_:)), "S", [.command, .shift]),
+        ] {
+            if title == "Add to Queries…" { menu.addItem(.separator()) }
+            let item = menu.addItem(withTitle: title, action: action, keyEquivalent: key)
+            item.keyEquivalentModifierMask = mods
+            item.target = self
+        }
         for b in [runCurrentButton, runAllButton, stopButton] {
             b.bezelStyle = .accessoryBarAction
             b.controlSize = .small
@@ -210,7 +232,7 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
 
         let spacer = NSView()
         spacer.setContentHuggingPriority(.init(1), for: .horizontal)
-        let bar = NSStackView(views: [positionLabel, spacer, spinner, limitPopup, stopButton, runAllButton, runCurrentButton])
+        let bar = NSStackView(views: [positionLabel, spacer, spinner, limitPopup, stopButton, runAllButton, runCurrentButton, runMenuButton])
         bar.spacing = 6
         bar.edgeInsets = NSEdgeInsets(top: 0, left: 8, bottom: 0, right: 8)
         bar.heightAnchor.constraint(equalToConstant: 30).isActive = true
@@ -412,18 +434,16 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
 
     // MARK: - Saving
 
-    /// ⌘S in a query tab saves the query (it has no grid edits to commit).
-    @objc func commitChanges(_ sender: Any?) { saveQuery(sender) }
+    // ⌘S commits the workspace's staged changes, as everywhere. Saving
+    // the text is Add to Queries (the sidebar's Queries) or Save SQL As… (a file).
 
-    @objc func saveQuery(_ sender: Any?) {
-        guard let savedQuery else { return saveQueryAs(sender) }
-        write(to: savedQuery.name, overwrite: true)
-    }
-
-    @objc func saveQueryAs(_ sender: Any?) {
+    /// Saves the text to the connection's saved queries: a tab opened from one writes it back,
+    /// any other asks for a name.
+    @objc func addToQueries(_ sender: Any?) {
+        if let savedQuery { return write(to: savedQuery.name, overwrite: true) }
         guard let window = view.window else { return }
         let alert = NSAlert()
-        alert.messageText = "Save Query"
+        alert.messageText = "Add to Queries"
         alert.informativeText = "Saved queries are listed under Queries in the sidebar."
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 22))
         field.placeholderString = "Name"
@@ -439,6 +459,23 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
                 self.confirmReplace(existing.name) { self.write(to: name, overwrite: true) }
             } else {
                 self.write(to: name, overwrite: self.environment.savedQueries.query(named: name) != nil)
+            }
+        }
+    }
+
+    /// ⇧⌘S: writes the editor's text to a `.sql` file.
+    @objc func saveSQLAs(_ sender: Any?) {
+        guard let window = view.window else { return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.init(filenameExtension: "sql") ?? .plainText]
+        panel.nameFieldStringValue = (savedQuery?.name ?? tabItem.title) + ".sql"
+        let text = editor.string
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            do {
+                try Data(text.utf8).write(to: url, options: .atomic)
+            } catch {
+                self?.presentError(error, title: "Couldn't save the SQL")
             }
         }
     }
@@ -519,9 +556,6 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
             return !isRunning && !isAwaitingApproval
         case #selector(cancelQuery(_:)):
             return isRunning
-        case #selector(commitChanges(_:)):
-            item.title = "Save Query"
-            return true
         case #selector(toggleFilters(_:)):
             item.title = "Find…"
             return true

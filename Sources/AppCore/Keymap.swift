@@ -24,6 +24,13 @@ public struct KeyBinding: Codable, Hashable, Sendable {
 
     public static let empty = KeyBinding("", [])
 
+    /// The key as a menu item's `keyEquivalent`. AppKit tells a shifted letter by its case and
+    /// ignores the Shift flag for letters, so ⇧⌘S must be "S": with "s" the item would also
+    /// catch a plain ⌘S, and miss ⇧⌘S.
+    public var menuKey: String {
+        modifiers.contains(.shift) && key.count == 1 && key.first!.isLetter ? key.uppercased() : key
+    }
+
     public var isEmpty: Bool { key.isEmpty }
 
     /// F1…F35, arrows, Home/End/Page keys: usable without ⌘ or ⌃.
@@ -99,6 +106,9 @@ public enum Keymap {
         KeyCommand("focusItemFilter:", "Filter Items in Sidebar", "General", "f", [.command, .shift]),
         KeyCommand("showQueryHistory:", "Show Query History", "General", "y", [.command, .shift]),
         KeyCommand("exportData:", "Export", "General", "e"),
+        KeyCommand("undo:", "Undo", "General", "z"),
+        KeyCommand("redo:", "Redo", "General", "z", [.command, .shift]),
+        KeyCommand("toggleRightSidebar:", "Toggle Right Sidebar", "General", " ", []),
 
         KeyCommand("newQueryTab:", "New Query Tab", "Tabs", "t"),
         KeyCommand("closeTab:", "Close Tab", "Tabs", "w"),
@@ -109,7 +119,8 @@ public enum Keymap {
         KeyCommand("runAllQueries:", "Run All Statements", "SQL Editor", "\r", [.command, .shift]),
         KeyCommand("cancelQuery:", "Stop Query", "SQL Editor", "."),
         KeyCommand("toggleLineComment:", "Toggle Comment", "SQL Editor", "/"),
-        KeyCommand("saveQueryAs:", "Save Query As", "SQL Editor", "s", [.command, .shift]),
+        KeyCommand("saveSQLAs:", "Save SQL As", "SQL Editor", "s", [.command, .shift]),
+        KeyCommand("addToQueries:", "Add to Queries", "SQL Editor", ""),
 
         KeyCommand("showTableData:", "Show Table Data", "Table", "[", [.command, .control]),
         KeyCommand("showTableStructure:", "Show Table Structure", "Table", "]", [.command, .control]),
@@ -118,7 +129,8 @@ public enum Keymap {
         KeyCommand("previewChanges:", "Preview Changes", "Table", "p", [.command, .shift]),
         KeyCommand("addRow:", "Add Row", "Table", "i"),
         KeyCommand("duplicateRows:", "Duplicate Rows", "Table", "d"),
-        KeyCommand("deleteRows:", "Delete Rows", "Table", "\u{8}"),
+        KeyCommand("deleteRows:", "Delete Rows or Items", "Table", "\u{8}"),
+        KeyCommand("truncateTable:", "Truncate Table", "Table", "\u{8}", .option),
         KeyCommand("toggleFilters:", "Show Filters", "Table", "f"),
         KeyCommand("reloadCurrentTab:", "Reload Table", "Table", "r", [.command, .option]),
         KeyCommand("previousPage:", "Previous Page", "Table", "\u{F702}"),

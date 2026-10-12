@@ -33,6 +33,16 @@ final class SQLTextView: NSTextView {
         return view
     }
 
+    /// The editor's own text undo; the window's undo manager holds the staged table changes.
+    private let textUndo = UndoManager()
+    override var undoManager: UndoManager? { textUndo }
+    @objc func undo(_ sender: Any?) { textUndo.undo() }
+    @objc func redo(_ sender: Any?) { textUndo.redo() }
+
+    override func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        textUndo.validate(item) ?? super.validateMenuItem(item)
+    }
+
     private func configure() {
         isRichText = false
         importsGraphics = false

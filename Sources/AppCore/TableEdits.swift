@@ -14,14 +14,14 @@ public enum CellChange: Sendable, Hashable {
 /// filtering, reloads and closing the tab. Identical rows of a
 /// keyless table share one key; the commit refuses a statement that hits more than one row.
 /// New rows aren't on any page; the grid shows them after the page it shows.
-public struct TableEdits: Sendable {
+public struct TableEdits: Sendable, Equatable {
     public enum RowState: Sendable, Hashable {
         case unchanged, edited, inserted, deleted
     }
 
     public typealias RowKey = [DBValue]
 
-    private struct Loaded: Sendable {
+    private struct Loaded: Sendable, Equatable {
         /// The row as it was loaded: it locates the row on commit.
         var original: [DBValue]
         var cells: [Int: CellChange] = [:]

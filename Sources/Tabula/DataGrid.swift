@@ -41,6 +41,15 @@ final class DataGrid: NSTableView {
         usesAlternatingRowBackgroundColors = AppStyle.settings.alternatingRows
     }
 
+    /// Reloads every row without losing the selection. A plain `reloadData()` clears it when it
+    /// runs while the window's field editor is ending an edit elsewhere (the right sidebar's).
+    func reloadKeepingSelection() {
+        let selection = selectedRowIndexes
+        reloadData()
+        let kept = selection.filteredIndexSet { $0 < numberOfRows }
+        if selectedRowIndexes != kept { selectRowIndexes(kept, byExtendingSelection: false) }
+    }
+
     var focusedColumnIndex: Int? {
         guard let id = focusedColumn else { return nil }
         let i = column(withIdentifier: id)
@@ -60,6 +69,8 @@ final class DataGrid: NSTableView {
             moveFocus(by: 1)
         case (51, []), (117, []):  // Delete, Forward Delete
             NSApp.sendAction(#selector(TabulaActions.deleteRows(_:)), to: nil, from: self)
+        case (49, []):  // Space: the right sidebar
+            NSApp.sendAction(#selector(TabulaActions.toggleRightSidebar(_:)), to: nil, from: self)
         default:
             super.keyDown(with: event)
         }
@@ -79,6 +90,14 @@ final class DataGrid: NSTableView {
         if c >= 0 { focusedColumn = tableColumns[c].identifier }
         if r >= 0, !selectedRowIndexes.contains(r) { selectRowIndexes([r], byExtendingSelection: false) }
         return super.menu(for: event)
+    }
+
+    /// Whether a mouse event is in the empty area below the last row.
+    func isBelowRows(_ event: NSEvent?) -> Bool {
+        guard let event, event.window === window else { return false }
+        let point = convert(event.locationInWindow, from: nil)
+        let end = numberOfRows > 0 ? rect(ofRow: numberOfRows - 1).maxY : 0
+        return bounds.contains(point) && point.y > end
     }
 
     func moveFocus(by delta: Int) {
@@ -124,15 +143,6 @@ final class GridRowView: NSTableRowView {
             bounds.fill()
         }
     }
-}
-
-/// What a grid cell shows.
-enum CellContent {
-    case value(DBValue)
-    /// An inserted row's cell that will take the column default.
-    case defaultValue
-    /// The row hasn't loaded yet.
-    case pending
 }
 
 /// One grid cell. Frame-based layout: cells are created and reused constantly while scrolling.

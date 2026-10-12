@@ -154,9 +154,21 @@ private func tempDir() -> URL {
     }
 
     @Test func defaultsAreUnique() {
-        let bindings = Keymap.commands.map(\.defaultBinding)
+        let bindings = Keymap.commands.map(\.defaultBinding).filter { !$0.isEmpty }
         #expect(Set(bindings).count == bindings.count)
-        #expect(Keymap.commands.allSatisfy { $0.defaultBinding.isValid })
+        // Space (right sidebar) and ⌥⌫ (truncate) have no ⌘; Add to Queries has none.
+        let unusual = Set(["toggleRightSidebar:", "truncateTable:", "addToQueries:"])
+        #expect(Keymap.commands.allSatisfy { $0.defaultBinding.isValid || unusual.contains($0.id) })
+        #expect(Keymap.command("addToQueries:")?.defaultBinding.isEmpty == true)
+        #expect(Keymap.command("toggleRightSidebar:")?.defaultBinding.display == "Space")
+    }
+
+    /// AppKit reads a shifted letter from its case, so ⇧⌘S goes to the menu as "S".
+    @Test func menuKeysCarryShiftInTheirCase() {
+        #expect(KeyBinding("s", [.command, .shift]).menuKey == "S")
+        #expect(KeyBinding("s").menuKey == "s")
+        #expect(KeyBinding("\u{8}", [.command, .shift]).menuKey == "\u{8}")
+        #expect(KeyBinding("]", [.command, .shift]).menuKey == "]")
     }
 
     @Test func themes() {

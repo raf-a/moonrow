@@ -16,8 +16,15 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     let sidebar: SidebarViewController
     let leftSidebar: LeftSidebarController
     let content = WorkspaceTabsController()
-    /// Everything staged in this workspace; one commit (⌘S) covers it all.
+    /// The right sidebar: the selected rows, columns or indexes as a form.
+    let inspector = InspectorViewController()
+    private let split = NSSplitViewController()
+    private var inspectorItem: NSSplitViewItem!
+    /// Everything staged in this workspace; one commit (⌘S) covers it all, and its undo manager
+    /// is the window's.
     let changes = StagedChanges()
+    /// Field editor with its own text undo, so typing never lands in the staged changes' steps.
+    private let fieldEditor = FieldEditor()
     private var queryCount = 0
     var isCommitting = false
     /// The open preview sheet, if any.
@@ -36,7 +43,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         sidebar = SidebarViewController(connection: connection)
         leftSidebar = LeftSidebarController(items: sidebar, savedQueries: savedQueries, history: history)
 
-        let split = NSSplitViewController()
         let sideItem = NSSplitViewItem(sidebarWithViewController: leftSidebar)
         sideItem.minimumThickness = 180
         sideItem.maximumThickness = 420
@@ -44,6 +50,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         let mainItem = NSSplitViewItem(viewController: content)
         mainItem.minimumThickness = 300
         split.addSplitViewItem(mainItem)
+        let inspectorItem = NSSplitViewItem(inspectorWithViewController: inspector)
+        inspectorItem.minimumThickness = 220
+        inspectorItem.maximumThickness = 520
+        inspectorItem.canCollapse = true
+        split.addSplitViewItem(inspectorItem)
         split.splitView.autosaveName = "WorkspaceSplit"
 
         let window = NSWindow(
@@ -58,6 +69,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         window.subtitle = config.summary
         window.tabbingMode = .disallowed
         super.init(window: window)
+        self.inspectorItem = inspectorItem
+        inspectorItem.isCollapsed = !UserDefaults.standard.bool(forKey: Self.inspectorVisibleKey)
         window.delegate = self
         safety.window = window
         NotificationCenter.default.addObserver(self, selector: #selector(safetyLevelChanged), name: SafetyGate.levelDidChange, object: safety)
@@ -80,6 +93,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
             self?.changes.newTables.map { ($0.id, $0.editor.name) } ?? []
         }
         sidebar.onOpenNewTable = { [weak self] id in self?.openNewTable(id) }
+        sidebar.stagedNameFor = { [weak self] table in self?.changes.stagedName(for: table) }
+        changes.onRestore = { [weak self] place in self?.show(place) }
         leftSidebar.queries.onOpen = { [weak self] query in self?.openSavedQuery(query) }
         leftSidebar.queries.onInsert = { [weak self] text in self?.insertIntoEditor(text) }
         leftSidebar.queries.onChange = { [weak self] old, new in self?.savedQueryChanged(old, to: new) }
@@ -128,7 +143,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     @objc func newTable(_ sender: Any?) {
         guard !config.readOnly else { return NSSound.beep() }
         let taken = Set(environment.catalog.objects.map { $0.ref.name.lowercased() })
-        let id = changes.addNewTable(schema: sidebar.schema, dialect: connection.dialect, taken: taken)
+        let id = UUID()
+        changes.perform("New Table", at: EditPlace(newTable: id, side: .sidebar)) {
+            changes.addNewTable(id: id, schema: sidebar.schema, dialect: connection.dialect, taken: taken)
+        }
         openNewTable(id)
     }
 
@@ -177,6 +195,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     }
 
     func tabChanged() {
+        inspector.source = tableTab?.active as? InspectorSource
         let table = tableTab?.table
         if let id = tableTab?.newTableID { sidebar.reveal(newTable: id) } else { sidebar.reveal(table) }
         if let table, tableTab?.newTableID == nil {
@@ -193,13 +212,46 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     @objc private func stagedChangesChanged() {
         window?.isDocumentEdited = !changes.isEmpty
         sidebar.stagedChangesChanged()
+        // A new table that's no longer staged (discarded, deleted, undone) closes its tab.
+        for tab in tableTabs {
+            if let id = tab.newTableID, changes.newTable(id) == nil { closeWithoutAsking(tab) }
+        }
         content.refreshTabItems()
+        updateChangesItem()
+        inspector.refresh()
+    }
+
+    /// After an undo or redo: opens the table the step was made on (if its tab was closed),
+    /// on the side it was made, and selects what was selected then.
+    func show(_ place: EditPlace) {
+        switch place.side {
+        case .sidebar:
+            leftSidebar.show(.items)
+            if let id = place.newTable, changes.newTable(id) != nil { return openNewTable(id) }
+            sidebar.reveal(place.objects.map(\.ref))
+        case .data, .structure:
+            let mode: TableTabViewController.Mode = place.side == .data ? .data : .structure
+            if let id = place.newTable {
+                guard changes.newTable(id) != nil else { return }
+                openNewTable(id)
+            } else if let table = place.table {
+                open(DatabaseObject(table, kind: place.kind), newTab: false, mode: mode)
+            }
+            switch mode {
+            case .data: tableTab?.data?.restoreSelection(place)
+            case .structure: tableTab?.structure?.restoreSelection(place)
+            }
+        }
+    }
+
+    func closeWithoutAsking(_ tab: TableTabViewController) {
+        if let i = content.tabs.firstIndex(where: { $0 === tab }) { content.close(i) }
     }
 
     /// Asks to commit or discard everything staged before `action` (closing, quitting), then
     /// runs `proceed`. Cancel does nothing.
     func resolveStagedChanges(before action: String, then proceed: @escaping () -> Void) {
-        for tab in tableTabs { tab.endEditing() }
+        endAllEditing()
         guard !changes.isEmpty, let window else { return proceed() }
         window.makeKeyAndOrderFront(nil)
         let alert = NSAlert()
@@ -213,7 +265,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
             switch response {
             case .alertFirstButtonReturn: self?.commitStaged(then: proceed)
             case .alertSecondButtonReturn:
-                self?.changes.discardAll()
+                self?.changes.clearAfterCommit()
                 proceed()
             default: break
             }
@@ -235,7 +287,15 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         return super.supplementalTarget(forAction: action, sender: sender)
     }
 
+    func windowWillReturnUndoManager(_ window: NSWindow) -> UndoManager? { changes.undoManager }
+
+    func windowWillReturnFieldEditor(_ sender: NSWindow, to client: Any?) -> Any? {
+        client is NSTextField ? fieldEditor : nil
+    }
+
     func windowWillClose(_ notification: Notification) {
+        // Dragging the divider can hide the right sidebar too.
+        UserDefaults.standard.set(isInspectorVisible, forKey: Self.inspectorVisibleKey)
         content.closeAll()
         let connection = connection
         Task { await connection.close() }
@@ -327,14 +387,16 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     // MARK: - Toolbar
 
     private static let reloadItem = NSToolbarItem.Identifier("reload")
-    private static let queryItem = NSToolbarItem.Identifier("query")
+    private static let changesItem = NSToolbarItem.Identifier("changes")
     private static let safetyItem = NSToolbarItem.Identifier("safety")
     private static let markItem = NSToolbarItem.Identifier("mark")
+    private static let inspectorToggleItem = NSToolbarItem.Identifier("rightSidebar")
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         var items: [NSToolbarItem.Identifier] = [.toggleSidebar, .sidebarTrackingSeparator]
         if config.markColor != nil || config.tag != nil { items.append(Self.markItem) }
-        return items + [.flexibleSpace, Self.safetyItem, Self.queryItem, Self.reloadItem]
+        return items + [.flexibleSpace, Self.changesItem, Self.safetyItem, Self.reloadItem,
+                        .inspectorTrackingSeparator, .flexibleSpace, Self.inspectorToggleItem]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -372,14 +434,102 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
             item.toolTip = "Reload items and open tables (⌘R)"
             item.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "Reload")
             item.action = #selector(reloadWorkspace(_:))
-        case Self.queryItem:
-            item.label = "New Query"
-            item.toolTip = "Open a new query tab (⌘T)"
-            item.image = NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: "New query")
-            item.action = #selector(newQueryTab(_:))
+        case Self.changesItem:
+            item.label = "Changes"
+            item.toolTip = "Review the SQL for every staged change (⇧⌘P)"
+            item.image = NSImage(systemSymbolName: "list.bullet.rectangle", accessibilityDescription: "Staged changes")
+            item.action = #selector(previewChanges(_:))
+            item.autovalidates = false
+            DispatchQueue.main.async { [weak self] in self?.updateChangesItem() }
+        case Self.inspectorToggleItem:
+            item.label = "Right Sidebar"
+            item.toolTip = "Show or hide the right sidebar (Space)"
+            item.image = NSImage(systemSymbolName: "sidebar.right", accessibilityDescription: "Right sidebar")
+            item.action = #selector(toggleRightSidebar(_:))
         default:
             return nil
         }
         return item
+    }
+
+    /// The Changes item: an icon with the count as a badge, greyed out with nothing staged.
+    func updateChangesItem() {
+        guard let item = window?.toolbar?.items.first(where: { $0.itemIdentifier == Self.changesItem }) else { return }
+        let n = changes.changeCount
+        shownChangeCount = n
+        // Toolbar badges arrived in macOS 26; earlier systems show the icon alone.
+        if #available(macOS 26.0, *) { item.badge = n > 0 ? .count(n) : nil }
+        item.toolTip = n == 0 ? "No staged changes"
+            : "\(n) staged \(n == 1 ? "change" : "changes"). Review the SQL (⇧⌘P)"
+        item.isEnabled = n > 0 && !isCommitting
+    }
+
+    /// The count the Changes item shows.
+    private(set) var shownChangeCount = 0
+
+    // MARK: - Right sidebar
+
+    static let inspectorVisibleKey = "RightSidebarVisible"
+
+    var isInspectorVisible: Bool { !inspectorItem.isCollapsed }
+
+    /// Space (from a grid), the toolbar button, or View ▸ Sidebars ▸ Right Sidebar.
+    @objc func toggleRightSidebar(_ sender: Any?) {
+        // Not animated, so the state is settled at once for the next toggle.
+        inspectorItem.isCollapsed.toggle()
+        UserDefaults.standard.set(!inspectorItem.isCollapsed, forKey: Self.inspectorVisibleKey)
+        inspector.refresh()
+    }
+}
+
+extension UndoManager {
+    /// Validates Edit ▸ Undo / Redo against this manager, setting their titles; nil for other items.
+    @MainActor
+    func validate(_ item: NSMenuItem) -> Bool? {
+        switch item.action.map(NSStringFromSelector) {
+        case "undo:":
+            item.title = undoMenuItemTitle
+            return canUndo
+        case "redo:":
+            item.title = redoMenuItemTitle
+            return canRedo
+        default:
+            return nil
+        }
+    }
+}
+
+/// The window's field editor. Its typing has its own undo, cleared when the edit ends, so ⌘Z
+/// in a cell or field undoes text and ⌘Z elsewhere undoes staged changes.
+final class FieldEditor: NSTextView {
+    private let textUndo = UndoManager()
+
+    init() {
+        super.init(frame: .zero)
+        isFieldEditor = true
+        allowsUndo = true
+    }
+
+    override init(frame: NSRect, textContainer: NSTextContainer?) {
+        super.init(frame: frame, textContainer: textContainer)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var undoManager: UndoManager? { textUndo }
+
+    // NSWindow's undo: would use the window's manager; these keep ⌘Z on the text.
+    @objc func undo(_ sender: Any?) { textUndo.undo() }
+    @objc func redo(_ sender: Any?) { textUndo.redo() }
+
+    override func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        textUndo.validate(item) ?? super.validateMenuItem(item)
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned { textUndo.removeAllActions() }
+        return resigned
     }
 }

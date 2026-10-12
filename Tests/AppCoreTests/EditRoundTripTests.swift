@@ -441,6 +441,29 @@ final class TraceLog: @unchecked Sendable {
         #expect(try await f.db.objects(schema: nil).map(\.ref.name).sorted() == ["items", "nokey"])
     }
 
+    /// Renames are staged (M7): a table's through its structure editor, a view's as its own
+    /// action (SQLite can't rename views). The servers run what the preview shows.
+    @Test(arguments: Backend.all) func stagedRenames(_ backend: Backend) async throws {
+        let f = try await Fixture(backend)
+        defer { Task { await f.tearDown() } }
+        _ = try await f.db.execute("CREATE VIEW v AS SELECT * FROM items")
+        let changes = await StagedChanges()
+        var s = StructureEditor(try await f.db.structure(of: TableRef("nokey")))
+        s.name = "nokey2"
+        await changes.setStructure(s)
+        let v = DatabaseObject(TableRef("v"), kind: .view)
+        if backend.kind != .sqlite {
+            await changes.stage(StagedAction(.rename(to: "v2"), v, plan: try ObjectActions.renamePlan(v, to: "v2", on: f.db)))
+        }
+        #expect(await changes.stagedName(for: TableRef("nokey")) == "nokey2")
+        let plan = try await changes.plan(dialect: f.db.dialect)
+        try await f.startLog()
+        try await f.db.run(plan)
+        #expect(try await f.ran(count: plan.statements.count) == plan.statements)
+        let names = try await f.db.objects(schema: nil).map(\.ref.name).sorted()
+        #expect(names == ["items", "nokey2", backend.kind == .sqlite ? "v" : "v2"])
+    }
+
     /// The planner estimate runs on Postgres and small tables still get counted.
     @Test(arguments: Backend.all) func rowCountOfSmallTables(_ backend: Backend) async throws {
         let f = try await Fixture(backend)

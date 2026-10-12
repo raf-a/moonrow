@@ -7,7 +7,7 @@ import Foundation
 /// grid can strike it out until the change is committed or discarded. `design` is what's left,
 /// and `plan(for:)` the DDL that gets there. Renaming or deleting a column follows into the
 /// primary key, the indexes and the foreign keys.
-public struct StructureEditor: Sendable {
+public struct StructureEditor: Sendable, Equatable {
     public struct Row<Value: Sendable & Hashable>: Sendable, Hashable {
         /// Position in the loaded structure's list; nil for a row added here.
         public var origin: Int?
@@ -75,6 +75,16 @@ public struct StructureEditor: Sendable {
     public var change: StructureChange { StructureChange(from: original, to: design) }
 
     public var hasChanges: Bool { !exists || !change.isEmpty }
+
+    /// How many changes the toolbar counts: one per column, index, key or table-level change; a
+    /// new table counts once.
+    public var changeCount: Int {
+        guard exists else { return 1 }
+        let c = change
+        return c.droppedColumns.count + c.addedColumns.count + c.alteredColumns.count + (c.primaryKeyChanged ? 1 : 0)
+            + Set(c.droppedIndexes.map(\.name) + c.createdIndexes.map(\.name)).count
+            + c.droppedForeignKeys.count + c.addedForeignKeys.count + (c.renamedTable != nil ? 1 : 0) + (c.commentChanged ? 1 : 0)
+    }
 
     /// What differs from the loaded column, for highlighting. Empty for new and deleted rows.
     public func changedFields(ofColumn row: Int) -> Set<ColumnField> {

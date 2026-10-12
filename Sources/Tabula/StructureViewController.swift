@@ -66,6 +66,8 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
     var onPendingChange: (() -> Void)?
     /// Tables the foreign-key editor offers.
     var knownTables: () -> [TableRef] = { [] }
+    /// Names of the schema's tables and views, for checking a new name.
+    var existingNames: () -> [String] = { [] }
     /// Shown first in the bottom bar (the Data / Structure switch).
     var leadingAccessory: NSView?
 
@@ -81,13 +83,14 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
     let nameField = NSTextField()
     private let searchField = NSSearchField()
     private let statusLabel = NSTextField(labelWithString: "")
-    private let changesButton = NSButton(title: "", target: nil, action: nil)
     private let addColumnButton = NSButton(title: "Column", target: nil, action: nil)
     private let addIndexButton = NSButton(title: "Index", target: nil, action: nil)
     private let definitionButton = NSButton(title: "DDL", target: nil, action: nil)
     private var popover: NSPopover?
+    /// The grid whose selection the right sidebar shows.
+    private var inspectedGrid: DataGrid?
     /// Rows of `editor.columns` the search leaves visible.
-    private var visibleColumns: [Int] = []
+    fileprivate var visibleColumns: [Int] = []
     /// The inline edit in progress.
     private var editing: (grid: DataGrid, row: Int, field: String)?
     /// Original columns in the loaded primary key, for highlighting the key cell.
@@ -124,18 +127,20 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
             self, selector: #selector(stagedChangesChanged), name: StagedChanges.didChange, object: changes)
     }
 
-    /// The workspace discarded (or committed) what this editor staged: show the table as loaded
-    /// until it reloads.
+    /// Follows what's staged: an undo, a redo, or the workspace discarding or committing. With
+    /// nothing staged the table shows as loaded until it reloads.
     @objc private func stagedChangesChanged() {
         guard isViewLoaded, editing == nil, let editor else { return }
-        if let newTableID {
-            guard let staged = changes.newTable(newTableID) else { return }
+        let staged = newTableID.map { changes.newTable($0) } ?? changes.structure(for: table)
+        if let staged {
+            guard staged != editor else { return }
             self.editor = staged
-            refresh()
-        } else if editor.hasChanges, changes.structure(for: table) == nil {
+        } else if newTableID == nil, editor.hasChanges {
             self.editor = StructureEditor(editor.original)
-            refresh()
+        } else {
+            return
         }
+        refresh()
     }
 
     @available(*, unavailable)
@@ -143,7 +148,7 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
 
     var isEditable: Bool { readOnlyReason == nil }
     var hasPendingChanges: Bool { (editor?.hasChanges ?? false) || editing != nil }
-    private var dialect: any Dialect { connection.dialect }
+    fileprivate var dialect: any Dialect { connection.dialect }
     private var hasComments: Bool { !(dialect is SQLiteDialect) }
 
     // MARK: - Layout
@@ -258,12 +263,7 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
         definitionButton.action = #selector(showDefinition(_:))
         definitionButton.toolTip = "Show the statements that create this table"
         definitionButton.isEnabled = !creating
-        changesButton.target = self
-        changesButton.action = #selector(showChanges(_:))
-        changesButton.toolTip = "Review the SQL for every staged change (⇧⌘P)"
-        changesButton.contentTintColor = .systemOrange
-        changesButton.isHidden = true
-        for b in [addColumnButton, addIndexButton, definitionButton, changesButton] {
+        for b in [addColumnButton, addIndexButton, definitionButton] {
             b.bezelStyle = .accessoryBarAction
             b.controlSize = .small
             b.font = .systemFont(ofSize: 11)
@@ -276,7 +276,7 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
         statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         statusLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
-        var views: [NSView] = [addColumnButton, addIndexButton, statusLabel, changesButton, definitionButton]
+        var views: [NSView] = [addColumnButton, addIndexButton, statusLabel, definitionButton]
         if let leadingAccessory { views.insert(leadingAccessory, at: 0) }
         let bar = NSStackView(views: views)
         bar.spacing = 6
@@ -326,6 +326,7 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
                 editor = StructureEditor(structure)
                 loadedKey = Set(structure.primaryKey)
                 refresh()
+                if let pendingSelection { restoreSelection(pendingSelection) }
             } catch {
                 guard !Task.isCancelled else { return }
                 showStatus("\(error)", isError: true)
@@ -341,9 +342,10 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
         visibleColumns = editor.columns.indices.filter {
             term.isEmpty || editor.columns[$0].value.name.lowercased().contains(term)
         }
-        columnsGrid.reloadData()
-        indexGrid.reloadData()
+        columnsGrid.reloadKeepingSelection()
+        indexGrid.reloadKeepingSelection()
         updateBar()
+        NotificationCenter.default.post(name: .inspectorSourceDidChange, object: self)
     }
 
     private func updateBar() {
@@ -355,17 +357,7 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
             if let readOnlyReason { text += " · " + readOnlyReason }
             statusLabel.stringValue = text
         }
-        let count = editor.exists ? changeCount(editor) : 1
-        changesButton.isHidden = !editor.hasChanges
-        changesButton.title = creating ? "New table" : "\(count) \(count == 1 ? "change" : "changes")"
         onPendingChange?()
-    }
-
-    private func changeCount(_ e: StructureEditor) -> Int {
-        let c = e.change
-        return c.droppedColumns.count + c.addedColumns.count + c.alteredColumns.count + (c.primaryKeyChanged ? 1 : 0)
-            + Set(c.droppedIndexes.map(\.name) + c.createdIndexes.map(\.name)).count
-            + c.droppedForeignKeys.count + c.addedForeignKeys.count + (c.renamedTable != nil ? 1 : 0) + (c.commentChanged ? 1 : 0)
     }
 
     private var statusIsError = false
@@ -454,6 +446,9 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
+        // The right sidebar follows the grid selected last.
+        if let grid = notification.object as? DataGrid, !grid.selectedRowIndexes.isEmpty { inspectedGrid = grid }
+        NotificationCenter.default.post(name: .inspectorSourceDidChange, object: self)
         // Redraw the cell cursor.
         (notification.object as? NSTableView)?.reloadData(
             forRowIndexes: IndexSet(integersIn: 0..<((notification.object as? NSTableView)?.numberOfRows ?? 0)),
@@ -465,6 +460,11 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
     @objc private func gridDoubleClicked(_ sender: Any?) {
         guard let grid = sender as? DataGrid else { return }
         let row = grid.clickedRow, column = grid.clickedColumn
+        // Below the last column or index: a new one.
+        if row < 0, grid.isBelowRows(NSApp.currentEvent) {
+            guard isEditable else { return }
+            return grid === columnsGrid ? addRow(sender) : addIndex(onSelectedColumns: false)
+        }
         guard row >= 0, column >= 0 else { return }
         edit(grid, row: row, field: grid.tableColumns[column].identifier.rawValue)
     }
@@ -478,10 +478,10 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
             guard !editor.columns[r].isDeleted, let f = ColumnField(rawValue: field) else { return NSSound.beep() }
             let column = editor.columns[r].value
             switch f {
-            case .key: change { $0.togglePrimaryKey(r) }
+            case .key: change("Change Primary Key") { $0.togglePrimaryKey(r) }
             case .nullable:
                 guard !editor.primaryKey.contains(column.name) else { return NSSound.beep() }
-                change { $0.setColumn(r) { $0.isNullable.toggle() } }
+                change("Change Column") { $0.setColumn(r) { $0.isNullable.toggle() } }
             case .extra: toggleAutoIncrement(r)
             case .foreignKey: showForeignKeyEditor(forColumnRow: r, grid: grid, row: row)
             case .defaultValue where column.generated != nil: NSSound.beep()
@@ -492,7 +492,7 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
             // Constraint indexes come and go with their constraint; they can only be deleted.
             guard !editor.indexes[row].value.isConstraint || editor.indexes[row].isNew else { return NSSound.beep() }
             if f == .unique {
-                change { $0.setIndex(row) { $0.isUnique.toggle() } }
+                change("Change Index") { $0.setIndex(row) { $0.isUnique.toggle() } }
             } else {
                 let i = editor.indexes[row].value
                 let text = switch f {
@@ -538,11 +538,7 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
 
     func controlTextDidEndEditing(_ notification: Notification) {
         let field = notification.object as? NSTextField
-        if field === nameField {
-            let name = nameField.stringValue.trimmingCharacters(in: .whitespaces)
-            if editor?.name != name { change { $0.name = name } }
-            return
-        }
+        if field === nameField { return nameEdited() }
         guard let editing, let field else { return }
         self.editing = nil
         apply(field.stringValue, grid: editing.grid, row: editing.row, field: editing.field)
@@ -551,42 +547,20 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
     }
 
     private func apply(_ text: String, grid: DataGrid, row: Int, field: String) {
-        guard let editor else { return }
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let dialect = dialect
         if grid === columnsGrid {
-            let r = visibleColumns[row]
-            switch ColumnField(rawValue: field) {
-            case .name:
-                guard !trimmed.isEmpty, trimmed != editor.columns[r].value.name else { return }
-                change { $0.setColumn(r) { $0.name = trimmed } }
-            case .type:
-                guard !trimmed.isEmpty || dialect is SQLiteDialect, trimmed != editor.columns[r].value.typeName else { return }
-                change { $0.setColumn(r) { $0.typeName = trimmed } }
-            case .defaultValue:
-                let sql = DefaultInput.sql(from: text, dialect: dialect)
-                guard sql != editor.columns[r].value.defaultExpression else { return }
-                change { $0.setColumn(r) { $0.defaultExpression = sql } }
-            case .comment:
-                let comment = trimmed.isEmpty ? nil : trimmed
-                guard comment != editor.columns[r].value.comment else { return }
-                change { $0.setColumn(r) { $0.comment = comment } }
-            default: break
+            let attribute: StructureEditor.ColumnAttribute? = switch ColumnField(rawValue: field) {
+            case .name: .name
+            case .type: .type
+            case .defaultValue: .defaultValue
+            case .comment: .comment
+            default: nil
             }
+            guard let attribute else { return }
+            change("Change Column") { $0.set(attribute, to: text, columns: [visibleColumns[row]], dialect: dialect) }
         } else {
-            switch IndexField(rawValue: field) {
-            case .name: change { $0.setIndex(row) { $0.name = trimmed } }
-            case .columns:
-                let names = trimmed.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-                guard names != editor.indexes[row].value.columns else { return }
-                change { $0.setIndex(row) { $0.columns = names } }
-            case .method:
-                guard trimmed != (editor.indexes[row].value.method ?? "") else { return }
-                change { $0.setIndex(row) { $0.method = trimmed.isEmpty ? nil : trimmed } }
-            case .condition:
-                guard trimmed != (editor.indexes[row].value.predicate ?? "") else { return }
-                change { $0.setIndex(row) { $0.predicate = trimmed.isEmpty ? nil : trimmed } }
-            default: break
-            }
+            guard let f = IndexField(rawValue: field), let attribute = StructureEditor.IndexAttribute(rawValue: f.rawValue) else { return }
+            change("Change Index") { $0.set(attribute, to: text, indexes: [row]) }
         }
     }
 
@@ -613,18 +587,73 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
         editing.grid.reloadData(forRowIndexes: [editing.row], columnIndexes: IndexSet(integersIn: 0..<editing.grid.numberOfColumns))
     }
 
-    private func change(_ edit: (inout StructureEditor) -> Void) {
-        guard editor != nil else { return }
-        edit(&editor!)
-        if let newTableID { changes.setNewTable(newTableID, editor!) } else { changes.setStructure(editor!) }
+    /// Stages an edit as one undo step named `name`.
+    fileprivate func change(_ name: String, _ edit: (inout StructureEditor) -> Void) {
+        guard var e = editor else { return }
+        edit(&e)
+        let place = self.place
+        changes.perform(name, at: place) {
+            if let newTableID { changes.setNewTable(newTableID, e) } else { changes.setStructure(e) }
+        }
+        editor = e
         refresh()
+    }
+
+    /// The table and selection, for undo.
+    private var place: EditPlace {
+        EditPlace(table: newTableID == nil ? table : nil, kind: kind, newTable: newTableID, side: .structure,
+                  rows: IndexSet(columnsGrid.selectedRowIndexes.compactMap { visibleColumns[safe: $0] }),
+                  indexRows: indexGrid.selectedRowIndexes)
+    }
+
+    /// Selection to restore once the structure has loaded.
+    private var pendingSelection: EditPlace?
+
+    /// After an undo or redo: selects what was selected when the step was made.
+    func restoreSelection(_ place: EditPlace) {
+        guard isViewLoaded, editor != nil else {
+            pendingSelection = place
+            return
+        }
+        pendingSelection = nil
+        if !searchField.stringValue.isEmpty {
+            searchField.stringValue = ""
+            refresh()
+        }
+        columnsGrid.selectRowIndexes(place.rows.filteredIndexSet { $0 < columnsGrid.numberOfRows }, byExtendingSelection: false)
+        indexGrid.selectRowIndexes(place.indexRows.filteredIndexSet { $0 < indexGrid.numberOfRows }, byExtendingSelection: false)
+        if let row = place.rows.first { columnsGrid.scrollRowToVisible(row) }
+        view.window?.makeFirstResponder(place.rows.isEmpty && !place.indexRows.isEmpty ? indexGrid : columnsGrid)
+    }
+
+    /// The Name field: a new name is staged as a rename (or the new table's name). An emptied
+    /// field gets the last name back; a name that's taken is refused.
+    private func nameEdited() {
+        guard let editor else { return }
+        let name = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard name != editor.name else { return nameField.stringValue = editor.name }
+        guard !name.isEmpty else { return nameField.stringValue = editor.name }
+        if let problem = changes.nameProblem(name, newTable: newTableID, renaming: creating ? nil : table, existing: existingNames()) {
+            nameField.stringValue = editor.name
+            return refuseName(problem)
+        }
+        change(creating ? "Rename New Table" : "Rename Table") { $0.name = name }
+    }
+
+    private func refuseName(_ problem: String) {
+        NSSound.beep()
+        guard let window = view.window else { return }
+        let alert = NSAlert()
+        alert.messageText = "Can't use that name"
+        alert.informativeText = problem
+        alert.beginSheetModal(for: window)
     }
 
     private func toggleAutoIncrement(_ row: Int) {
         guard let editor, editor.columns[row].value.generated == nil || editor.columns[row].value.isAutoIncrement else {
             return NSSound.beep()
         }
-        change { e in
+        change("Change Column") { e in
             e.setColumn(row) { c in
                 c.isAutoIncrement.toggle()
                 if c.isAutoIncrement { c.defaultExpression = nil }
@@ -646,11 +675,11 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
         }
         controller.onSave = { [weak self] k in
             self?.popover?.close()
-            self?.change { $0.setForeignKey(existing, k) }
+            self?.change(existing == nil ? "Add Foreign Key" : "Change Foreign Key") { $0.setForeignKey(existing, k) }
         }
         controller.onDelete = { [weak self] in
             self?.popover?.close()
-            if let existing { self?.change { $0.deleteForeignKeys([existing]) } }
+            if let existing { self?.change("Delete Foreign Key") { $0.deleteForeignKeys([existing]) } }
         }
         controller.onCancel = { [weak self] in self?.popover?.close() }
         let c = grid.column(withIdentifier: NSUserInterfaceItemIdentifier(ColumnField.foreignKey.rawValue))
@@ -687,20 +716,22 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
         let after = columnsGrid.selectedRowIndexes.last.map { visibleColumns[$0] }
         var row = 0
         let type = StructureEditor.newColumnType(dialect)
-        change { row = $0.addColumn(type: type, after: after) }
+        change("New Column") { row = $0.addColumn(type: type, after: after) }
         columnsGrid.selectRowIndexes([row], byExtendingSelection: false)
         columnsGrid.scrollRowToVisible(row)
         beginTextEdit(columnsGrid, row: row, field: ColumnField.name.rawValue, text: editor!.columns[row].value.name)
     }
 
     /// Adds an index on the selected columns (or an empty one to fill in).
-    @objc func addIndex(_ sender: Any?) {
+    @objc func addIndex(_ sender: Any?) { addIndex(onSelectedColumns: true) }
+
+    private func addIndex(onSelectedColumns: Bool) {
         guard isEditable, let editor else { return NSSound.beep() }
         endInlineEdit()
-        let names = columnsGrid.selectedRowIndexes.map { visibleColumns[$0] }
+        let names = !onSelectedColumns ? [] : columnsGrid.selectedRowIndexes.map { visibleColumns[$0] }
             .filter { !editor.columns[$0].isDeleted }.map { editor.columns[$0].value.name }
         var row = 0
-        change { row = $0.addIndex(columns: names) }
+        change("New Index") { row = $0.addIndex(columns: names) }
         indexGrid.selectRowIndexes([row], byExtendingSelection: false)
         indexGrid.scrollRowToVisible(row)
         view.window?.makeFirstResponder(indexGrid)
@@ -713,7 +744,7 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
         }
         searchField.stringValue = ""
         var row = 0
-        change { row = $0.duplicateColumn(visibleColumns[last]) }
+        change("Duplicate Column") { row = $0.duplicateColumn(visibleColumns[last]) }
         columnsGrid.selectRowIndexes([row], byExtendingSelection: false)
     }
 
@@ -724,9 +755,9 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
         guard !rows.isEmpty else { return NSSound.beep() }
         endInlineEdit()
         if grid === columnsGrid {
-            change { $0.deleteColumns(IndexSet(rows.map { visibleColumns[$0] })) }
+            change(rows.count == 1 ? "Delete Column" : "Delete Columns") { $0.deleteColumns(IndexSet(rows.map { visibleColumns[$0] })) }
         } else {
-            change { $0.deleteIndexes(rows) }
+            change(rows.count == 1 ? "Delete Index" : "Delete Indexes") { $0.deleteIndexes(rows) }
         }
         grid.deselectAll(nil)
     }
@@ -734,15 +765,15 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
     @objc private func restoreRows(_ sender: Any?) {
         guard let menu = (sender as? NSMenuItem)?.menu else { return }
         if menu === indexGrid.menu {
-            for row in indexGrid.selectedRowIndexes { change { $0.restoreIndex(row) } }
+            change("Restore Index") { e in for row in indexGrid.selectedRowIndexes { e.restoreIndex(row) } }
         } else {
-            for row in columnsGrid.selectedRowIndexes { change { $0.restoreColumn(visibleColumns[row]) } }
+            change("Restore Column") { e in for row in columnsGrid.selectedRowIndexes { e.restoreColumn(visibleColumns[row]) } }
         }
     }
 
     @objc private func togglePrimaryKey(_ sender: Any?) {
         guard isEditable, let row = columnsGrid.selectedRowIndexes.first else { return NSSound.beep() }
-        change { $0.togglePrimaryKey(visibleColumns[row]) }
+        change("Change Primary Key") { $0.togglePrimaryKey(visibleColumns[row]) }
     }
 
     @objc private func toggleAutoIncrementMenu(_ sender: Any?) {
@@ -753,9 +784,8 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
     @objc private func setType(_ sender: NSMenuItem) {
         guard isEditable else { return }
         let type = sender.title
-        for row in columnsGrid.selectedRowIndexes where !(editor?.columns[visibleColumns[row]].isDeleted ?? true) {
-            change { $0.setColumn(visibleColumns[row]) { $0.typeName = type } }
-        }
+        let rows = columnsGrid.selectedRowIndexes.map { visibleColumns[$0] }
+        change("Change Type") { $0.set(.type, to: type, columns: rows, dialect: dialect) }
     }
 
     @objc private func editForeignKey(_ sender: Any?) {
@@ -815,6 +845,9 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
             return isEditable
         case #selector(deleteRows(_:)), #selector(duplicateRows(_:)), #selector(setType(_:)), #selector(editForeignKey(_:)):
             let grid = item.menu === indexGrid.menu ? indexGrid : item.menu === columnsGrid.menu ? columnsGrid : activeGrid
+            if item.action == #selector(deleteRows(_:)), item.menu?.title == "Edit" {
+                item.title = grid === indexGrid ? "Delete Indexes" : "Delete Columns"
+            }
             return isEditable && !grid.selectedRowIndexes.isEmpty
         default:
             return true
@@ -822,12 +855,6 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
     }
 
     // MARK: - Staged changes
-
-    /// The bottom bar's change count: shows the workspace's preview.
-    @objc private func showChanges(_ sender: Any?) {
-        endInlineEdit()
-        NSApp.sendAction(#selector(TabulaActions.previewChanges(_:)), to: nil, from: self)
-    }
 
     @objc private func showDefinition(_ sender: Any?) {
         let object = DatabaseObject(table, kind: kind)
@@ -842,4 +869,49 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
             }
         }
     }
+}
+
+// MARK: - Right sidebar
+
+extension StructureViewController: InspectorSource {
+    private var inspectingIndexes: Bool {
+        inspectedGrid === indexGrid && !indexGrid.selectedRowIndexes.isEmpty || columnsGrid.selectedRowIndexes.isEmpty && !indexGrid.selectedRowIndexes.isEmpty
+    }
+
+    private var selectedColumnRows: [Int] { columnsGrid.selectedRowIndexes.compactMap { visibleColumns[safe: $0] } }
+
+    var inspectorTitle: String {
+        let name = editor?.name ?? table.name
+        if inspectingIndexes {
+            let n = indexGrid.selectedRowIndexes.count
+            return "\(name) · \(n) \(n == 1 ? "index" : "indexes")"
+        }
+        let n = columnsGrid.selectedRowIndexes.count
+        return n == 0 ? name : "\(name) · \(n) \(n == 1 ? "column" : "columns")"
+    }
+
+    var inspectorFields: [InspectorField] {
+        guard let editor else { return [] }
+        return inspectingIndexes
+            ? InspectorForm.indexes(editor, rows: Array(indexGrid.selectedRowIndexes), editable: isEditable)
+            : InspectorForm.columns(editor, rows: selectedColumnRows, editable: isEditable)
+    }
+
+    func inspectorEdit(_ key: InspectorField.Key, text: String) {
+        guard isEditable else { return NSSound.beep() }
+        endInlineEdit()
+        let dialect = dialect
+        switch key {
+        case .column(let attribute):
+            let rows = selectedColumnRows
+            change(rows.count == 1 ? "Change Column" : "Change Columns") { $0.set(attribute, to: text, columns: rows, dialect: dialect) }
+        case .index(let attribute):
+            let rows = Array(indexGrid.selectedRowIndexes)
+            change(rows.count == 1 ? "Change Index" : "Change Indexes") { $0.set(attribute, to: text, indexes: rows) }
+        case .cell:
+            break
+        }
+    }
+
+    func inspectorSet(_ key: InspectorField.Key, _ change: CellChange) {}
 }

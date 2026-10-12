@@ -17,6 +17,7 @@ import Darwin
 ///     TABULA_EXPORT=events TABULA_STORE=… TABULA_SNAPSHOTS=build/snapshots Tabula build/sample.sqlite
 ///     TABULA_IMPORT=empty_table=/tmp/rows.csv TABULA_STORE=… TABULA_SNAPSHOTS=… Tabula /tmp/copy-of-sample.sqlite
 ///     TABULA_STAGED=users TABULA_STORE=… TABULA_SNAPSHOTS=… Tabula build/sample.sqlite
+///     TABULA_EDITING=notes TABULA_STORE=… TABULA_SNAPSHOTS=… Tabula /tmp/copy-with-a-small-table.sqlite
 ///
 /// The bench opens the table in the first workspace with every row in one page, scrolls it like
 /// a fast trackpad, jumps to far-apart rows, prints timings and quits. The demo drives the grid's
@@ -113,6 +114,21 @@ enum DevHarness {
                     try await stagedDemo(app, table: table, snapshots: snapshots)
                 } catch {
                     print("staged demo failed: \(error)")
+                }
+                NSApp.terminate(nil)
+            }
+            return
+        }
+        // Undo, the sidebar's delete keys, adding rows by double-click, the right sidebar and the
+        // Changes item, then ⌘S. It commits, so point it at a copy; the table should be small
+        // enough to leave room below its rows.
+        if let table = env["TABULA_EDITING"] {
+            Task {
+                do {
+                    guard env["TABULA_STORE"] != nil else { throw HarnessError("TABULA_EDITING needs TABULA_STORE") }
+                    try await editingDemo(app, table: table, snapshots: snapshots)
+                } catch {
+                    print("editing demo failed: \(error)")
                 }
                 NSApp.terminate(nil)
             }
@@ -433,6 +449,202 @@ enum DevHarness {
         _ = try await waitFor("rows") { shown.cache.flatMap { visibleLoaded(shown.grid, $0) ? true : nil } }
         try check(shown.edits.state(of: shown.cache?.row(at: 0)) == .unchanged, "the grid shows the loaded value again")
         snap("4-discarded.png", window)
+    }
+
+    /// M7's workspace editing, through real key and mouse events where routing matters.
+    private static func editingDemo(_ app: AppDelegate, table: String, snapshots: URL?) async throws {
+        if let snapshots { try FileManager.default.createDirectory(at: snapshots, withIntermediateDirectories: true) }
+        func snap(_ name: String, _ window: NSWindow?) {
+            window?.displayIfNeeded()
+            if let snapshots, let window { snapshot(window, to: snapshots.appending(path: name)) }
+        }
+        func check(_ ok: Bool, _ what: String) throws {
+            guard ok else { throw HarnessError("expected: \(what)") }
+            print("ok: \(what)")
+        }
+        let workspace = try await waitFor("workspace") { app.workspaces.first }
+        let window = try require(workspace.window, "workspace window")
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate()
+        let changes = workspace.changes
+        let undo = changes.undoManager
+        /// A key press sent through the app, so menus' key equivalents see it first.
+        func press(_ characters: String, code: UInt16, _ modifiers: NSEvent.ModifierFlags = []) async throws {
+            if !window.isKeyWindow { window.makeKeyAndOrderFront(nil) }
+            let event = try require(NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: modifiers, timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber, context: nil, characters: characters,
+                charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code), "key event")
+            NSApp.sendEvent(event)
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        func undoKey() async throws { try await press("z", code: 6, .command) }
+        func redoKey() async throws { try await press("Z", code: 6, [.command, .shift]) }
+        func doubleClick(_ view: NSView, at point: NSPoint) async throws {
+            let location = view.convert(point, to: nil)
+            func mouse(_ type: NSEvent.EventType, clicks: Int) throws -> NSEvent {
+                try require(NSEvent.mouseEvent(
+                    with: type, location: location, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                    windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: clicks, pressure: 1), "mouse event")
+            }
+            for clicks in [1, 2] {
+                // The view's tracking loop takes the mouse-up from the queue.
+                NSApp.postEvent(try mouse(.leftMouseUp, clicks: clicks), atStart: false)
+                NSApp.sendEvent(try mouse(.leftMouseDown, clicks: clicks))
+                try await Task.sleep(for: .milliseconds(30))
+            }
+        }
+        let outline = try require(descendant(of: workspace.sidebar.view, SidebarOutline.self), "items list")
+        let filter = try require(descendant(of: workspace.sidebar.view, NSSearchField.self), "filter field")
+
+        // Space and ⌥⌫ are menu shortcuts, but in a text field they still type.
+        window.makeFirstResponder(filter)
+        filter.currentEditor()?.insertText("ab cd")
+        try await press(" ", code: 49)
+        try check(filter.stringValue == "ab cd ", "Space types a space in a text field (got “\(filter.stringValue)”)")
+        try await press("\u{7F}", code: 51, .option)
+        try check(filter.stringValue == "ab ", "⌥⌫ deletes a word in a text field (got “\(filter.stringValue)”)")
+        filter.stringValue = ""
+        workspace.sidebar.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification))
+
+        // ⌫ on a table marks it for deletion at once; ⌘Z and ⇧⌘Z take it back and forth.
+        _ = try await waitFor("sidebar items") { workspace.environment.catalog.objects.isEmpty ? nil : true }
+        let victim = try require(workspace.environment.catalog.objects.first { $0.kind == .table && $0.ref.name != table }, "another table")
+        workspace.sidebar.reveal([victim.ref])
+        window.makeFirstResponder(outline)
+        try await press("\u{7F}", code: 51)
+        _ = try await waitFor("drop staged") { changes.mark(for: victim.ref) == .dropped ? true : nil }
+        try check(undo.undoMenuItemTitle == "Undo Delete Table", "the step is “Delete Table”")
+        snap("1-marked.png", window)
+        try await press("\u{7F}", code: 51)
+        try await Task.sleep(for: .milliseconds(100))
+        try check(changes.actions.count == 1 && undo.undoMenuItemTitle == "Undo Delete Table", "⌫ on a marked item adds nothing")
+        try await undoKey()
+        try check(changes.isEmpty, "⌘Z unmarks it")
+        try await redoKey()
+        try check(changes.mark(for: victim.ref) == .dropped, "⇧⌘Z marks it again")
+        try await undoKey()
+        // ⌘⌫ goes through Edit ▸ Delete, to the list while it has the focus.
+        window.makeFirstResponder(outline)
+        let deleteItem = try require(menuItem(NSApp.mainMenu, action: #selector(TabulaActions.deleteRows(_:))), "Delete item")
+        deleteItem.menu?.update()
+        try check(deleteItem.isEnabled && deleteItem.title == "Delete Table", "Edit ▸ Delete Table is enabled while the list has the focus")
+        // A synthetic ⌘⌫ matches no menu item (AppKit maps the real key itself), so the item's
+        // action is sent once the item validates for the list.
+        NSApp.sendAction(#selector(TabulaActions.deleteRows(_:)), to: nil, from: deleteItem)
+        _ = try await waitFor("drop staged by ⌘⌫") { changes.mark(for: victim.ref) == .dropped ? true : nil }
+        try await undoKey()
+        try check(changes.isEmpty, "⌘Z unmarks it again")
+
+        // A new table from the + button; ⌫ removes it and closes its tab; ⌘Z brings both back.
+        let plus = try require(descendant(of: workspace.sidebar.view, NSButton.self) { $0.toolTip == "New table" }, "+ button")
+        plus.performClick(nil)
+        let newID = try await waitFor("new table tab") { workspace.tableTab?.newTableID }
+        try check(undo.undoMenuItemTitle == "Undo New Table", "the + button stages a new table")
+        workspace.sidebar.reveal(newTable: newID)
+        window.makeFirstResponder(outline)
+        try await press("\u{7F}", code: 51)
+        try check(changes.newTables.isEmpty && !workspace.tableTabs.contains { $0.newTableID != nil }, "⌫ removes the new table and closes its tab")
+        try await undoKey()
+        try check(changes.newTable(newID) != nil && workspace.tableTab?.newTableID == newID, "⌘Z brings back the table and its tab")
+        snap("2-new-table-back.png", window)
+        // Its name can't be emptied or taken.
+        let structure = try require(workspace.tableTab?.structure, "new table's structure")
+        window.makeFirstResponder(structure.nameField)
+        structure.nameField.currentEditor()?.selectAll(nil)
+        structure.nameField.currentEditor()?.delete(nil)
+        window.makeFirstResponder(structure.columnsGrid)
+        try check(structure.nameField.stringValue == "untitled_table" && changes.newTable(newID)?.name == "untitled_table",
+                  "an emptied name comes back")
+        try await undoKey()
+        try check(changes.newTables.isEmpty && workspace.tableTab?.newTableID == nil, "⌘Z undoes New Table and closes its tab")
+
+        // The table's rows. ⌘Z while typing in a cell undoes the typing, not staged changes.
+        _ = try await waitFor("sidebar item \(table)") { workspace.sidebar.select(named: table) ? true : nil }
+        let data = try await waitFor("table view") { workspace.tableController.flatMap { $0.table.name == table ? $0 : nil } }
+        _ = try await waitFor("rows") { data.cache.flatMap { visibleLoaded(data.grid, $0) ? true : nil } }
+        let grid = data.grid
+        try check(grid.numberOfRows >= 2, "\(table) has at least two rows")
+        window.makeFirstResponder(grid)
+        grid.selectRowIndexes([0], byExtendingSelection: false)
+        grid.focusedColumn = grid.tableColumns[1].identifier
+        grid.keyDown(with: try key("\r", code: 36))
+        let editor = try require(window.firstResponder as? NSTextView, "field editor")
+        let before = editor.string
+        editor.selectAll(nil)
+        editor.insertText("typed", replacementRange: editor.selectedRange())
+        try await undoKey()
+        try check(editor.string == before && changes.isEmpty, "⌘Z in a cell undoes the typing")
+        editor.doCommand(by: #selector(NSResponder.cancelOperation(_:)))
+
+        // Double-click below the last row adds one.
+        window.makeFirstResponder(grid)
+        let end = grid.rect(ofRow: grid.numberOfRows - 1).maxY
+        try check(grid.bounds.height > end + 10, "room below the rows")
+        try await doubleClick(grid, at: NSPoint(x: 20, y: end + 8))
+        try check(data.edits.insertedRowCount == 1 && undo.undoMenuItemTitle == "Undo Add Row", "double-click below the rows adds one")
+        if let cell = window.firstResponder as? NSTextView {
+            cell.insertText("from double-click", replacementRange: cell.selectedRange())
+            window.makeFirstResponder(grid)
+        }
+        snap("3-added-row.png", window)
+
+        // Space opens the right sidebar; editing a field stages it for both selected rows.
+        window.makeFirstResponder(grid)
+        grid.selectRowIndexes([0, 1], byExtendingSelection: false)
+        if workspace.isInspectorVisible { workspace.toggleRightSidebar(nil) }
+        try await press(" ", code: 49)
+        try check(workspace.isInspectorVisible, "Space in the grid shows the right sidebar")
+        let column = try require(data.browser?.columns.firstIndex { $0.primaryKeyPosition == nil && $0.typeName.uppercased().contains("TEXT") },
+                                 "a text column")
+        let field = try await waitFor("inspector field") {
+            descendant(of: workspace.inspector.view, NSTextField.self) { $0.tag == column && $0.isEditable }
+        }
+        snap("4-inspector.png", window)
+        window.makeFirstResponder(field)
+        field.currentEditor()?.selectAll(nil)
+        field.currentEditor()?.insertText("set from the sidebar")
+        window.makeFirstResponder(grid)
+        try check(grid.selectedRowIndexes == [0, 1], "the rows stay selected")
+        let rows = [0, 1].compactMap { data.cache?.row(at: $0) }
+        try check(rows.allSatisfy { data.edits.change(in: $0, column: column) == .value(.text("set from the sidebar")) },
+                  "one field edit stages both rows")
+        try check(undo.undoMenuItemTitle == "Undo Edit Cells", "as one step")
+        try await Task.sleep(for: .milliseconds(200))
+        snap("5-inspector-edited.png", window)
+
+        // Structure: double-click below the last column adds one; ⌘Z takes it away.
+        workspace.tableTab?.switchTo(.structure)
+        let s = try await waitFor("structure") { workspace.tableTab?.structure.flatMap { $0.editor != nil ? $0 : nil } }
+        let columns = s.columnsGrid.numberOfRows
+        window.makeFirstResponder(s.columnsGrid)
+        try await doubleClick(s.columnsGrid, at: NSPoint(x: 20, y: s.columnsGrid.rect(ofRow: columns - 1).maxY + 8))
+        window.makeFirstResponder(s.columnsGrid)
+        try check(s.columnsGrid.numberOfRows == columns + 1, "double-click below the columns adds one")
+        try await undoKey()
+        try check(s.columnsGrid.numberOfRows == columns && changes.structure(for: data.table) == nil, "⌘Z removes it")
+        workspace.tableTab?.switchTo(.data)
+
+        // The Changes item counts what's staged; ⌘S commits from anywhere, here the sidebar.
+        let item = try require(window.toolbar?.items.first { $0.itemIdentifier.rawValue == "changes" }, "Changes item")
+        try check(item.isEnabled && workspace.shownChangeCount == changes.changeCount, "the toolbar shows \(changes.changeCount) changes")
+        snap("6-before-commit.png", window)
+        window.makeFirstResponder(outline)
+        let oldCache = data.cache.map(ObjectIdentifier.init)
+        try await press("s", code: 1, .command)
+        _ = try await waitFor("commit") { changes.isEmpty ? true : nil }
+        try check(!undo.canUndo && !item.isEnabled && workspace.shownChangeCount == 0, "after ⌘S nothing is staged and nothing can be undone")
+        let reloaded = try await waitFor("reloaded rows") {
+            data.cache.flatMap { ObjectIdentifier($0) != oldCache ? $0.row(at: 0) : nil }
+        }
+        try check(reloaded[column] == .text("set from the sidebar"), "the database has the new value")
+        snap("7-committed.png", window)
+    }
+
+    private static func descendant<T: NSView>(of view: NSView, _ type: T.Type, where match: (T) -> Bool = { _ in true }) -> T? {
+        if let v = view as? T, match(v) { return v }
+        for sub in view.subviews { if let found = descendant(of: sub, type, where: match) { return found } }
+        return nil
     }
 
     /// Edits a table's structure through the editor's controls, commits, then creates a table.

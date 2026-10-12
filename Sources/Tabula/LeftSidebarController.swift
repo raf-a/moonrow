@@ -184,7 +184,7 @@ final class SavedQueriesViewController: SidebarListController {
         let q = search.stringValue.trimmingCharacters(in: .whitespaces)
         shown = q.isEmpty ? store.queries : store.queries.filter { $0.name.localizedCaseInsensitiveContains(q) }
         table.reloadData()
-        empty.stringValue = store.queries.isEmpty ? "No saved queries.\nSave one from a query tab with ⌘S." : "Nothing matches “\(q)”."
+        empty.stringValue = store.queries.isEmpty ? "No saved queries.\nIn a query tab, choose Add to Queries… from the Run menu." : "Nothing matches “\(q)”."
         empty.isHidden = !shown.isEmpty
     }
 

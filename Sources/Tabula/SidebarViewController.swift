@@ -14,10 +14,16 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     var onOpen: ((DatabaseObject) -> Void)?
     var onOpenInNewTab: ((DatabaseObject) -> Void)?
     var onOpenStructure: ((DatabaseObject) -> Void)?
-    var onNewTable: (() -> Void)?
+    var onNewTable: (() -> Void)? {
+        didSet { newTableButton.isEnabled = onNewTable != nil }
+    }
     var onRename: ((DatabaseObject) -> Void)?
+    var onRenameNewTable: ((UUID) -> Void)?
     var onTruncate: ((DatabaseObject) -> Void)?
+    /// Delete… from the context menu: the dialog with options.
     var onDelete: ((DatabaseObject) -> Void)?
+    /// ⌫ or ⌘⌫: marks the items for deletion at once and removes staged new tables.
+    var onMarkForDeletion: ((_ objects: [DatabaseObject], _ newTables: [UUID]) -> Void)?
     var onCopyScript: ((DatabaseObject, Script) -> Void)?
     var onExport: ((DatabaseObject) -> Void)?
     /// Nil on read-only connections.
@@ -28,16 +34,19 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     var markFor: ((TableRef) -> StagedChanges.Mark?)?
     /// Staged new tables, listed with the tables until they're created.
     var stagedNewTables: () -> [(id: UUID, name: String)] = { [] }
+    /// The name a staged rename gives an item.
+    var stagedNameFor: ((TableRef) -> String?)?
     var onOpenNewTable: ((UUID) -> Void)?
     /// Set while the selection follows the open tab, so it doesn't open anything.
     private var isRevealing = false
 
     private let connection: any DatabaseConnection
-    private let outline = NSOutlineView()
+    private let outline = SidebarOutline()
     private let filter = NSSearchField()
     private let message = NSTextField(wrappingLabelWithString: "")
     private let schemaPopup = NSPopUpButton()
     private let schemaBar = NSStackView()
+    private let newTableButton = NSButton()
     /// The schema (Postgres) or database (MySQL) whose items are listed; nil for SQLite, or a
     /// MySQL connection without a default database.
     private(set) var schema: String?
@@ -89,6 +98,9 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         outline.dataSource = self
         outline.delegate = self
         outline.autosaveExpandedItems = false
+        outline.allowsMultipleSelection = true
+        outline.onDeleteKey = { [weak self] in self?.deleteRows(nil) }
+        outline.onTruncateKey = { [weak self] in self?.truncateTable(nil) }
         outline.target = self
         outline.doubleAction = #selector(doubleClicked(_:))
         let menu = NSMenu()
@@ -98,8 +110,11 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         menu.addItem(.separator())
         menu.addItem(withTitle: "New Table…", action: #selector(newTable(_:)), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Rename…", action: #selector(renameItem(_:)), keyEquivalent: "").target = self
-        menu.addItem(withTitle: "Truncate…", action: #selector(truncateItem(_:)), keyEquivalent: "").target = self
-        menu.addItem(withTitle: "Delete…", action: #selector(deleteItem(_:)), keyEquivalent: "").target = self
+        // The shortcuts shown are the keys the list handles (⌘⌫ marks without the dialog).
+        let truncate = menu.addItem(withTitle: "Truncate…", action: #selector(truncateItem(_:)), keyEquivalent: "\u{8}")
+        truncate.keyEquivalentModifierMask = .option
+        truncate.target = self
+        menu.addItem(withTitle: "Delete…", action: #selector(deleteItem(_:)), keyEquivalent: "\u{8}").target = self
         menu.addItem(.separator())
         menu.addItem(withTitle: "Export…", action: #selector(exportItem(_:)), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Import CSV…", action: #selector(importCSVItem(_:)), keyEquivalent: "").target = self
@@ -129,9 +144,16 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         schemaPopup.target = self
         schemaPopup.action = #selector(schemaChosen(_:))
         schemaPopup.toolTip = "Schema"
+        newTableButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "New table")
+        newTableButton.bezelStyle = .accessoryBarAction
+        newTableButton.controlSize = .small
+        newTableButton.target = self
+        newTableButton.action = #selector(newTable(_:))
+        newTableButton.toolTip = "New table"
+        schemaBar.addArrangedSubview(newTableButton)
         schemaBar.addArrangedSubview(schemaPopup)
         schemaBar.edgeInsets = NSEdgeInsets(top: 4, left: 8, bottom: 6, right: 8)
-        schemaBar.isHidden = true
+        schemaPopup.isHidden = true
         schemaPopup.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
         let root = NSView(frame: NSRect(x: 0, y: 0, width: 250, height: 600))
@@ -181,6 +203,16 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         reveal(row: ref.flatMap { r in rowOfItem { $0.newTableID == nil && $0.object.ref == r } })
     }
 
+    /// Selects these items without opening them (after an undo, say).
+    func reveal(_ refs: [TableRef]) {
+        let rows = refs.compactMap { r in rowOfItem { $0.newTableID == nil && $0.object.ref == r } }
+        isRevealing = true
+        defer { isRevealing = false }
+        outline.selectRowIndexes(IndexSet(rows), byExtendingSelection: false)
+        if let first = rows.first { outline.scrollRowToVisible(first) }
+        view.window?.makeFirstResponder(outline)
+    }
+
     func reveal(newTable id: UUID) {
         reveal(row: rowOfItem { $0.newTableID == id })
     }
@@ -197,10 +229,21 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     }
 
     /// The item a context-menu command applies to: the clicked row, else the selection.
-    private var targetObject: DatabaseObject? {
+    private var targetItem: Item? {
         let row = outline.clickedRow >= 0 ? outline.clickedRow : outline.selectedRow
-        guard let item = outline.item(atRow: row) as? Item, item.newTableID == nil else { return nil }
+        return outline.item(atRow: row) as? Item
+    }
+
+    private var targetObject: DatabaseObject? {
+        guard let item = targetItem, item.newTableID == nil else { return nil }
         return item.object
+    }
+
+    /// The items a key command applies to: the selection, or the clicked row when it's outside it.
+    private var targetItems: [Item] {
+        let clicked = outline.clickedRow
+        let rows = clicked >= 0 && !outline.selectedRowIndexes.contains(clicked) ? [clicked] : outline.selectedRowIndexes
+        return rows.compactMap { outline.item(atRow: $0) as? Item }
     }
 
     @objc private func doubleClicked(_ sender: Any?) {
@@ -267,7 +310,16 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             return targetObject.map(Self.opensInGrid) ?? false
         case #selector(newTable(_:)):
             return onNewTable != nil
-        case #selector(renameItem(_:)), #selector(deleteItem(_:)):
+        case #selector(deleteRows(_:)):
+            let items = targetItems.filter { $0.newTableID != nil || $0.object.kind != .function }
+            let kinds = Set(items.map { $0.object.kind == .table ? "Table" : "View" })
+            if item.menu?.title == "Edit" { item.title = items.count > 1 ? "Delete Items" : "Delete \(kinds.first ?? "Table")" }
+            return onMarkForDeletion != nil && !items.isEmpty
+        case #selector(truncateTable(_:)):
+            return onNewTable != nil && kind == .table
+        case #selector(renameItem(_:)):
+            return targetItem?.newTableID != nil || kind != nil && kind != .function
+        case #selector(deleteItem(_:)):
             return kind != nil && kind != .function
         case #selector(truncateItem(_:)):
             return kind == .table
@@ -290,11 +342,31 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     @objc private func newTable(_ sender: Any?) { onNewTable?() }
 
     @objc private func renameItem(_ sender: Any?) {
-        if let object = targetObject { onRename?(object) }
+        if let id = targetItem?.newTableID {
+            onRenameNewTable?(id)
+        } else if let object = targetObject {
+            onRename?(object)
+        }
     }
 
     @objc private func truncateItem(_ sender: Any?) {
         if let object = targetObject { onTruncate?(object) }
+    }
+
+    /// ⌥⌫ (Edit ▸ Truncate Table…): the truncate dialog for the selected table.
+    @objc func truncateTable(_ sender: Any?) {
+        guard let object = targetObject, object.kind == .table else { return NSSound.beep() }
+        onTruncate?(object)
+    }
+
+    /// ⌫ or ⌘⌫ (Edit ▸ Delete): marks the selected tables and views for deletion at once, with
+    /// no dialog, and removes selected new tables. Functions are left alone.
+    @objc func deleteRows(_ sender: Any?) {
+        let items = targetItems
+        let objects = items.filter { $0.newTableID == nil && $0.object.kind != .function }.map(\.object)
+        let newTables = items.compactMap(\.newTableID)
+        guard let onMarkForDeletion, !objects.isEmpty || !newTables.isEmpty else { return NSSound.beep() }
+        onMarkForDeletion(objects, newTables)
     }
 
     @objc private func deleteItem(_ sender: Any?) {
@@ -338,7 +410,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                     try await loadSchemas()
                 }
                 // MySQL without a default database: nothing to list until one is chosen.
-                if schema == nil, !schemaBar.isHidden {
+                if schema == nil, !schemaPopup.isHidden {
                     self.objects = []
                     rebuild()
                     showMessage("Choose a database below.")
@@ -365,7 +437,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         guard !Task.isCancelled else { return }
         schemasLoaded = true
         schema = current
-        schemaBar.isHidden = schemas.isEmpty
+        schemaPopup.isHidden = schemas.isEmpty
         schemaPopup.removeAllItems()
         schemaPopup.addItems(withTitles: schemas)
         // The current schema can be one the list leaves out (a system one).
@@ -374,7 +446,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     }
 
     private func rebuild() {
-        let selectedItem = outline.item(atRow: outline.selectedRow) as? Item
+        let selectedItems = outline.selectedRowIndexes.compactMap { outline.item(atRow: $0) as? Item }
         let query = filter.stringValue.trimmingCharacters(in: .whitespaces)
         let matching = query.isEmpty ? objects : objects.filter { $0.ref.name.localizedCaseInsensitiveContains(query) }
         let newTables = stagedNewTables()
@@ -392,12 +464,15 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         outline.reloadData()
         for g in groups { outline.expandItem(g) }
 
-        if let selectedItem, let row = rowOfItem({ item in
-            if let id = selectedItem.newTableID { return item.newTableID == id }
-            return item.newTableID == nil && item.object == selectedItem.object
-        }) {
+        let rows = selectedItems.compactMap { selected in
+            rowOfItem { item in
+                if let id = selected.newTableID { return item.newTableID == id }
+                return item.newTableID == nil && item.object == selected.object
+            }
+        }
+        if !rows.isEmpty {
             isRevealing = true
-            outline.selectRowIndexes([row], byExtendingSelection: false)
+            outline.selectRowIndexes(IndexSet(rows), byExtendingSelection: false)
             isRevealing = false
         }
         if objects.isEmpty && newTables.isEmpty {
@@ -532,7 +607,10 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             }
             tint = attributes[.foregroundColor] as? NSColor ?? tint
         }
-        cell.textField?.attributedStringValue = NSAttributedString(string: item.object.ref.name, attributes: attributes)
+        // A staged rename shows the new name.
+        let name = item.newTableID == nil ? stagedNameFor?(item.object.ref) ?? item.object.ref.name : item.object.ref.name
+        if name != item.object.ref.name { tip = "Rename staged (was \(item.object.ref.name))" }
+        cell.textField?.attributedStringValue = NSAttributedString(string: name, attributes: attributes)
         cell.toolTip = tip
         cell.imageView?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: item.object.kind.rawValue)
             ?? NSImage(systemSymbolName: "tablecells", accessibilityDescription: item.object.kind.rawValue)
@@ -540,9 +618,26 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         return cell
     }
 
-    /// Selecting an item opens it, so arrow keys browse tables one after another.
+    /// Selecting an item opens it, so arrow keys browse tables one after another. Selecting
+    /// several opens nothing.
     func outlineViewSelectionDidChange(_ notification: Notification) {
-        guard !isRevealing, let item = outline.item(atRow: outline.selectedRow) as? Item else { return }
+        guard !isRevealing, outline.selectedRowIndexes.count == 1,
+              let item = outline.item(atRow: outline.selectedRow) as? Item else { return }
         open(item)
+    }
+}
+
+/// The items list. ⌫ and ⌦ mark the selection for deletion; ⌥⌫ truncates.
+final class SidebarOutline: NSOutlineView {
+    var onDeleteKey: (() -> Void)?
+    var onTruncateKey: (() -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        let mods = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        switch (event.keyCode, mods) {
+        case (51, []), (117, []): onDeleteKey?()
+        case (51, .option): onTruncateKey?()
+        default: super.keyDown(with: event)
+        }
     }
 }

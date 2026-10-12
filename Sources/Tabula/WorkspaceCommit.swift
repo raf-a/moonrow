@@ -12,10 +12,10 @@ extension WorkspaceWindowController: NSMenuItemValidation {
 
     /// Commits everything staged, then runs `proceed`. A failure leaves everything staged (or,
     /// when MySQL had already applied part of it, reloads what's open) and doesn't proceed.
+    /// ⌘S works from every view; with nothing staged it does nothing.
     func commitStaged(then proceed: (() -> Void)?) {
-        for tab in tableTabs { tab.endEditing() }
-        guard !changes.isEmpty else { return NSSound.beep() }
-        guard !isCommitting else { return }
+        endAllEditing()
+        guard !changes.isEmpty, !isCommitting else { return }
         let plan: CommitPlan
         do {
             plan = try changes.plan(dialect: connection.dialect)
@@ -24,9 +24,13 @@ extension WorkspaceWindowController: NSMenuItemValidation {
         }
         previewSheet?.close()
         isCommitting = true
+        updateChangesItem()
         let connection = connection
         Task {
-            defer { isCommitting = false }
+            defer {
+                isCommitting = false
+                updateChangesItem()
+            }
             guard await safety.approve(plan.statements) else { return }
             do {
                 try await connection.run(plan)
@@ -41,20 +45,35 @@ extension WorkspaceWindowController: NSMenuItemValidation {
         }
     }
 
+    /// Ends every edit in progress, so what's typed is staged: grid cells, and fields such as a
+    /// table's Name or the right sidebar's.
+    func endAllEditing() {
+        for tab in tableTabs { tab.endEditing() }
+        if let editor = window?.firstResponder as? NSTextView, editor.isFieldEditor {
+            window?.makeFirstResponder(nil)
+        }
+    }
+
     /// After a commit: tabs follow tables that were created, renamed or dropped; the rest reload.
+    /// Undo starts over.
     private func committed() {
         var renamed: [TableRef: TableRef] = [:]
         for (table, editor) in changes.structures where editor.name != table.name {
             renamed[table] = TableRef(schema: table.schema, editor.name)
         }
+        for a in changes.actions {
+            if case .rename(let name) = a.kind { renamed[a.object.ref] = TableRef(schema: a.object.ref.schema, name) }
+        }
         let created = Dictionary(uniqueKeysWithValues: changes.newTables.map { ($0.id, $0.editor.name) })
         let dropped = Set(changes.actions.filter { $0.kind == .drop }.map(\.object.ref))
-        changes.discardAll()
+        // Tabs of created tables become regular tabs before the new-table tabs would close.
+        for tab in tableTabs {
+            if let id = tab.newTableID, let name = created[id] { tab.becomeTable(TableRef(schema: tab.table.schema, name)) }
+        }
+        changes.clearAfterCommit()
         sidebar.reload()
         for tab in tableTabs {
-            if let id = tab.newTableID {
-                if let name = created[id] { tab.becomeTable(TableRef(schema: tab.table.schema, name)) }
-            } else if dropped.contains(tab.table) {
+            if dropped.contains(tab.table) {
                 closeWithoutAsking(tab)
             } else if let new = renamed[tab.table] {
                 tab.becomeTable(new)
@@ -63,10 +82,6 @@ extension WorkspaceWindowController: NSMenuItemValidation {
             }
         }
         tabChanged()
-    }
-
-    private func closeWithoutAsking(_ tab: TableTabViewController) {
-        if let i = content.tabs.firstIndex(where: { $0 === tab }) { content.close(i) }
     }
 
     private func showCommitError(_ error: any Error, title: String, staged: Bool) {
@@ -82,19 +97,18 @@ extension WorkspaceWindowController: NSMenuItemValidation {
         if let window { alert.beginSheetModal(for: window) } else { alert.runModal() }
     }
 
-    /// ⇧⌘⌫: drops everything staged. Staged new tables close.
+    /// ⇧⌘⌫: drops everything staged, as one undo step. Staged new tables close.
     @objc func discardChanges(_ sender: Any?) {
-        for tab in tableTabs { tab.endEditing() }
+        endAllEditing()
         guard !changes.isEmpty else { return NSSound.beep() }
         previewSheet?.close()
-        changes.discardAll()
-        for tab in tableTabs where tab.newTableID != nil { closeWithoutAsking(tab) }
+        changes.perform("Discard All", at: .sidebar) { changes.discardAll() }
         for tab in tableTabs { tab.reload() }
     }
 
     /// ⇧⌘P: every staged statement, in the order a commit runs them.
     @objc func previewChanges(_ sender: Any?) {
-        for tab in tableTabs { tab.endEditing() }
+        endAllEditing()
         guard !changes.isEmpty, let window else { return NSSound.beep() }
         let plan: CommitPlan
         do {
@@ -128,10 +142,14 @@ extension WorkspaceWindowController: NSMenuItemValidation {
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         switch item.action {
         case #selector(commitChanges(_:)):
-            item.title = "Commit Changes"
-            return !changes.isEmpty && !isCommitting
+            return !isCommitting
         case #selector(discardChanges(_:)), #selector(previewChanges(_:)):
             return !changes.isEmpty && !isCommitting
+        case #selector(toggleRightSidebar(_:)):
+            item.state = isInspectorVisible ? .on : .off
+            // Space is the shortcut only while a grid has the focus; anywhere else it's typing.
+            if NSApp.currentEvent?.type == .keyDown { return window?.firstResponder is DataGrid }
+            return true
         default:
             return true
         }

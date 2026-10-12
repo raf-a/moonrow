@@ -18,6 +18,8 @@ final class TableTabViewController: NSViewController, WorkspaceTab, NSMenuItemVa
     var onTabItemChange: (() -> Void)?
     /// Tables the foreign-key editor offers.
     var knownTables: () -> [TableRef] = { [] }
+    /// Names of the schema's tables and views, for checking a new name.
+    var existingNames: () -> [String] = { [] }
     /// Asks before commits are sent.
     var safety: SafetyGate?
 
@@ -120,6 +122,7 @@ final class TableTabViewController: NSViewController, WorkspaceTab, NSMenuItemVa
                 s.leadingAccessory = makeSwitch()
                 s.safety = safety
                 s.knownTables = { [weak self] in self?.knownTables() ?? [] }
+                s.existingNames = { [weak self] in self?.existingNames() ?? [] }
                 s.onPendingChange = { [weak self] in self?.onTabItemChange?() }
                 addChild(s)
                 structure = s
