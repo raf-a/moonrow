@@ -79,6 +79,20 @@ final class FilterBar: NSView {
         row.onApply?()
     }
 
+    /// A quick filter: `condition` goes in the first row when that's empty, else in a new row
+    /// at the end, and the checked rows are applied together.
+    func add(_ condition: FilterCondition) {
+        if let first = rows.first, rows.count == 1, first.isBlank {
+            first.set(condition)
+            first.isChecked = true
+        } else {
+            addRow(after: rows.last)
+            rows.last?.set(condition)
+            rows.last?.isChecked = true
+        }
+        apply(matchAll: matchPopup.indexOfSelectedItem == 0)
+    }
+
     /// Unchecked rows and rows without a usable condition are skipped.
     var checkedConditions: [FilterCondition] {
         rows.filter(\.isChecked).compactMap(\.condition)
@@ -198,6 +212,13 @@ private final class FilterRow: NSStackView, NSTextFieldDelegate {
     var isChecked: Bool {
         get { checkbox.state == .on }
         set { checkbox.state = newValue ? .on : .off }
+    }
+
+    /// Nothing typed in a row whose operator wants a value (a new or cleared row).
+    var isBlank: Bool {
+        let op = Self.operators[max(0, operatorPopup.indexOfSelectedItem)]
+        return valueField.stringValue.isEmpty && secondField.stringValue.isEmpty
+            && (op.takesValue || columnPopup.selectedTag() == Self.rawSQLTag)
     }
 
     var condition: FilterCondition? {

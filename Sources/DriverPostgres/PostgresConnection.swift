@@ -9,16 +9,19 @@ public final class PostgresConnection: DatabaseConnection, @unchecked Sendable {
     public let configuration: PostgresConfiguration
     /// `server_version` as reported at login, e.g. `18.0 (Debian 18.0-1.pgdg13+3)`.
     public let serverVersion: String
+    public let statementLog: StatementLog?
     private let host: SessionHost<PGSession>
 
-    private init(configuration: PostgresConfiguration, first: PGSession) {
+    private init(configuration: PostgresConfiguration, first: PGSession, log: StatementLog) {
         self.configuration = configuration
         self.serverVersion = first.parameters["server_version"] ?? ""
-        self.host = SessionHost(first: first) { try await PGSession.open(configuration) }
+        self.statementLog = log
+        self.host = SessionHost(first: first) { try await PGSession.open(configuration, log: log) }
     }
 
     public static func connect(_ configuration: PostgresConfiguration) async throws -> PostgresConnection {
-        PostgresConnection(configuration: configuration, first: try await PGSession.open(configuration))
+        let log = StatementLog()
+        return PostgresConnection(configuration: configuration, first: try await PGSession.open(configuration, log: log), log: log)
     }
 
     public func close() async {

@@ -8,16 +8,25 @@ public final class MySQLConnection: DatabaseConnection, @unchecked Sendable {
     public let configuration: MySQLConfiguration
     /// As the server announced it, e.g. `8.4.3` or `11.4.4-MariaDB-ubu2404`.
     public let serverVersion: String
+    public let statementLog: StatementLog?
     private let host: SessionHost<MySQLSession>
 
-    private init(configuration: MySQLConfiguration, first: MySQLSession) {
+    private init(configuration: MySQLConfiguration, first: MySQLSession, log: StatementLog) {
         self.configuration = configuration
         self.serverVersion = first.serverVersion
-        self.host = SessionHost(first: first) { try await MySQLSession.open(configuration) }
+        self.statementLog = log
+        self.host = SessionHost(first: first) {
+            let session = try await MySQLSession.open(configuration)
+            session.log = log
+            return session
+        }
     }
 
     public static func connect(_ configuration: MySQLConfiguration) async throws -> MySQLConnection {
-        MySQLConnection(configuration: configuration, first: try await MySQLSession.open(configuration))
+        let log = StatementLog()
+        let first = try await MySQLSession.open(configuration)
+        first.log = log
+        return MySQLConnection(configuration: configuration, first: first, log: log)
     }
 
     public var isMariaDB: Bool { serverVersion.contains("MariaDB") }

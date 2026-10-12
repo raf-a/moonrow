@@ -12,7 +12,8 @@ public actor SQLiteConnection: DatabaseConnection {
     private var cursors: [Int: Cursor] = [:]
     private var nextCursorID = 0
     private var isClosed = false
-    private var statementLog: StatementLog?
+    private var trace: Trace?
+    public nonisolated let statementLog: StatementLog? = StatementLog()
 
     public init(path: String, readOnly: Bool = false) throws {
         var raw: OpaquePointer?
@@ -45,8 +46,8 @@ public actor SQLiteConnection: DatabaseConnection {
     /// Reports every statement as it starts running, with bound values written inline (SQLite's
     /// expanded SQL), the way a server's statement log would. Nil turns it off.
     public func setStatementLog(_ log: (@Sendable (String) -> Void)?) {
-        statementLog = log.map(StatementLog.init)
-        guard let box = statementLog else {
+        trace = log.map(Trace.init)
+        guard let box = trace else {
             sqlite3_trace_v2(db.raw, 0, nil, nil)
             return
         }
@@ -56,7 +57,7 @@ public actor SQLiteConnection: DatabaseConnection {
             if let x, x.assumingMemoryBound(to: CChar.self).pointee == 0x2D { return 0 }
             guard let expanded = sqlite3_expanded_sql(OpaquePointer(p)) else { return 0 }
             defer { sqlite3_free(expanded) }
-            Unmanaged<StatementLog>.fromOpaque(ctx).takeUnretainedValue().write(String(cString: expanded))
+            Unmanaged<Trace>.fromOpaque(ctx).takeUnretainedValue().write(String(cString: expanded))
             return 0
         }, Unmanaged.passUnretained(box).toOpaque())
     }
@@ -98,14 +99,24 @@ public actor SQLiteConnection: DatabaseConnection {
     }
 
     private func open(_ statement: SQLStatement, cancel: CancelFlag) throws -> Int {
-        let stmt = try prepare(statement)
+        let stmt: OpaquePointer
+        do {
+            stmt = try prepare(statement)
+        } catch {
+            // Never reached a cursor; the log still hears about it.
+            if let log = statementLog, log.isObserved {
+                log.record(StatementLogEntry(sql: statement.sql, bindings: statement.bindings, started: Date(),
+                                             duration: .zero, error: StatementLog.describe(error)))
+            }
+            throw error
+        }
         let columns = (0..<sqlite3_column_count(stmt)).map { i in
             ResultColumn(
                 name: String(cString: sqlite3_column_name(stmt, i)),
                 typeName: sqlite3_column_decltype(stmt, i).map { String(cString: $0) })
         }
         nextCursorID += 1
-        cursors[nextCursorID] = Cursor(stmt: stmt, columns: columns, cancel: cancel)
+        cursors[nextCursorID] = Cursor(stmt: stmt, columns: columns, cancel: cancel, statement: statement)
         return nextCursorID
     }
 
@@ -126,17 +137,34 @@ public actor SQLiteConnection: DatabaseConnection {
                 rows.append(readRow(cursor.stmt, count: Int32(cursor.columns.count)))
             case SQLITE_DONE:
                 let affected = cursor.columns.isEmpty ? Int(sqlite3_changes(db.raw)) : nil
+                cursors[id]?.rows += rows.count
+                cursors[id]?.done = true
+                if let affected { cursors[id]?.rows = affected }
                 return (ResultBatch(columns: cursor.columns, rows: rows, rowsAffected: affected), true)
             default:
-                if rc & 0xFF == SQLITE_INTERRUPT, cursor.cancel.isSet { throw CancellationError() }
-                throw error(rc, sql: sqlite3_sql(cursor.stmt).map { String(cString: $0) })
+                if rc & 0xFF == SQLITE_INTERRUPT, cursor.cancel.isSet {
+                    cursors[id]?.error = "Cancelled"
+                    throw CancellationError()
+                }
+                let e = error(rc, sql: sqlite3_sql(cursor.stmt).map { String(cString: $0) })
+                cursors[id]?.error = e.message
+                throw e
             }
         }
+        cursors[id]?.rows += rows.count
         return (ResultBatch(columns: cursor.columns, rows: rows), false)
     }
 
     private func finish(_ id: Int) {
-        if let cursor = cursors.removeValue(forKey: id) { sqlite3_finalize(cursor.stmt) }
+        guard let cursor = cursors.removeValue(forKey: id) else { return }
+        sqlite3_finalize(cursor.stmt)
+        if let log = statementLog, log.isObserved {
+            // A consumer that stopped early cancelled the statement.
+            let error = cursor.error ?? (cursor.cancel.isSet && !cursor.done ? "Cancelled" : nil)
+            log.record(StatementLogEntry(
+                sql: cursor.statement.sql, bindings: cursor.statement.bindings, started: cursor.started,
+                duration: ContinuousClock.now - cursor.start, rows: cursor.error == nil ? cursor.rows : nil, error: error))
+        }
     }
 
     // MARK: - Transactions
@@ -401,6 +429,10 @@ public actor SQLiteConnection: DatabaseConnection {
     /// Runs a statement to completion, discarding rows. Returns rows changed.
     @discardableResult
     private func run(_ statement: SQLStatement) throws -> Int {
+        try statementLog!.timing(statement, rows: { $0 }) { try runUnlogged(statement) }
+    }
+
+    private func runUnlogged(_ statement: SQLStatement) throws -> Int {
         let stmt = try prepare(statement)
         defer { sqlite3_finalize(stmt) }
         while true {
@@ -411,6 +443,10 @@ public actor SQLiteConnection: DatabaseConnection {
     }
 
     private func query(_ statement: SQLStatement) throws -> [[DBValue]] {
+        try statementLog!.timing(statement, rows: { $0.count }) { try queryUnlogged(statement) }
+    }
+
+    private func queryUnlogged(_ statement: SQLStatement) throws -> [[DBValue]] {
         let stmt = try prepare(statement)
         defer { sqlite3_finalize(stmt) }
         var rows: [[DBValue]] = []
@@ -437,9 +473,16 @@ private struct Cursor {
     let stmt: OpaquePointer
     let columns: [ResultColumn]
     let cancel: CancelFlag
+    /// For the query log.
+    let statement: SQLStatement
+    let started = Date()
+    let start = ContinuousClock.now
+    var rows = 0
+    var done = false
+    var error: String?
 }
 
-private final class StatementLog: Sendable {
+private final class Trace: Sendable {
     let write: @Sendable (String) -> Void
     init(_ write: @escaping @Sendable (String) -> Void) { self.write = write }
 }

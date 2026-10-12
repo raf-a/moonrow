@@ -7,6 +7,12 @@ public enum CellContent: Sendable, Hashable {
     case defaultValue
     /// The row hasn't loaded yet.
     case pending
+
+    /// The value, when there is one.
+    public var value: DBValue? {
+        if case .value(let v) = self { return v }
+        return nil
+    }
 }
 
 /// One field of the right sidebar's form: a data column of the selected rows, or an attribute of

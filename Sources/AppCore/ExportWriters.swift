@@ -324,11 +324,51 @@ public struct MarkdownWriter: RowWriter {
     }
 }
 
+/// An HTML table: a header row of `<th>`, then one `<tr>` per row. Text is escaped, line breaks
+/// become `<br>`, NULL is an empty cell and blobs are hex.
+public struct HTMLWriter: RowWriter {
+    public init() {}
+
+    public mutating func header(columns: [String]) -> String {
+        "<table>\n<thead>\n<tr>" + columns.map { "<th>\(Self.escape($0))</th>" }.joined() + "</tr>\n</thead>\n<tbody>\n"
+    }
+
+    public mutating func rows(_ rows: [[DBValue]]) -> String {
+        rows.map { row in
+            "<tr>" + row.map { "<td>\(Self.text($0))</td>" }.joined() + "</tr>\n"
+        }.joined()
+    }
+
+    public mutating func footer() -> String { "</tbody>\n</table>\n" }
+
+    private static func text(_ v: DBValue) -> String {
+        switch v {
+        case .null: return ""
+        case .blob(let d): return CSVWriter.hex(d)
+        default: return escape(v.displayString).replacing(/\r\n|\r|\n/, with: "<br>")
+        }
+    }
+
+    static func escape(_ s: String) -> String {
+        var out = ""
+        for c in s {
+            switch c {
+            case "&": out += "&amp;"
+            case "<": out += "&lt;"
+            case ">": out += "&gt;"
+            case "\"": out += "&quot;"
+            default: out.append(c)
+            }
+        }
+        return out
+    }
+}
+
 // MARK: - Copy Rows As
 
 /// Formats for the grids' "Copy Rows As" menu.
 public enum CopyFormat: String, CaseIterable, Sendable {
-    case csv, json, sqlInsert, markdown
+    case csv, json, sqlInsert, markdown, html
 
     public var title: String {
         switch self {
@@ -336,6 +376,7 @@ public enum CopyFormat: String, CaseIterable, Sendable {
         case .json: "JSON"
         case .sqlInsert: "SQL INSERT"
         case .markdown: "Markdown Table"
+        case .html: "HTML"
         }
     }
 
@@ -350,6 +391,9 @@ public enum CopyFormat: String, CaseIterable, Sendable {
             return w.document(columns: columns, rows: rows)
         case .markdown:
             var w = MarkdownWriter()
+            return w.document(columns: columns, rows: rows)
+        case .html:
+            var w = HTMLWriter()
             return w.document(columns: columns, rows: rows)
         case .sqlInsert:
             var w = SQLWriter(SQLExportOptions(includeStructure: false), dialect: dialect, table: table ?? TableRef("result"))

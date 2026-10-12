@@ -104,6 +104,19 @@ struct CopyFormatTests {
 
             """)
         #expect(CopyFormat.csv.text(columns: ["id"], rows: [[.integer(1)]], dialect: SQLiteDialect(), table: nil) == "id\n1\n")
+        #expect(CopyFormat.html.text(columns: ["id", "<v>"], rows: [[.integer(1), .text("a & \"b\"\nc")], [.null, .blob(Data([0xAB]))]],
+                                     dialect: SQLiteDialect(), table: nil) == """
+            <table>
+            <thead>
+            <tr><th>id</th><th>&lt;v&gt;</th></tr>
+            </thead>
+            <tbody>
+            <tr><td>1</td><td>a &amp; &quot;b&quot;<br>c</td></tr>
+            <tr><td></td><td>\\xab</td></tr>
+            </tbody>
+            </table>
+
+            """)
     }
 }
 

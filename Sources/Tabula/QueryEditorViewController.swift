@@ -16,6 +16,12 @@ final class QueryEnvironment {
     var recentCompletions: [String] = []
     /// A statement created, dropped or altered something.
     var onSchemaChange: (() -> Void)?
+    /// Which columns the table grids show (shared by the workspace's table tabs).
+    var columnLayouts: ColumnLayouts?
+    /// The folder selected in the sidebar's Queries pane; Add to Queries suggests it.
+    var selectedQueriesFolder: (() -> String?)?
+    /// The last value typed for each query parameter.
+    var parameterInputs: [String: QueryParametersSheet.Input] = [:]
 
     init(connection: any DatabaseConnection, history: QueryHistory, savedQueries: SavedQueries, safety: SafetyGate) {
         self.connection = connection
@@ -52,8 +58,8 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
     private var isInsertingCompletion = false
 
     private let split = NSSplitView()
-    private let runCurrentButton = NSButton(title: "Run Current", target: nil, action: nil)
-    private let runAllButton = NSButton(title: "Run All", target: nil, action: nil)
+    /// Runs the current statement or all of them, as Settings' Run button default says.
+    private let runButton = NSButton(title: "Run Current", target: nil, action: nil)
     private let stopButton = NSButton(title: "Stop", target: nil, action: nil)
     private let runMenuButton = NSPopUpButton(frame: .zero, pullsDown: true)
     private let limitPopup = NSPopUpButton()
@@ -200,14 +206,10 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
         spinner.controlSize = .small
         spinner.isDisplayedWhenStopped = false
 
-        runCurrentButton.target = self
-        runCurrentButton.action = #selector(runCurrentQuery(_:))
-        runCurrentButton.toolTip = "Run the statement at the cursor, or the selected text (⌘↩)"
-        runCurrentButton.image = NSImage(systemSymbolName: "play.fill", accessibilityDescription: nil)
-        runCurrentButton.imagePosition = .imageLeading
-        runAllButton.target = self
-        runAllButton.action = #selector(runAllQueries(_:))
-        runAllButton.toolTip = "Run every statement (⇧⌘↩)"
+        runButton.target = self
+        runButton.action = #selector(runDefault(_:))
+        runButton.image = NSImage(systemSymbolName: "play.fill", accessibilityDescription: nil)
+        runButton.imagePosition = .imageLeading
         stopButton.target = self
         stopButton.action = #selector(cancelQuery(_:))
         stopButton.toolTip = "Stop the running query (⌘.)"
@@ -224,26 +226,39 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
         (runMenuButton.cell as? NSPopUpButtonCell)?.arrowPosition = .noArrow
         runMenuButton.imagePosition = .imageOnly
         runMenuButton.controlSize = .small
-        for (title, action, key, mods) in [
-            ("Run All", #selector(runAllQueries(_:)), "\r", NSEvent.ModifierFlags([.command, .shift])),
-            ("Run Current", #selector(runCurrentQuery(_:)), "\r", .command),
-            ("Add to Queries…", #selector(addToQueries(_:)), "", .command),
-            ("Save SQL As…", #selector(saveSQLAs(_:)), "S", [.command, .shift]),
-        ] {
-            if title == "Add to Queries…" { menu.addItem(.separator()) }
-            let item = menu.addItem(withTitle: title, action: action, keyEquivalent: key)
-            item.keyEquivalentModifierMask = mods
-            item.target = self
+        // No shortcuts here: AppKit would take them off the main menu's items (it gives each
+        // shortcut to one item).
+        for (title, action) in [
+            ("Run All", #selector(runAllQueries(_:))),
+            ("Run Current", #selector(runCurrentQuery(_:))),
+            ("-", nil),
+            ("Beautify SQL", #selector(formatSQL(_:))),
+            ("Compact SQL", #selector(compactSQL(_:))),
+            ("-", nil),
+            ("Add to Queries…", #selector(addToQueries(_:))),
+            ("Save SQL As…", #selector(saveSQLAs(_:))),
+        ] as [(String, Selector?)] {
+            if title == "-" { menu.addItem(.separator()); continue }
+            menu.addItem(withTitle: title, action: action, keyEquivalent: "").target = self
         }
-        for b in [runCurrentButton, runAllButton, stopButton] {
+        menu.addItem(.separator())
+        let defaults = menu.addItem(withTitle: "Default", action: nil, keyEquivalent: "")
+        defaults.submenu = NSMenu(title: "Default")
+        for (title, all) in [("Run Current", false), ("Run All", true)] {
+            let item = defaults.submenu!.addItem(withTitle: title, action: #selector(setRunDefault(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = all ? 1 : 0
+        }
+        for b in [runButton, stopButton] {
             b.bezelStyle = .accessoryBarAction
             b.controlSize = .small
             b.font = .systemFont(ofSize: 11)
         }
+        updateRunButton()
 
         let spacer = NSView()
         spacer.setContentHuggingPriority(.init(1), for: .horizontal)
-        let bar = NSStackView(views: [positionLabel, spacer, spinner, limitPopup, stopButton, runAllButton, runCurrentButton, runMenuButton])
+        let bar = NSStackView(views: [positionLabel, spacer, spinner, limitPopup, stopButton, runButton, runMenuButton])
         bar.spacing = 6
         bar.edgeInsets = NSEdgeInsets(top: 0, left: 8, bottom: 0, right: 8)
         bar.heightAnchor.constraint(equalToConstant: 30).isActive = true
@@ -281,6 +296,24 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
         run(ScriptSelection.all(in: editor.string, selection: selection, dialect: dialect))
     }
 
+    /// The Run button: the current statement or all, as chosen in its menu's Default ▸.
+    @objc func runDefault(_ sender: Any?) {
+        AppStyle.settings.runButtonRunsAll ? runAllQueries(sender) : runCurrentQuery(sender)
+    }
+
+    @objc private func setRunDefault(_ sender: NSMenuItem) {
+        let all = sender.tag == 1
+        guard let store = (NSApp.delegate as? AppDelegate)?.settings else { return }
+        try? store.update { $0.runButtonRunsAll = all }
+    }
+
+    private func updateRunButton() {
+        let all = AppStyle.settings.runButtonRunsAll
+        runButton.title = all ? "Run All" : "Run Current"
+        runButton.toolTip = all ? "Run every statement, or the selected text (⇧⌘↩)"
+            : "Run the statement at the cursor, or the selected text (⌘↩)"
+    }
+
     @objc func cancelQuery(_ sender: Any?) {
         guard let runTask else { return NSSound.beep() }
         runTask.cancel()
@@ -297,6 +330,39 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
         guard !isRunning, !isAwaitingApproval else { return NSSound.beep() }
         guard !statements.isEmpty else { return NSSound.beep() }
         completion.hide()
+        withParameters(statements) { [weak self] in self?.approve($0) }
+    }
+
+    /// Fills in the statements' parameters, asking for their values, when there are any and
+    /// Settings ▸ General asks for them. The statements keep their ranges in the editor.
+    private func withParameters(_ statements: [SQLStatementRange], then proceed: @escaping ([SQLStatementRange]) -> Void) {
+        let dialect = environment.connection.dialect
+        guard AppStyle.settings.queryParameters, let window = view.window else { return proceed(statements) }
+        let found = QueryParameters.find(in: statements.map(\.text), dialect: dialect.lexer, styles: QueryParameters.styles(for: dialect))
+        guard !found.keys.isEmpty else { return proceed(statements) }
+        isAwaitingApproval = true
+        let sheet = QueryParametersSheet(keys: found.keys, remembered: environment.parameterInputs)
+        parameterSheet = sheet
+        sheet.begin(on: window) { [weak self] inputs in
+            guard let self else { return }
+            self.isAwaitingApproval = false
+            self.parameterSheet = nil
+            guard let inputs else { return }
+            self.environment.parameterInputs.merge(inputs) { $1 }
+            let values = inputs.mapValues { QueryParameters.sql(for: $0.text, kind: $0.kind, dialect: dialect) }
+            let texts = QueryParameters.substitute(statements.map(\.text), found.occurrences, values: values)
+            proceed(zip(statements, texts).map { statement, text in
+                var s = statement
+                s.text = text
+                return s
+            })
+        }
+    }
+
+    /// For the dev harness: the parameters sheet while it's asking.
+    private(set) var parameterSheet: QueryParametersSheet?
+
+    private func approve(_ statements: [SQLStatementRange]) {
         guard environment.safety.requirement(for: statements.map(\.text)) != .none else { return start(statements) }
         isAwaitingApproval = true
         Task {
@@ -345,8 +411,7 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
     private func setRunning(_ running: Bool) {
         isRunning = running
         stopButton.isHidden = !running
-        runCurrentButton.isEnabled = !running
-        runAllButton.isEnabled = !running
+        runButton.isEnabled = !running
         limitPopup.isEnabled = !running
         if running { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
     }
@@ -411,6 +476,7 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
 
     /// The theme or font changed in the preferences.
     @objc private func styleChanged() {
+        updateRunButton()
         editor.applyStyle()
         highlighter.highlight(editor.textStorage!, delta: 0, full: true)
         ruler.textChanged()
@@ -456,25 +522,33 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
     /// Saves the text to the connection's saved queries: a tab opened from one writes it back,
     /// any other asks for a name.
     @objc func addToQueries(_ sender: Any?) {
-        if let savedQuery { return write(to: savedQuery.name, overwrite: true) }
+        if let savedQuery { return write(to: savedQuery.name, in: savedQuery.folder, overwrite: true) }
         guard let window = view.window else { return }
+        let store = environment.savedQueries
         let alert = NSAlert()
         alert.messageText = "Add to Queries"
         alert.informativeText = "Saved queries are listed under Queries in the sidebar."
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 22))
+        let field = NSTextField(frame: NSRect(x: 0, y: 30, width: 260, height: 22))
         field.placeholderString = "Name"
-        field.stringValue = savedQuery?.name ?? ""
-        alert.accessoryView = field
+        let folder = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        folder.addItem(withTitle: "No Folder")
+        folder.addItems(withTitles: store.folders)
+        if let preferred = environment.selectedQueriesFolder?(), let i = store.folders.firstIndex(of: preferred) { folder.selectItem(at: i + 1) }
+        let box = NSView(frame: NSRect(x: 0, y: 0, width: 260, height: 54))
+        box.addSubview(field)
+        box.addSubview(folder)
+        alert.accessoryView = box
         alert.addButton(withTitle: "Save")
         alert.addButton(withTitle: "Cancel")
         alert.window.initialFirstResponder = field
         alert.beginSheetModal(for: window) { [weak self] response in
             guard response == .alertFirstButtonReturn, let self else { return }
             let name = field.stringValue
-            if let existing = self.environment.savedQueries.query(named: name), existing != self.savedQuery {
-                self.confirmReplace(existing.name) { self.write(to: name, overwrite: true) }
+            let inFolder = folder.indexOfSelectedItem > 0 ? store.folders[folder.indexOfSelectedItem - 1] : ""
+            if let existing = store.query(named: name, in: inFolder), existing != self.savedQuery {
+                self.confirmReplace(existing.name) { self.write(to: name, in: inFolder, overwrite: true) }
             } else {
-                self.write(to: name, overwrite: self.environment.savedQueries.query(named: name) != nil)
+                self.write(to: name, in: inFolder, overwrite: store.query(named: name, in: inFolder) != nil)
             }
         }
     }
@@ -516,9 +590,9 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
         }
     }
 
-    private func write(to name: String, overwrite: Bool) {
+    private func write(to name: String, in folder: String, overwrite: Bool) {
         do {
-            savedQuery = try environment.savedQueries.save(editor.string, as: name, overwrite: overwrite)
+            savedQuery = try environment.savedQueries.save(editor.string, as: name, in: folder, overwrite: overwrite)
             isDirty = false
             autosaveTask?.cancel()
             onTabItemChange?()
@@ -542,7 +616,7 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
         guard isDirty, let savedQuery else { return }
         isDirty = false
         do {
-            try environment.savedQueries.save(editor.string, as: savedQuery.name, overwrite: true)
+            try environment.savedQueries.save(editor.string, as: savedQuery.name, in: savedQuery.folder, overwrite: true)
         } catch {
             presentError(error, title: "Couldn't save “\(savedQuery.name)”")
         }
@@ -563,7 +637,36 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
 
     // MARK: - Menus
 
+    /// Edit ▸ Add Row's ⌘I, in a query tab: Beautify.
+    @objc func addRow(_ sender: Any?) { formatSQL(sender) }
+
+    /// ⌘I: lays out the selected statements, or the whole script, as one undoable change.
+    @objc func formatSQL(_ sender: Any?) {
+        rewrite { SQLFormatter.format($0, dialect: self.dialect) }
+    }
+
+    /// ⇧⌘I: the selection, or the whole script, on as few lines as possible.
+    @objc func compactSQL(_ sender: Any?) {
+        rewrite { SQLFormatter.compact($0, dialect: self.dialect) }
+    }
+
+    private func rewrite(_ transform: (String) -> String) {
+        let text = editor.string as NSString
+        var range = editor.selectedRange()
+        if range.length == 0 { range = NSRange(location: 0, length: text.length) }
+        let old = text.substring(with: range)
+        let new = transform(old)
+        guard new != old else { return }
+        guard editor.shouldChangeText(in: range, replacementString: new) else { return }
+        editor.textStorage?.replaceCharacters(in: range, with: new)
+        editor.didChangeText()
+        editor.setSelectedRange(range.location == 0 && range.length == text.length
+            ? NSRange(location: 0, length: 0) : NSRange(location: range.location, length: (new as NSString).length))
+        view.window?.makeFirstResponder(editor)
+    }
+
     @objc func toggleLineComment(_ sender: Any?) { editor.toggleLineComment(sender) }
+    @objc func toggleBlockComment(_ sender: Any?) { editor.toggleBlockComment(sender) }
 
     /// ⌘F: tables filter, query tabs find.
     @objc func toggleFilters(_ sender: Any?) {
@@ -576,9 +679,18 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         switch item.action {
         case #selector(runCurrentQuery(_:)), #selector(runAllQueries(_:)):
+            if item.action == #selector(runCurrentQuery(_:)), item.menu?.title == "Connection" { item.title = "Run Current Statement" }
             return !isRunning && !isAwaitingApproval
+        case #selector(addRow(_:)):
+            if item.menu?.title == "Edit" { item.title = "Beautify SQL" }
+            return !isRunning
         case #selector(cancelQuery(_:)):
             return isRunning
+        case #selector(setRunDefault(_:)):
+            item.state = (item.tag == 1) == AppStyle.settings.runButtonRunsAll ? .on : .off
+            return true
+        case #selector(formatSQL(_:)), #selector(compactSQL(_:)):
+            return !isRunning
         case #selector(toggleFilters(_:)):
             item.title = "Find…"
             return true
@@ -654,6 +766,9 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
         environment.noteCompletion(item.text)
         completionContext = nil
     }
+
+    /// For the dev harness: what the Run button runs.
+    var runButtonTitle: String { runButton.title }
 
     /// For the dev harness: the items the list is showing.
     var completionItems: [SQLCompletion.Item] { completion.items }

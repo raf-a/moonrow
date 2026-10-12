@@ -17,6 +17,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     let leftSidebar: LeftSidebarController
     /// The panes of tabs side by side; `content` is the active one.
     let panes = WorkspacePanesController()
+    /// Every statement the connection sends (the bottom panel, ⌃⌘C).
+    let queryLog = QueryLog()
+    /// Opens another session with the workspace's login (Running Queries).
+    var openSession: (() async throws -> any DatabaseConnection)?
+    /// For the dev harness: the Running Queries sheet while it's open.
+    private(set) var runningQueries: RunningQueriesSheet?
+    private(set) var center: WorkspaceCenterController!
     var content: WorkspaceTabsController { panes.active }
     /// The right sidebar: the selected rows, columns or indexes as a form.
     let inspector = InspectorViewController()
@@ -59,7 +66,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         sideItem.minimumThickness = 180
         sideItem.maximumThickness = 420
         split.addSplitViewItem(sideItem)
-        let mainItem = NSSplitViewItem(viewController: panes)
+        queryLog.follow(connection)
+        center = WorkspaceCenterController(panes: panes, log: QueryLogViewController(log: queryLog, dialect: connection.dialect))
+        let mainItem = NSSplitViewItem(viewController: center)
         mainItem.minimumThickness = 300
         split.addSplitViewItem(mainItem)
         let inspectorItem = NSSplitViewItem(inspectorWithViewController: inspector)
@@ -113,6 +122,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         leftSidebar.queries.onOpen = { [weak self] query in self?.openSavedQuery(query) }
         leftSidebar.queries.onInsert = { [weak self] text in self?.insertIntoEditor(text) }
         leftSidebar.queries.onChange = { [weak self] old, new in self?.savedQueryChanged(old, to: new) }
+        environment.selectedQueriesFolder = { [weak self] in self?.leftSidebar.queries.selectedFolder }
         leftSidebar.history.onInsert = { [weak self] text in self?.insertIntoEditor(text) }
         leftSidebar.history.onOpenInNewTab = { [weak self] text in self?.newQuery(text: text) }
         environment.onSchemaChange = { [weak self] in self?.sidebar.reload() }
@@ -374,6 +384,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     }
 
     func windowWillClose(_ notification: Notification) {
+        connection.statementLog?.observe(nil)
         // Dragging the divider can hide the right sidebar too.
         UserDefaults.standard.set(isInspectorVisible, forKey: Self.inspectorVisibleKey)
         for pane in panes.panes { pane.closeAll() }
@@ -623,6 +634,27 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
 
     /// The count the Changes item shows.
     private(set) var shownChangeCount = 0
+
+    // MARK: - Running queries
+
+    /// Connection ▸ Running Queries…: the server's sessions, on a session of the sheet's own.
+    @objc func showRunningQueries(_ sender: Any?) {
+        guard ServerSessions.isSupported(connection), let openSession, let window, window.attachedSheet == nil else {
+            return NSSound.beep()
+        }
+        let connection = connection
+        Task {
+            let own = await ServerSessions.ownID(of: connection)
+            let sheet = RunningQueriesSheet(open: openSession, workspaceID: own)
+            runningQueries = sheet
+            sheet.begin(on: window)
+        }
+    }
+
+    // MARK: - Query log
+
+    /// ⌃⌘C, or View ▸ Sidebars ▸ Query Log.
+    @objc func toggleQueryLog(_ sender: Any?) { center.toggleLog() }
 
     // MARK: - Right sidebar
 

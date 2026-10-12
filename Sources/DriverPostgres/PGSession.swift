@@ -49,6 +49,8 @@ final class PGSession: WireSession, @unchecked Sendable {
     private let cancelLock = NSLock()
     private var acceptsCancel = false
     private var cancelTask: Task<Void, Never>?
+    /// The connection's query log.
+    var log: StatementLog?
 
     private init(wire: WireChannel, configuration: PostgresConfiguration) {
         self.wire = wire
@@ -58,6 +60,12 @@ final class PGSession: WireSession, @unchecked Sendable {
     var isAlive: Bool { !isBroken && wire.isActive }
 
     // MARK: - Connecting
+
+    static func open(_ c: PostgresConfiguration, log: StatementLog?) async throws -> PGSession {
+        let session = try await open(c)
+        session.log = log
+        return session
+    }
 
     static func open(_ c: PostgresConfiguration) async throws -> PGSession {
         switch c.tls.mode {
@@ -223,6 +231,22 @@ final class PGSession: WireSession, @unchecked Sendable {
     // MARK: - Statements
 
     func run(
+        _ statement: SQLStatement, batchSize: Int, cancel: CancelSignal,
+        onBatch: @Sendable (ResultBatch) -> Void
+    ) async throws {
+        guard let log, log.isObserved else {
+            return try await send(statement, batchSize: batchSize, cancel: cancel, onBatch: onBatch)
+        }
+        let counter = RowCounter()
+        try await log.timing(statement, rows: { counter.value }) {
+            try await send(statement, batchSize: batchSize, cancel: cancel) { batch in
+                counter.add(batch)
+                onBatch(batch)
+            }
+        }
+    }
+
+    private func send(
         _ statement: SQLStatement, batchSize: Int, cancel: CancelSignal,
         onBatch: @Sendable (ResultBatch) -> Void
     ) async throws {

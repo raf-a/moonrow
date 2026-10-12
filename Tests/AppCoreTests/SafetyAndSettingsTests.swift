@@ -154,10 +154,11 @@ private func tempDir() -> URL {
     }
 
     @Test func defaultsAreUnique() {
+        // AppKit clears a shortcut that another main-menu item already has.
         let bindings = Keymap.commands.map(\.defaultBinding).filter { !$0.isEmpty }
         #expect(Set(bindings).count == bindings.count)
         // Space (right sidebar) and ⌥⌫ (truncate) have no ⌘; Add to Queries has none.
-        let unusual = Set(["toggleRightSidebar:", "truncateTable:", "addToQueries:"])
+        let unusual = Set(["toggleRightSidebar:", "truncateTable:", "addToQueries:", "showRunningQueries:"])
         #expect(Keymap.commands.allSatisfy { $0.defaultBinding.isValid || unusual.contains($0.id) })
         #expect(Keymap.command("addToQueries:")?.defaultBinding.isEmpty == true)
         #expect(Keymap.command("toggleRightSidebar:")?.defaultBinding.display == "Space")

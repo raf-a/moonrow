@@ -845,6 +845,7 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
             item.state = row.map { editor.columns[$0].value.isAutoIncrement } == true ? .on : .off
             return isEditable && row != nil
         case #selector(addRow(_:)), #selector(addIndex(_:)):
+            if item.action == #selector(addRow(_:)), item.menu?.title == "Edit" { item.title = "Add Column" }
             return isEditable
         case #selector(deleteRows(_:)), #selector(duplicateRows(_:)), #selector(setType(_:)), #selector(editForeignKey(_:)):
             let grid = item.menu === indexGrid.menu ? indexGrid : item.menu === columnsGrid.menu ? columnsGrid : activeGrid

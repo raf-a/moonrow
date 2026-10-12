@@ -21,6 +21,10 @@ import AppKit
     @objc optional func setNull(_ sender: Any?)
     @objc optional func setEmpty(_ sender: Any?)
     @objc optional func setDefault(_ sender: Any?)
+    @objc optional func setValueFromFile(_ sender: Any?)
+    @objc optional func quickLook(_ sender: Any?)
+    @objc optional func copySelectedCells(_ sender: Any?)
+    @objc optional func pasteIntoSelectedCells(_ sender: Any?)
     @objc optional func toggleFilters(_ sender: Any?)
     @objc optional func nextPage(_ sender: Any?)
     @objc optional func previousPage(_ sender: Any?)
@@ -45,6 +49,11 @@ import AppKit
     @objc optional func saveSQLAs(_ sender: Any?)
     @objc optional func addToQueries(_ sender: Any?)
     @objc optional func toggleLineComment(_ sender: Any?)
+    @objc optional func toggleBlockComment(_ sender: Any?)
+    @objc optional func formatSQL(_ sender: Any?)
+    @objc optional func compactSQL(_ sender: Any?)
+    @objc optional func toggleQueryLog(_ sender: Any?)
+    @objc optional func showRunningQueries(_ sender: Any?)
     @objc optional func showSavedQueries(_ sender: Any?)
     @objc optional func showQueryHistory(_ sender: Any?)
 
@@ -140,6 +149,8 @@ enum MainMenu {
             m.add("Discard Changes", #selector(TabulaActions.discardChanges(_:)), "\u{8}", [.command, .shift])
             m.add("Preview Changes", #selector(TabulaActions.previewChanges(_:)), "p", [.command, .shift])
             m.addItem(.separator())
+            // ⌘I: Beautify SQL in a query tab, which answers it (AppKit gives a shortcut to one
+            // item only).
             m.add("Add Row", #selector(TabulaActions.addRow(_:)), "i")
             m.add("Duplicate Rows", #selector(TabulaActions.duplicateRows(_:)), "d")
             // Titled by whoever has the focus: Delete Rows, Delete Columns, Delete Table, …
@@ -150,13 +161,19 @@ enum MainMenu {
             setValue.submenu!.add("NULL", #selector(TabulaActions.setNull(_:)))
             setValue.submenu!.add("Empty String", #selector(TabulaActions.setEmpty(_:)))
             setValue.submenu!.add("DEFAULT", #selector(TabulaActions.setDefault(_:)))
+            setValue.submenu!.addItem(.separator())
+            setValue.submenu!.add("From File…", #selector(TabulaActions.setValueFromFile(_:)))
             m.addItem(.separator())
             m.add("Cut", #selector(NSText.cut(_:)), "x")
             m.add("Copy", #selector(NSText.copy(_:)), "c")
+            m.add("Copy Selected Cells", #selector(TabulaActions.copySelectedCells(_:)), "c", [.command, .shift])
             m.add("Paste", #selector(NSText.paste(_:)), "v")
+            m.add("Paste into Selected Cells", #selector(TabulaActions.pasteIntoSelectedCells(_:)), "v", [.command, .shift])
             m.add("Select All", #selector(NSText.selectAll(_:)), "a")
             m.addItem(.separator())
             m.add("Toggle Comment", #selector(TabulaActions.toggleLineComment(_:)), "/")
+            m.add("Toggle Block Comment", #selector(TabulaActions.toggleBlockComment(_:)), "/", [.command, .option])
+            m.add("Compact SQL", #selector(TabulaActions.compactSQL(_:)), "i", [.command, .shift])
             let find = m.add("Find", nil)
             find.submenu = NSMenu(title: "Find")
             for (title, action, key, mods) in [
@@ -180,6 +197,7 @@ enum MainMenu {
             sidebars.submenu = NSMenu(title: "Sidebars")
             sidebars.submenu!.add("Left Sidebar", #selector(NSSplitViewController.toggleSidebar(_:)), "0")
             sidebars.submenu!.add("Right Sidebar", #selector(TabulaActions.toggleRightSidebar(_:)), " ", [])
+            sidebars.submenu!.add("Query Log", #selector(TabulaActions.toggleQueryLog(_:)), "c", [.command, .control])
             m.addItem(.separator())
             // Workspace windows can share one window's tabs (Window ▸ Merge All Windows).
             m.add("Show Tab Bar", #selector(NSWindow.toggleTabBar(_:)))
@@ -193,9 +211,11 @@ enum MainMenu {
             m.add("Reload", #selector(TabulaActions.reloadWorkspace(_:)), "r")
             m.add("Reload Table", #selector(TabulaActions.reloadCurrentTab(_:)), "r", [.command, .option])
             m.addItem(.separator())
+            // ⌘↩: in a grid, the cell editor, which answers it under its own title.
             m.add("Run Current Statement", #selector(TabulaActions.runCurrentQuery(_:)), "\r")
             m.add("Run All Statements", #selector(TabulaActions.runAllQueries(_:)), "\r", [.command, .shift])
             m.add("Stop Query", #selector(TabulaActions.cancelQuery(_:)), ".")
+            m.add("Running Queries…", #selector(TabulaActions.showRunningQueries(_:)))
             m.addItem(.separator())
             m.add("Open Connection…", #selector(TabulaActions.showConnections(_:)), "k", [.command, .shift])
         }

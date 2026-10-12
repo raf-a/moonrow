@@ -240,6 +240,7 @@ extension WorkspaceWindowController {
 
     func configure(_ tab: TableTabViewController) -> TableTabViewController {
         tab.safety = environment.safety
+        tab.columnLayouts = environment.columnLayouts
         tab.existingNames = { [weak self] in self?.existingNames ?? [] }
         tab.knownTables = { [weak self] in
             self?.environment.catalog.objects.filter { $0.kind == .table }.map(\.ref) ?? []

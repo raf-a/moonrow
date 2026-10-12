@@ -30,10 +30,16 @@ public protocol DatabaseConnection: Sendable {
     /// The statements that create the object, for the DDL view and "Copy as CREATE".
     func definition(of object: DatabaseObject) async throws -> String
 
+    /// Reports every statement sent on this connection (the workspace's query log). Nil for
+    /// connections that don't.
+    var statementLog: StatementLog? { get }
+
     func close() async
 }
 
 extension DatabaseConnection {
+    public var statementLog: StatementLog? { nil }
+
     public func structure(of table: TableRef) async throws -> TableStructure {
         TableStructure(
             table: table, columns: try await columns(of: table), indexes: try await indexes(of: table),

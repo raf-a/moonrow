@@ -20,6 +20,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TabulaActions {
     /// Shared by every workspace open on the same connection.
     private var histories: [UUID: QueryHistory] = [:]
     private var savedQueries: [UUID: SavedQueries] = [:]
+    private var columnLayouts: [UUID: ColumnLayouts] = [:]
 
     /// Dev harness only: accept unknown SSH host keys without asking.
     var autoTrustHostKeys = false
@@ -320,6 +321,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TabulaActions {
                 let ssh = sshLogin(for: config, password: sshPassword, in: window)
                 let workspace = openWorkspace(
                     config, try await ConnectionFactory.open(config, password: login, ssh: ssh), password: login, placement: placement)
+                // Running Queries opens a session of its own the same way.
+                workspace.openSession = { try await ConnectionFactory.open(config, password: login, ssh: ssh) }
                 onOpen?(workspace)
             } catch {
                 present(error, title: "Couldn't connect to \(config.displayName)", in: window)
@@ -389,8 +392,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TabulaActions {
         let saved = savedQueries[config.id] ?? SavedQueries(directory: SavedQueries.directory(root: dataRoot, connection: config.id))
         histories[config.id] = history
         savedQueries[config.id] = saved
+        let layouts = columnLayouts[config.id] ?? ColumnLayouts(fileURL: ColumnLayouts.fileURL(root: dataRoot, connection: config.id))
+        columnLayouts[config.id] = layouts
         let workspace = WorkspaceWindowController(
             config: config, connection: connection, history: history, savedQueries: saved, password: password)
+        workspace.environment.columnLayouts = layouts
         // A level picked in the toolbar is kept with the saved connection.
         workspace.safety.onLevelChange = { [weak self] level in
             guard let self, var saved = self.store.connection(id: config.id) else { return }

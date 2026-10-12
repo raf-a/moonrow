@@ -4,13 +4,55 @@ import DBKit
 
 /// The table view behind the data grid. Rows are selected as usual; one column is the cell
 /// cursor ("focused column"), so keyboard edits know which cell of the selected rows to touch.
+/// ⇧← / ⇧→ and ⇧-clicks stretch the cursor over a span of columns: the selected cells are the
+/// selected rows across that span.
 @MainActor
 final class DataGrid: NSTableView {
     /// Identifier of the column holding the cell cursor.
     var focusedColumn: NSUserInterfaceItemIdentifier? {
-        didSet { if focusedColumn != oldValue { onFocusChange?(oldValue) } }
+        didSet {
+            let oldAnchor = anchorColumn
+            if !isExtending { anchorColumn = focusedColumn }
+            if focusedColumn != oldValue || anchorColumn != oldAnchor { onFocusChange?(oldValue) }
+        }
     }
+    /// The other end of the selected span of columns; the cursor is one end.
+    private(set) var anchorColumn: NSUserInterfaceItemIdentifier?
+    private var isExtending = false
     var onFocusChange: ((_ previous: NSUserInterfaceItemIdentifier?) -> Void)?
+
+    /// Display columns between the anchor and the cursor; nil without a cursor.
+    var selectedColumnSpan: ClosedRange<Int>? {
+        guard let focus = focusedColumnIndex else { return nil }
+        let anchor = anchorColumn.map { column(withIdentifier: $0) }.flatMap { $0 >= 0 ? $0 : nil } ?? focus
+        return min(anchor, focus)...max(anchor, focus)
+    }
+
+    /// Moves the cursor to `column`, keeping the anchor where it is.
+    func extendFocus(to column: Int) {
+        guard column >= 0, column < numberOfColumns else { return }
+        isExtending = true
+        defer { isExtending = false }
+        focusedColumn = tableColumns[column].identifier
+        scrollColumnToVisible(column)
+    }
+
+    /// Whether the cell at a display column of a row is selected.
+    func isCellSelected(row: Int, column: Int) -> Bool {
+        guard selectedRowIndexes.contains(row), let span = selectedColumnSpan else { return false }
+        return span.contains(column)
+    }
+
+    func isCellSelected(row: Int, column: NSTableColumn) -> Bool {
+        guard selectedRowIndexes.contains(row), let span = selectedColumnSpan else { return false }
+        if span.count == 1 { return column.identifier == focusedColumn }
+        return span.contains(self.column(withIdentifier: column.identifier))
+    }
+
+    /// Display columns of the selected cells, as an index set.
+    var selectedCellColumns: IndexSet {
+        selectedColumnSpan.map { IndexSet(integersIn: $0) } ?? []
+    }
     /// Return or Enter on a selected row.
     var onEdit: (() -> Void)?
     /// ⌥Return: the menu to pop up at the cursor.
@@ -67,6 +109,10 @@ final class DataGrid: NSTableView {
             moveFocus(by: -1)
         case (124, []):  // →
             moveFocus(by: 1)
+        case (123, .shift):
+            extendFocus(to: (focusedColumnIndex ?? 1) - 1)
+        case (124, .shift):
+            extendFocus(to: (focusedColumnIndex ?? -1) + 1)
         case (51, []), (117, []):  // Delete, Forward Delete
             NSApp.sendAction(#selector(TabulaActions.deleteRows(_:)), to: nil, from: self)
         case (49, []):  // Space: the right sidebar
@@ -78,7 +124,9 @@ final class DataGrid: NSTableView {
 
     override func mouseDown(with event: NSEvent) {
         let c = column(at: convert(event.locationInWindow, from: nil))
-        if c >= 0 { focusedColumn = tableColumns[c].identifier }
+        if c >= 0 {
+            if event.modifierFlags.contains(.shift) { extendFocus(to: c) } else { focusedColumn = tableColumns[c].identifier }
+        }
         super.mouseDown(with: event)
     }
 
@@ -87,7 +135,10 @@ final class DataGrid: NSTableView {
     override func menu(for event: NSEvent) -> NSMenu? {
         let point = convert(event.locationInWindow, from: nil)
         let r = row(at: point), c = column(at: point)
-        if c >= 0 { focusedColumn = tableColumns[c].identifier }
+        // Inside the selected cells the selection stays; elsewhere the cursor moves there.
+        if c >= 0, !(selectedColumnSpan?.contains(c) == true && selectedRowIndexes.contains(r)) {
+            focusedColumn = tableColumns[c].identifier
+        }
         if r >= 0, !selectedRowIndexes.contains(r) { selectRowIndexes([r], byExtendingSelection: false) }
         return super.menu(for: event)
     }

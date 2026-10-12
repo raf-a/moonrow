@@ -72,6 +72,7 @@ extension WorkspaceWindowController: NSMenuItemValidation {
         }
         changes.clearAfterCommit()
         forgetHistory(of: dropped.union(renamed.keys))
+        for (old, new) in renamed { environment.columnLayouts?.rename(old, to: new) }
         sidebar.reload()
         for tab in tableTabs {
             if dropped.contains(tab.table) {
@@ -146,6 +147,11 @@ extension WorkspaceWindowController: NSMenuItemValidation {
             return !isCommitting
         case #selector(discardChanges(_:)), #selector(previewChanges(_:)):
             return !changes.isEmpty && !isCommitting
+        case #selector(showRunningQueries(_:)):
+            return ServerSessions.isSupported(connection) && openSession != nil
+        case #selector(toggleQueryLog(_:)):
+            item.state = center.isLogVisible ? .on : .off
+            return true
         case #selector(toggleRightSidebar(_:)):
             item.state = isInspectorVisible ? .on : .off
             // Space is the shortcut only while a grid has the focus; anywhere else it's typing.

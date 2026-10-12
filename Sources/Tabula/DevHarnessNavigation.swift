@@ -234,7 +234,12 @@ extension DevHarness {
     /// A key press sent through the app, so the menus' key equivalents see it first.
     static func press(_ characters: String, code: UInt16, _ modifiers: NSEvent.ModifierFlags = [],
                       in target: NSWindow) async throws {
-        if !target.isKeyWindow { target.makeKeyAndOrderFront(nil) }
+        // The app can lose activation between steps; a key event then goes nowhere.
+        if !target.isKeyWindow || !NSApp.isActive {
+            let responder = target.firstResponder
+            try await makeKey(target)
+            if let responder, target.firstResponder !== responder { target.makeFirstResponder(responder) }
+        }
         let event = try require(NSEvent.keyEvent(
             with: .keyDown, location: .zero, modifierFlags: modifiers, timestamp: ProcessInfo.processInfo.systemUptime,
             windowNumber: target.windowNumber, context: nil, characters: characters,

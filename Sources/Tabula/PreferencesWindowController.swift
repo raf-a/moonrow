@@ -108,6 +108,7 @@ final class GeneralPreferences: NSViewController {
     let safeModePopup = NSPopUpButton()
     private let safeModeHint = hint("")
     let reopenCheckbox = NSButton(checkboxWithTitle: "Reopen workspaces at launch", target: nil, action: nil)
+    let parametersCheckbox = NSButton(checkboxWithTitle: "Ask for query parameters before running", target: nil, action: nil)
 
     init(settings: SettingsStore) {
         self.settings = settings
@@ -126,10 +127,15 @@ final class GeneralPreferences: NSViewController {
         safeModePopup.action = #selector(changed(_:))
         reopenCheckbox.target = self
         reopenCheckbox.action = #selector(changed(_:))
+        parametersCheckbox.target = self
+        parametersCheckbox.action = #selector(changed(_:))
         let grid = formGrid([
             ("Appearance", appearancePopup),
             ("Startup", reopenCheckbox),
             ("", hint("The workspaces open when you quit come back with their tabs, unsaved queries included.")),
+
+            ("SQL editor", parametersCheckbox),
+            ("", hint("Placeholders such as :name, $1 (PostgreSQL) and ? (MySQL, SQLite) are filled in before the statements run.")),
 
             ("Safe mode for new connections", safeModePopup),
             ("", safeModeHint),
@@ -149,16 +155,19 @@ final class GeneralPreferences: NSViewController {
         safeModePopup.selectItem(at: SafeMode.allCases.firstIndex(of: s.defaultSafeMode) ?? 0)
         safeModeHint.stringValue = s.defaultSafeMode.detail
         reopenCheckbox.state = s.reopenWorkspaces ? .on : .off
+        parametersCheckbox.state = s.queryParameters ? .on : .off
     }
 
     @objc private func changed(_ sender: Any?) {
         let appearance = AppSettings.Appearance.allCases[max(0, appearancePopup.indexOfSelectedItem)]
         let safeMode = SafeMode.allCases[max(0, safeModePopup.indexOfSelectedItem)]
         let reopen = reopenCheckbox.state == .on
+        let parameters = parametersCheckbox.state == .on
         save(settings, in: view) {
             $0.appearance = appearance
             $0.defaultSafeMode = safeMode
             $0.reopenWorkspaces = reopen
+            $0.queryParameters = parameters
         }
         refresh()
         // Safe-mode hints run from one line to two; the grid is pinned top and bottom.
@@ -430,9 +439,7 @@ final class KeymapPreferences: NSViewController, NSTableViewDataSource, NSTableV
         if let taken = fixed.first(where: { $0.binding == binding && !binding.isEmpty }) {
             return show("\(binding.display) is \(taken.title)’s shortcut, which can't be changed.")
         }
-        let others = Keymap.commands.filter {
-            $0.id != command.id && !binding.isEmpty && Keymap.binding(for: $0.id, overrides: overrides) == binding
-        }
+        let others = Keymap.conflictingCommands(binding, for: command.id, overrides: overrides)
         let apply = { [self] in
             save(settings, in: view) {
                 for other in others { $0.keyBindings[other.id] = .empty }

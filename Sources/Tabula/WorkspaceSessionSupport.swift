@@ -29,7 +29,7 @@ extension WorkspaceWindowController {
             return .table(object, structure: table.mode == .structure, isPreview: table.isPreview)
         }
         if let query = tab as? QueryEditorViewController {
-            return .query(text: query.editor.string, savedQuery: query.savedQuery?.name, file: query.fileURL?.path)
+            return .query(text: query.editor.string, savedQuery: query.savedQuery?.path, file: query.fileURL?.path)
         }
         return nil
     }
@@ -46,7 +46,7 @@ extension WorkspaceWindowController {
                     guard let object = tab.object else { continue }
                     pane.add(makeTab(object, mode: tab.structure ? .structure : .data, preview: tab.isPreview), focus: false)
                 case .query:
-                    if let name = tab.savedQuery, let query = environment.savedQueries.query(named: name),
+                    if let name = tab.savedQuery, let query = environment.savedQueries.query(path: name),
                        let text = try? environment.savedQueries.text(of: query) {
                         newQuery(text: text, saved: query)
                     } else {

@@ -191,6 +191,38 @@ final class SQLTextView: NSTextView {
         }
     }
 
+    /// ⌥⌘/: wraps the selection in `/* … */`, or unwraps it when it already is. Without a
+    /// selection it works on the cursor's line, leading indentation left outside.
+    @objc func toggleBlockComment(_ sender: Any?) {
+        let text = string as NSString
+        var range = selectedRange()
+        if range.length == 0 {
+            let (lines, _) = selectedLines()
+            range = lines
+            // Leave the indentation outside the comment.
+            while range.length > 0, [32, 9].contains(text.character(at: range.location)) {
+                range.location += 1
+                range.length -= 1
+            }
+        }
+        let part = text.substring(with: range)
+        let trimmed = part.trimmingCharacters(in: .whitespacesAndNewlines)
+        let replacement: String
+        if trimmed.hasPrefix("/*"), trimmed.hasSuffix("*/"), trimmed.count >= 4 {
+            var inner = String(trimmed.dropFirst(2).dropLast(2))
+            if inner.hasPrefix(" ") { inner.removeFirst() }
+            if inner.hasSuffix(" ") { inner.removeLast() }
+            let lead = part.prefix { $0.isWhitespace }, trail = String(part.reversed().prefix { $0.isWhitespace }.reversed())
+            replacement = lead + inner + trail
+        } else {
+            replacement = "/* " + part + " */"
+        }
+        guard shouldChangeText(in: range, replacementString: replacement) else { return }
+        textStorage?.replaceCharacters(in: range, with: replacement)
+        didChangeText()
+        setSelectedRange(NSRange(location: range.location, length: (replacement as NSString).length))
+    }
+
     /// The full lines the selection touches (without the final newline).
     private func selectedLines() -> (range: NSRange, text: String) {
         let text = string as NSString

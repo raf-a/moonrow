@@ -58,6 +58,20 @@ private func tempDir() -> URL {
         #expect(QueryHistory(fileURL: url).entries.map(\.sql) == ["select 2", "select 1"])
     }
 
+    @Test func dateGroups() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        let now = Date(timeIntervalSince1970: 1_791_028_800)  // 2026-10-03 12:00 UTC
+        func entry(_ daysAgo: Double, _ sql: String) -> QueryHistory.Entry {
+            .init(sql: sql, date: now.addingTimeInterval(-daysAgo * 86_400))
+        }
+        let groups = QueryHistory.grouped(
+            [entry(0, "a"), entry(0.2, "b"), entry(1, "c"), entry(3, "d"), entry(10, "e"), entry(40, "f"), entry(45, "g"), entry(80, "h")],
+            now: now, calendar: calendar)
+        #expect(groups.map(\.title) == ["Today", "Yesterday", "Previous 7 Days", "Previous 30 Days", "August 2026", "July 2026"])
+        #expect(groups.map { $0.entries.map(\.sql).joined() } == ["ab", "c", "d", "e", "fg", "h"])
+    }
+
     @Test func removeAndClear() throws {
         let url = tempDir().appending(path: "h.jsonl")
         let history = QueryHistory(fileURL: url)
@@ -93,6 +107,34 @@ private func tempDir() -> URL {
 
         try store.delete(store.queries[0])
         #expect(store.queries.map(\.name) == ["totals by day"])
+    }
+
+    @Test func folders() throws {
+        let dir = tempDir()
+        let store = SavedQueries(directory: dir)
+        try store.save("select 1", as: "top")
+        let monthly = try store.save("select 2", as: "monthly", in: "Reports")
+        #expect(store.folders == ["Reports"])
+        #expect(monthly.path == "Reports/monthly")
+        #expect(store.queries.map(\.path) == ["top", "Reports/monthly"])
+        // Names are per folder.
+        try store.save("select 3", as: "monthly")
+        #expect(store.query(path: "Reports/monthly")?.url.deletingLastPathComponent().lastPathComponent == "Reports")
+        #expect(try store.text(of: store.query(path: "monthly")!) == "select 3")
+
+        #expect(throws: SavedQueries.StoreError.self) { try store.move(store.query(path: "monthly")!, to: "Reports") }
+        let moved = try store.move(store.query(path: "top")!, to: "Reports")
+        #expect(moved.path == "Reports/top")
+        try store.addFolder("Empty")
+        #expect(store.folders == ["Empty", "Reports"])
+        #expect(throws: SavedQueries.StoreError.self) { try store.addFolder("reports") }
+        let renamed = try store.renameFolder("Reports", to: "Monthly reports")
+        #expect(store.queries(in: renamed).map(\.name) == ["monthly", "top"])
+        try store.deleteFolder(renamed, trash: false)
+        #expect(store.folders == ["Empty"])
+        #expect(store.queries.map(\.path) == ["monthly"])
+        // A reopened store reads the same.
+        #expect(SavedQueries(directory: dir).folders == ["Empty"])
     }
 
     @Test func fileNames() {

@@ -86,6 +86,40 @@ public final class QueryHistory {
         return entries.filter { $0.sql.range(of: needle, options: [.caseInsensitive, .diacriticInsensitive]) != nil }
     }
 
+    /// Entries under a date heading: Today, Yesterday, Previous 7 Days, Previous 30 Days, then
+    /// one group per month ("September 2026"). `entries` are newest first, and so are the groups.
+    public struct Group: Sendable, Hashable {
+        public var title: String
+        public var entries: [Entry]
+    }
+
+    public nonisolated static func grouped(_ entries: [Entry], now: Date = Date(), calendar: Calendar = .current) -> [Group] {
+        let today = calendar.startOfDay(for: now)
+        func title(_ date: Date) -> String {
+            let days = calendar.dateComponents([.day], from: calendar.startOfDay(for: date), to: today).day ?? 0
+            switch days {
+            case ..<1: return "Today"
+            case 1: return "Yesterday"
+            case 2..<7: return "Previous 7 Days"
+            case 7..<30: return "Previous 30 Days"
+            default:
+                let f = DateFormatter()
+                f.calendar = calendar
+                f.timeZone = calendar.timeZone
+                f.locale = Locale(identifier: "en_US_POSIX")
+                f.dateFormat = "LLLL yyyy"
+                return f.string(from: date)
+            }
+        }
+        var groups: [Group] = []
+        for entry in entries {
+            let t = title(entry.date)
+            if groups.last?.title == t { groups[groups.count - 1].entries.append(entry) }
+            else { groups.append(Group(title: t, entries: [entry])) }
+        }
+        return groups
+    }
+
     public func remove(_ entry: Entry) throws {
         entries.removeAll { $0.sql == entry.sql }
         try rewrite()

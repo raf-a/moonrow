@@ -28,6 +28,10 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var keyBindings: [String: KeyBinding] = [:]
     /// Reopen the workspaces that were open at quit, with their tabs.
     public var reopenWorkspaces: Bool = true
+    /// Ask for values of `:name`, `$1` and `?` placeholders before running (QueryParameters).
+    public var queryParameters: Bool = true
+    /// What the query editor's Run button runs; the other is in its menu.
+    public var runButtonRunsAll: Bool = false
 
     public init() {}
 
@@ -38,7 +42,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case appearance, editorTheme, editorFontName, editorFontSize, gridFontSize, alternatingRows
-        case defaultSafeMode, keyBindings, reopenWorkspaces
+        case defaultSafeMode, keyBindings, reopenWorkspaces, queryParameters, runButtonRunsAll
     }
 
     // Each value is read on its own: one that's missing or not understood keeps its default
@@ -58,6 +62,8 @@ public struct AppSettings: Codable, Equatable, Sendable {
         defaultSafeMode = value(.defaultSafeMode, d.defaultSafeMode)
         keyBindings = value(.keyBindings, d.keyBindings)
         reopenWorkspaces = value(.reopenWorkspaces, d.reopenWorkspaces)
+        queryParameters = value(.queryParameters, d.queryParameters)
+        runButtonRunsAll = value(.runButtonRunsAll, d.runButtonRunsAll)
     }
 }
 

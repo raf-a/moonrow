@@ -109,6 +109,8 @@ final class MySQLSession: WireSession, @unchecked Sendable {
     /// False while a command's replies are still coming; an error then leaves the socket
     /// mid-reply, so it gets closed and the next call reconnects.
     private var inSync = true
+    /// The connection's query log.
+    var log: StatementLog?
 
     var isAlive: Bool { io.wire.isActive }
 
@@ -296,6 +298,22 @@ final class MySQLSession: WireSession, @unchecked Sendable {
     // MARK: - Statements
 
     func run(
+        _ statement: SQLStatement, batchSize: Int, cancel: CancelSignal,
+        onBatch: @Sendable (ResultBatch) -> Void
+    ) async throws {
+        guard let log, log.isObserved else {
+            return try await send(statement, batchSize: batchSize, cancel: cancel, onBatch: onBatch)
+        }
+        let counter = RowCounter()
+        try await log.timing(statement, rows: { counter.value }) {
+            try await send(statement, batchSize: batchSize, cancel: cancel) { batch in
+                counter.add(batch)
+                onBatch(batch)
+            }
+        }
+    }
+
+    private func send(
         _ statement: SQLStatement, batchSize: Int, cancel: CancelSignal,
         onBatch: @Sendable (ResultBatch) -> Void
     ) async throws {

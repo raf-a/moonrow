@@ -11,7 +11,7 @@ import DBKit
 /// (⌘S) or discards (⇧⌘⌫) them, together with everything else staged.
 @MainActor
 final class TableDataViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate,
-    NSTextFieldDelegate, NSMenuItemValidation, TabulaActions
+    NSTextFieldDelegate, NSMenuItemValidation, NSMenuDelegate, TabulaActions
 {
     let table: TableRef
     let kind: ObjectKind
@@ -24,6 +24,8 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
     let readOnlyReason: String?
     /// Asks before a commit is sent.
     var safety: SafetyGate?
+    /// Where the Columns button keeps which columns show, per table.
+    var columnLayouts: ColumnLayouts?
     var isEditable: Bool { readOnlyReason == nil }
 
     private let connection: any DatabaseConnection
@@ -35,6 +37,10 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
     private let pageControl = NSSegmentedControl()
     private let addRowButton = NSButton(title: "Row", target: nil, action: nil)
     private let filtersButton = NSButton(title: "Filters", target: nil, action: nil)
+    private let columnsButton = NSButton(title: "Columns", target: nil, action: nil)
+    private var cellEditor: CellEditorController?
+    /// The context menu's Quick Filter items, rebuilt for the clicked cell.
+    private let quickFilterItem = NSMenuItem(title: "Quick Filter", action: nil, keyEquivalent: "")
 
     private(set) var browser: TableBrowser?
     private(set) var cache: RowCache?
@@ -150,6 +156,7 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
         grid.target = self
         grid.doubleAction = #selector(gridDoubleClicked(_:))
         grid.menu = makeContextMenu()
+        grid.headerView?.menu = makeHeaderMenu()
         grid.onEdit = { [weak self] in self?.editFocusedCell() }
         grid.onFocusChange = { [weak self] previous in self?.focusMoved(from: previous) }
         grid.setValueMenu = { [weak self] in self?.makeSetValueMenu() }
@@ -209,6 +216,11 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
         filtersButton.target = self
         filtersButton.action = #selector(toggleFilters(_:))
         filtersButton.toolTip = "Show or hide filters (⌘F)"
+        columnsButton.image = NSImage(systemSymbolName: "rectangle.split.3x1", accessibilityDescription: "Columns")
+        columnsButton.imagePosition = .imageLeading
+        columnsButton.target = self
+        columnsButton.action = #selector(showColumns(_:))
+        columnsButton.toolTip = "Choose and order the columns shown"
         pageButton.target = self
         pageButton.action = #selector(showPaging(_:))
         pageButton.toolTip = "Page size and offset"
@@ -220,7 +232,7 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
         pageControl.trackingMode = .momentary
         pageControl.target = self
         pageControl.action = #selector(pageControlClicked(_:))
-        for b in [addRowButton, filtersButton, pageButton] {
+        for b in [addRowButton, filtersButton, columnsButton, pageButton] {
             b.bezelStyle = .accessoryBarAction
             b.controlSize = .small
             b.font = .systemFont(ofSize: 11)
@@ -233,7 +245,7 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
         statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         statusLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
-        var views: [NSView] = [addRowButton, filtersButton, statusLabel, pageButton, pageControl]
+        var views: [NSView] = [addRowButton, filtersButton, columnsButton, statusLabel, pageButton, pageControl]
         if let leadingAccessory { views.insert(leadingAccessory, at: 0) }
         let bar = NSStackView(views: views)
         bar.spacing = 6
@@ -265,8 +277,9 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
             do {
                 let browser = try await TableBrowser.open(table, on: connection)
                 guard !Task.isCancelled else { return }
-                if browser.columns != self.browser?.columns { install(browser.columns) }
+                let changed = browser.columns != self.browser?.columns
                 self.browser = browser
+                if changed { install(browser.columns) }
                 if var e = changes.edits(for: table), e.columns != browser.columns {
                     e.rebase(columns: browser.columns)
                     changes.setEdits(e)
@@ -325,8 +338,13 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
     }
 
     private func install(_ columns: [ColumnInfo]) {
+        let names = columns.map(\.name)
+        // Widths stay with their column across a re-arrangement.
+        let widths = Dictionary(grid.tableColumns.map { ($0.title, $0.width) }, uniquingKeysWith: { a, _ in a })
+        let focused = grid.focusedColumn
         for c in grid.tableColumns.reversed() { grid.removeTableColumn(c) }
-        for (i, info) in columns.enumerated() {
+        for i in layout.visible(names) {
+            let info = columns[i]
             let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(String(i)))
             column.title = info.name
             var tip = info.typeName.isEmpty ? info.name : "\(info.name) — \(info.typeName)"
@@ -334,16 +352,69 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
             column.headerToolTip = tip + "\nClick to sort"
             column.minWidth = 40
             column.maxWidth = 2000
-            column.width = min(320, max(70, GridCell.width(of: info.name, header: true)))
+            column.width = widths[info.name] ?? min(320, max(70, GridCell.width(of: info.name, header: true)))
             grid.addTableColumn(column)
         }
-        let names = columns.map(\.name)
         query.sort.removeAll { !names.contains($0.column) }
         if query.filter != nil, filterBar.columns != names { query.filter = nil }
         filterBar.setColumns(names)
-        grid.focusedColumn = grid.tableColumns.first?.identifier
-        columnsSized = false
+        grid.focusedColumn = focused.flatMap { grid.column(withIdentifier: $0) >= 0 ? $0 : nil } ?? grid.tableColumns.first?.identifier
+        if widths.isEmpty { columnsSized = false }
         updateSortIndicators()
+        updateColumnsButton()
+    }
+
+    /// The table's column layout (which columns show, in what order).
+    private var layout: ColumnLayout { columnLayouts?.layout(for: table) ?? ColumnLayout() }
+
+    private func setLayout(_ new: ColumnLayout) {
+        columnLayouts?.set(new, for: table)
+        guard let columns = browser?.columns else { return }
+        endInlineEdit()
+        install(columns)
+        grid.reloadData()
+    }
+
+    private func updateColumnsButton() {
+        let hidden = browser.map { b in b.columns.count - layout.visible(b.columns.map(\.name)).count } ?? 0
+        columnsButton.contentTintColor = hidden > 0 ? .controlAccentColor : nil
+        columnsButton.title = hidden > 0 ? "Columns (\(hidden) hidden)" : "Columns"
+    }
+
+    @objc func showColumns(_ sender: Any?) {
+        guard let columns = browser?.columns else { return NSSound.beep() }
+        let controller = ColumnsPopoverController(columns: columns.map(\.name), layout: layout)
+        controller.onChange = { [weak self] layout in self?.setLayout(layout) }
+        present(controller, from: columnsButton, edge: .maxY, size: NSSize(width: 280, height: 340))
+    }
+
+    /// Dragging a header remembers the new order.
+    func tableViewColumnDidMove(_ notification: Notification) {
+        guard let names = browser?.columns.map(\.name) else { return }
+        var new = layout
+        new.setShownOrder(grid.tableColumns.map(\.title), columns: names)
+        columnLayouts?.set(new, for: table)
+    }
+
+    private func makeHeaderMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.delegate = self
+        return menu
+    }
+
+    @objc private func hideClickedColumn(_ sender: NSMenuItem) {
+        guard let names = browser?.columns.map(\.name), let name = sender.representedObject as? String else { return }
+        var new = layout
+        guard new.setHidden(true, name, columns: names) else { return NSSound.beep() }
+        setLayout(new)
+    }
+
+    @objc private func showAllColumns(_ sender: Any?) {
+        setLayout(ColumnLayout(order: layout.order, hidden: []))
+    }
+
+    @objc private func resetColumnOrder(_ sender: Any?) {
+        setLayout(ColumnLayout(order: [], hidden: layout.hidden))
     }
 
     @objc private func visibleRowsChanged() {
@@ -429,7 +500,7 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
         cell.show(
             content(row: row, column: column),
             edited: change != nil && state != .inserted,
-            focused: grid.selectedRowIndexes.contains(row) && grid.focusedColumn == tableColumn.identifier,
+            focused: grid.isCellSelected(row: row, column: tableColumn),
             struckOut: state == .deleted)
         return cell
     }
@@ -472,16 +543,14 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
 
     func tableViewSelectionDidChange(_ notification: Notification) {
         let selected = grid.selectedRowIndexes
-        if let c = grid.focusedColumnIndex { refreshCells(lastSelection.union(selected), columns: [c]) }
+        refreshCells(lastSelection.union(selected), columns: grid.selectedCellColumns)
         lastSelection = selected
         NotificationCenter.default.post(name: .inspectorSourceDidChange, object: self)
     }
 
+    /// The cursor or the span of selected columns changed.
     private func focusMoved(from previous: NSUserInterfaceItemIdentifier?) {
-        var columns = IndexSet()
-        if let previous, case let i = grid.column(withIdentifier: previous), i >= 0 { columns.insert(i) }
-        if let i = grid.focusedColumnIndex { columns.insert(i) }
-        refreshCells(grid.selectedRowIndexes, columns: columns)
+        refreshCells(grid.selectedRowIndexes)
     }
 
     // MARK: - Sorting
@@ -762,13 +831,20 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
                                 ("DEFAULT", #selector(setDefault(_:)))] {
             menu.addItem(withTitle: title, action: action, keyEquivalent: "").target = self
         }
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "From File…", action: #selector(setValueFromFile(_:)), keyEquivalent: "").target = self
         return menu
     }
 
     private func makeContextMenu() -> NSMenu {
         let menu = NSMenu()
+        menu.delegate = self
+        // Context menus show no shortcuts: AppKit would take them off the main menu's items.
+        menu.addItem(withTitle: "Open Cell Editor…", action: #selector(quickLook(_:)), keyEquivalent: "").target = self
         let setValue = menu.addItem(withTitle: "Set Value", action: nil, keyEquivalent: "")
         setValue.submenu = makeSetValueMenu()
+        quickFilterItem.submenu = NSMenu(title: "Quick Filter")
+        menu.addItem(quickFilterItem)
         menu.addItem(.separator())
         for (title, action) in [("Add Row", #selector(addRow(_:))), ("Duplicate", #selector(duplicateRows(_:))),
                                 ("Delete", #selector(deleteRows(_:)))] {
@@ -777,13 +853,68 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
         menu.addItem(.separator())
         menu.addItem(withTitle: "Copy Rows", action: #selector(copy(_:)), keyEquivalent: "").target = self
         menu.addItem(CopyFormat.menuItem(target: self, action: #selector(copyRowsAs(_:))))
+        menu.addItem(withTitle: "Copy Selected Cells", action: #selector(copySelectedCells(_:)), keyEquivalent: "").target = self
+        menu.addItem(CopyFormat.menuItem(target: self, action: #selector(copySelectedCellsAs(_:)), title: "Copy Selected Cells As"))
+        menu.addItem(withTitle: "Copy Column Values", action: #selector(copyColumnValues(_:)), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Paste Rows", action: #selector(paste(_:)), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Paste into Selected Cells", action: #selector(pasteIntoSelectedCells(_:)), keyEquivalent: "").target = self
         menu.addItem(.separator())
         // Sent up the responder chain to the workspace.
         menu.addItem(withTitle: "Export…", action: #selector(TabulaActions.exportData(_:)), keyEquivalent: "")
+        menu.addItem(withTitle: "Export Current Page…", action: #selector(exportCurrentPage(_:)), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Import CSV…", action: #selector(TabulaActions.importCSV(_:)), keyEquivalent: "")
         menu.addItem(.separator())
+        menu.addItem(withTitle: "Columns…", action: #selector(showColumns(_:)), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Reload", action: #selector(reloadCurrentTab(_:)), keyEquivalent: "").target = self
         return menu
+    }
+
+    /// The header's menu (hide this column, show all, reset the order) and the cell menu's
+    /// Quick Filter items are built for what was clicked.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        if menu === grid.headerView?.menu { return fillHeaderMenu(menu) }
+        guard menu === grid.menu, let submenu = quickFilterItem.submenu else { return }
+        submenu.removeAllItems()
+        for item in quickFilterItems() { submenu.addItem(item) }
+        quickFilterItem.isEnabled = !submenu.items.isEmpty
+    }
+
+    private func fillHeaderMenu(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let c = grid.clickedColumn
+        if c >= 0 {
+            let name = grid.tableColumns[c].title
+            let hide = menu.addItem(withTitle: "Hide “\(name)”", action: #selector(hideClickedColumn(_:)), keyEquivalent: "")
+            hide.target = self
+            hide.representedObject = name
+        }
+        menu.addItem(withTitle: "Show All Columns", action: #selector(showAllColumns(_:)), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Reset Column Order", action: #selector(resetColumnOrder(_:)), keyEquivalent: "").target = self
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Columns…", action: #selector(showColumns(_:)), keyEquivalent: "").target = self
+    }
+
+    /// Conditions on the clicked cell's column and value: equal, not equal, less, greater,
+    /// contains (text), IS NULL and IS NOT NULL. Our own list.
+    private func quickFilterItems() -> [NSMenuItem] {
+        let row = grid.clickedRow >= 0 ? grid.clickedRow : grid.selectedRow
+        guard row >= 0, let display = grid.clickedColumn >= 0 ? grid.clickedColumn : grid.focusedColumnIndex,
+              let column = Int(grid.tableColumns[display].identifier.rawValue),
+              let name = browser?.columns[column].name else { return [] }
+        return QuickFilter.conditions(column: name, value: content(row: row, column: column).value).map { condition in
+            let item = NSMenuItem(title: QuickFilter.title(condition), action: #selector(applyQuickFilter(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = QuickFilter.Box(condition)
+            return item
+        }
+    }
+
+    /// Adds the condition to the filter bar (in the first row when that's empty) and applies the
+    /// bar's checked rows.
+    @objc private func applyQuickFilter(_ sender: NSMenuItem) {
+        guard let condition = (sender.representedObject as? QuickFilter.Box)?.condition else { return }
+        if filterBar.isHidden { toggleFilters(nil) }
+        filterBar.add(condition)
     }
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
@@ -792,18 +923,150 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
         let hasRows = !targetRows.isEmpty
         switch item.action {
         case #selector(copy(_:)), #selector(copyRowsAs(_:)): return hasRows
-        case #selector(addRow(_:)): return isEditable && cache != nil
-        case #selector(duplicateRows(_:)), #selector(setNull(_:)), #selector(setEmpty(_:)), #selector(setDefault(_:)):
+        case #selector(copySelectedCells(_:)), #selector(copySelectedCellsAs(_:)):
+            return !typing && hasRows && grid.selectedColumnSpan != nil
+        case #selector(copyColumnValues(_:)): return cache != nil && (grid.clickedColumn >= 0 || grid.focusedColumnIndex != nil)
+        case #selector(addRow(_:)):
+            if item.menu?.title == "Edit" { item.title = "Add Row" }
+            return isEditable && cache != nil
+        case #selector(runCurrentQuery(_:)):
+            item.title = "Open Cell Editor"
+            return !typing && grid.selectedRow >= 0 && grid.focusedColumnIndex != nil
+        case #selector(duplicateRows(_:)), #selector(setNull(_:)), #selector(setEmpty(_:)), #selector(setDefault(_:)),
+             #selector(setValueFromFile(_:)):
             return isEditable && hasRows
+        case #selector(paste(_:)):
+            return !typing && isEditable && cache != nil && NSPasteboard.general.string(forType: .string) != nil
+        case #selector(pasteIntoSelectedCells(_:)):
+            return !typing && isEditable && hasRows && NSPasteboard.general.string(forType: .string) != nil
+        case #selector(quickLook(_:)):
+            return !typing && grid.selectedRow >= 0 && grid.focusedColumnIndex != nil
         case #selector(deleteRows(_:)):
             if item.menu?.title == "Edit" { item.title = "Delete Rows" }
             return isEditable && hasRows && !typing
         case #selector(nextPage(_:)): return !typing && query.page.next(total: total) != nil
         case #selector(previousPage(_:)): return !typing && query.page.previous != nil
+        case #selector(exportCurrentPage(_:)), #selector(showColumns(_:)): return cache != nil
         case #selector(toggleFilters(_:)):
             item.title = filterBar.isHidden ? "Show Filters" : "Hide Filters"
             return true
         default: return true
+        }
+    }
+
+    // MARK: - Cell editor
+
+    /// ⌘↩ (Run Current's shortcut) in the grid: the cell editor.
+    @objc func runCurrentQuery(_ sender: Any?) { quickLook(sender) }
+
+    /// ⌘↩: the cell at the cursor in a window of its own. Saving stages the value.
+    @objc func quickLook(_ sender: Any?) {
+        let row = grid.clickedRow >= 0 ? grid.clickedRow : grid.selectedRow
+        guard row >= 0, let display = grid.focusedColumnIndex, let window = view.window, window.attachedSheet == nil,
+              let columns = browser?.columns, let column = Int(grid.tableColumns[display].identifier.rawValue)
+        else { return NSSound.beep() }
+        let content = content(row: row, column: column)
+        if case .pending = content { return NSSound.beep() }
+        abortInlineEdit()
+        let info = columns[column]
+        let editable = isEditable && state(of: row) != .deleted && GridPaste.accepts(info)
+        let editor = CellEditorController(
+            title: "\(table.name).\(info.name)", value: content, typeName: info.typeName, isEditable: editable,
+            fileName: info.name)
+        editor.onSave = { [weak self] change in self?.stage(change, row: row, column: column) }
+        cellEditor = editor
+        editor.begin(on: window)
+    }
+
+    /// For the dev harness.
+    var shownCellEditor: CellEditorController? { cellEditor?.window?.isSheet == true ? cellEditor : nil }
+
+    /// Set Value ▸ From File…: bytes for binary columns, UTF-8 text otherwise, into the cursor's
+    /// column of every target row.
+    @objc func setValueFromFile(_ sender: Any?) {
+        guard isEditable, let window = view.window, let display = grid.focusedColumnIndex,
+              let column = Int(grid.tableColumns[display].identifier.rawValue), let info = browser?.columns[column]
+        else { return NSSound.beep() }
+        endInlineEdit()
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let url = panel.url, let self else { return }
+            switch CellEditorController.load(url, typeName: info.typeName) {
+            case .success(let v): self.setFocusedCells(.value(v), "Set Value from File")
+            case .failure(let error): self.refuse(error.message)
+            }
+        }
+    }
+
+    // MARK: - Paste
+
+    /// ⌘V: pasted lines become new rows, their fields filling the shown columns in order.
+    @objc func paste(_ sender: Any?) {
+        guard isEditable, cache != nil, let columns = browser?.columns,
+              let text = NSPasteboard.general.string(forType: .string) else { return NSSound.beep() }
+        endInlineEdit()
+        let order = grid.tableColumns.compactMap { Int($0.identifier.rawValue) }
+        let lines = GridPaste.fields(text)
+        guard !lines.isEmpty else { return NSSound.beep() }
+        let first = rowCount
+        updateEdits(lines.count == 1 ? "Paste Row" : "Paste Rows") { e in
+            for fields in lines {
+                var cells: [Int: CellChange] = [:]
+                for (i, field) in fields.enumerated() where i < order.count && GridPaste.accepts(columns[order[i]]) {
+                    cells[order[i]] = .value(GridPaste.value(field, column: columns[order[i]]))
+                }
+                e.addRow(cells)
+            }
+        }
+        let added = IndexSet(integersIn: first..<rowCount)
+        grid.selectRowIndexes(added, byExtendingSelection: false)
+        if let last = added.last { grid.scrollRowToVisible(last) }
+        updateBar()
+    }
+
+    /// ⇧⌘V: fills the selected cells from the pasteboard (see `GridPaste.assignments`) as one
+    /// undo step. Deleted rows, generated columns and rows still loading are skipped.
+    @objc func pasteIntoSelectedCells(_ sender: Any?) {
+        guard isEditable, let columns = browser?.columns, let span = grid.selectedColumnSpan,
+              let text = NSPasteboard.general.string(forType: .string) else { return NSSound.beep() }
+        endInlineEdit()
+        let targets = GridPaste.assignments(
+            GridPaste.fields(text), rows: grid.selectedRowIndexes, columns: span,
+            rowCount: rowCount, columnCount: grid.numberOfColumns)
+        let base = baseRowCount
+        var skipped = 0
+        let changes: [(row: Int, column: Int, value: DBValue, loaded: [DBValue]?)] = targets.compactMap { t in
+            guard let column = Int(grid.tableColumns[t.column].identifier.rawValue), GridPaste.accepts(columns[column]),
+                  state(of: t.row) != .deleted, t.row >= base || loadedRow(t.row) != nil
+            else { skipped += 1; return nil }
+            return (t.row, column, GridPaste.value(t.text, column: columns[column]), loadedRow(t.row))
+        }
+        guard !changes.isEmpty else { return refuse("Nothing to paste into the selected cells.") }
+        updateEdits("Paste") { e in
+            for c in changes {
+                if c.row >= base { e.setInserted(.value(c.value), row: c.row - base, column: c.column) }
+                else if let loaded = c.loaded { e.set(.value(c.value), column: c.column, in: loaded) }
+            }
+        }
+        // Rows pasted below the selection join it, so the result is in view.
+        let rows = IndexSet(changes.map(\.row))
+        grid.selectRowIndexes(grid.selectedRowIndexes.union(rows), byExtendingSelection: false)
+        showStatus(skipped == 0 ? "" : "\(skipped) cell\(skipped == 1 ? "" : "s") skipped (deleted rows, generated columns or rows still loading).")
+    }
+
+    // MARK: - Export
+
+    /// The page as shown (staged edits included, shown columns in order), through the export sheet.
+    @objc func exportCurrentPage(_ sender: Any?) {
+        guard cache != nil, let columns = browser?.columns else { return NSSound.beep() }
+        let order = grid.tableColumns.compactMap { Int($0.identifier.rawValue) }
+        let pageNumber = query.page.pageSize.map { query.page.offset / $0 + 1 }
+        withRows(IndexSet(integersIn: 0..<rowCount)) { [weak self] rows in
+            guard let self, let workspace = self.view.window?.windowController as? WorkspaceWindowController else { return }
+            let origin = pageNumber.map { "on page \($0) of \(self.table.name)" } ?? "of \(self.table.name)"
+            workspace.presentExport(.result(name: self.table.name, columns: order.map { columns[$0].name },
+                                            rows: rows.map { r in order.map { r[$0] } }, origin: origin))
         }
     }
 
@@ -813,26 +1076,70 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
     /// grid's current column order.
     @objc func copy(_ sender: Any?) { copyRows(as: nil) }
 
-    /// Copy Rows As ▸ CSV, JSON, SQL INSERT, Markdown; the item's tag picks the format.
+    /// Copy Rows As ▸ CSV, JSON, SQL INSERT, Markdown, HTML; the item's tag picks the format.
     @objc func copyRowsAs(_ sender: Any?) {
         guard let tag = (sender as? NSMenuItem)?.tag, CopyFormat.allCases.indices.contains(tag) else { return }
         copyRows(as: CopyFormat.allCases[tag])
     }
 
+    /// ⇧⌘C: the selected cells (selected rows across the selected columns) as tab-separated text.
+    @objc func copySelectedCells(_ sender: Any?) { copyCells(as: nil) }
+
+    @objc func copySelectedCellsAs(_ sender: Any?) {
+        guard let tag = (sender as? NSMenuItem)?.tag, CopyFormat.allCases.indices.contains(tag) else { return }
+        copyCells(as: CopyFormat.allCases[tag])
+    }
+
+    /// Every value of the clicked column on this page, one per line (NULL as an empty line).
+    @objc func copyColumnValues(_ sender: Any?) {
+        guard let display = grid.clickedColumn >= 0 ? grid.clickedColumn : grid.focusedColumnIndex,
+              let column = Int(grid.tableColumns[display].identifier.rawValue) else { return NSSound.beep() }
+        withRows(IndexSet(integersIn: 0..<rowCount)) { rows in
+            Self.putOnPasteboard(CellText.tsv(rows.map { [$0[column]] }))
+        }
+    }
+
     private func copyRows(as format: CopyFormat?) {
-        guard let cache, let first = targetRows.first, let last = targetRows.last else {
+        let order = grid.tableColumns.compactMap { Int($0.identifier.rawValue) }
+        copy(targetRows, columns: order, as: format)
+    }
+
+    private func copyCells(as format: CopyFormat?) {
+        guard let span = grid.selectedColumnSpan else { return NSSound.beep() }
+        let order = span.compactMap { Int(grid.tableColumns[$0].identifier.rawValue) }
+        copy(grid.selectedRowIndexes, columns: order, as: format)
+    }
+
+    private func copy(_ selection: IndexSet, columns order: [Int], as format: CopyFormat?) {
+        withRows(selection) { [weak self] rows in
+            guard let self else { return }
+            let ordered = rows.map { row in order.map { row[$0] } }
+            let names = order.map { self.browser?.columns[$0].name ?? "" }
+            let text = format?.text(columns: names, rows: ordered, dialect: self.connection.dialect, table: self.table)
+                ?? CellText.tsv(ordered)
+            Self.putOnPasteboard(text)
+        }
+    }
+
+    private static func putOnPasteboard(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    /// Hands `body` the rows of `selection` as shown (staged edits on top), every column in
+    /// table order, loading any that aren't in the cache yet. Over `copyLimit` rows it refuses.
+    private func withRows(_ selection: IndexSet, _ body: @escaping ([[DBValue]]) -> Void) {
+        guard let cache, let first = selection.first, let last = selection.last else {
             NSSound.beep()
             return
         }
         guard last - first < Self.copyLimit else {
             let alert = NSAlert()
-            alert.messageText = "Too many rows to copy"
+            alert.messageText = "Too many rows"
             alert.informativeText = "Select fewer than \(Self.copyLimit.formatted(.number)) rows, or use Export… (⌘E)."
             if let window = view.window { alert.beginSheetModal(for: window) }
             return
         }
-        let selection = targetRows
-        let order = grid.tableColumns.compactMap { Int($0.identifier.rawValue) }
         Task {
             do {
                 // Load the span once so shownValues finds every base row.
@@ -843,12 +1150,7 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
                     guard row - first < span.count else { return nil }
                     return overlay(span[row - first], row: row)
                 }
-                let ordered = rows.map { row in order.map { row[$0] } }
-                let names = order.map { browser?.columns[$0].name ?? "" }
-                let text = format?.text(columns: names, rows: ordered, dialect: connection.dialect, table: table)
-                    ?? CellText.tsv(ordered)
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(text, forType: .string)
+                body(rows)
             } catch {
                 showError(error)
             }
@@ -903,5 +1205,13 @@ extension TableDataViewController: InspectorSource {
         updateEdits(rows.count == 1 ? "Edit Cell" : "Edit Cells") { e in
             e.set(change, column: column, loaded: rows.filter { $0 < base }.compactMap(loadedRow), inserted: rows.filter { $0 >= base }.map { $0 - base })
         }
+    }
+}
+
+extension QuickFilter {
+    /// Carries a condition in a menu item's `representedObject`.
+    final class Box: NSObject {
+        let condition: FilterCondition
+        init(_ condition: FilterCondition) { self.condition = condition }
     }
 }

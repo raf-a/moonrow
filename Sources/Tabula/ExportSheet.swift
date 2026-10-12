@@ -6,12 +6,13 @@ import DBKit
 enum ExportSubject {
     /// `filter` and `sort` are the grid's; `shownRows` is how many rows they select, when known.
     case table(TableRef, kind: ObjectKind, filter: Filter?, sort: [SortKey], shownRows: Int?)
-    case result(name: String, columns: [String], rows: [[DBValue]])
+    /// Rows in memory: a query result, or the page a table grid shows. `origin` describes them.
+    case result(name: String, columns: [String], rows: [[DBValue]], origin: String = "from the query")
 
     var name: String {
         switch self {
         case .table(let t, _, _, _, _): t.name
-        case .result(let name, _, _): name
+        case .result(let name, _, _, _): name
         }
     }
 
@@ -205,8 +206,8 @@ final class ExportSheetController: NSWindowController, NSTextFieldDelegate {
             var s = "\(what) \(t)"
             if let shown { s += " — \(shown.formatted()) row\(shown == 1 ? "" : "s")" + (filter == nil ? "" : " match the filter") }
             return s
-        case .result(_, let columns, let rows):
-            return "\(rows.count.formatted()) row\(rows.count == 1 ? "" : "s"), \(columns.count) column\(columns.count == 1 ? "" : "s") from the query"
+        case .result(_, let columns, let rows, let origin):
+            return "\(rows.count.formatted()) row\(rows.count == 1 ? "" : "s"), \(columns.count) column\(columns.count == 1 ? "" : "s") \(origin)"
         }
     }
 
@@ -305,7 +306,7 @@ final class ExportSheetController: NSWindowController, NSTextFieldDelegate {
         case .table(let t, _, let filter, let sort, _):
             let whole = scopePopup.indexOfSelectedItem == 1
             return ExportJob(source: .table(t, filter: whole ? nil : filter, sort: whole ? [] : sort, connection: connection), format: format)
-        case .result(_, let columns, let rows):
+        case .result(_, let columns, let rows, _):
             let name = tableNameField.stringValue.trimmingCharacters(in: .whitespaces)
             return ExportJob(source: .rows(name: name.isEmpty ? "result" : name, columns: columns, rows: rows, dialect: connection.dialect), format: format)
         }
@@ -332,7 +333,7 @@ final class ExportSheetController: NSWindowController, NSTextFieldDelegate {
         let job = job()
         let total: Int? = switch subject {
         case .table(_, _, _, _, let shown): scopePopup.indexOfSelectedItem == 1 ? nil : shown
-        case .result(_, _, let rows): rows.count
+        case .result(_, _, let rows, _): rows.count
         }
         progress.isHidden = false
         progress.isIndeterminate = total == nil || total == 0
@@ -410,9 +411,9 @@ final class ExportSheetController: NSWindowController, NSTextFieldDelegate {
 extension CopyFormat {
     /// "Copy Rows As ▸" with one item per format; each item's tag is its index in `allCases`.
     @MainActor
-    static func menuItem(target: AnyObject, action: Selector) -> NSMenuItem {
-        let item = NSMenuItem(title: "Copy Rows As", action: nil, keyEquivalent: "")
-        let menu = NSMenu(title: "Copy Rows As")
+    static func menuItem(target: AnyObject, action: Selector, title: String = "Copy Rows As") -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        let menu = NSMenu(title: title)
         for (i, format) in allCases.enumerated() {
             let entry = menu.addItem(withTitle: format.title, action: action, keyEquivalent: "")
             entry.target = target

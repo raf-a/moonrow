@@ -30,6 +30,8 @@ final class TableTabViewController: NSViewController, WorkspaceTab, NSMenuItemVa
     var existingNames: () -> [String] = { [] }
     /// Asks before commits are sent.
     var safety: SafetyGate?
+    /// The connection's column layouts (the grid's Columns button).
+    var columnLayouts: ColumnLayouts?
 
     private(set) var data: TableDataViewController?
     private(set) var structure: StructureViewController?
@@ -129,6 +131,7 @@ final class TableTabViewController: NSViewController, WorkspaceTab, NSMenuItemVa
                     readOnlyConnection: readOnlyConnection, pageSize: pageSize)
                 d.leadingAccessory = makeSwitch()
                 d.safety = safety
+                d.columnLayouts = columnLayouts
                 d.onTabItemChange = { [weak self] in self?.onTabItemChange?() }
                 d.onUse = { [weak self] in self?.isPreview = false }
                 addChild(d)

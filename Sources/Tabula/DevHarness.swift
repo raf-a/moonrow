@@ -143,6 +143,21 @@ enum DevHarness {
             }
             return
         }
+        // M9: cells, paste, Quick Filter, columns, the cell editor, Beautify, parameters, pinned
+        // results and charts, the query log, saved-query folders, history groups, Running
+        // Queries (servers). It stages edits and discards them; it never commits.
+        if let table = env["TABULA_POWER"] {
+            Task {
+                do {
+                    guard env["TABULA_STORE"] != nil else { throw HarnessError("TABULA_POWER needs TABULA_STORE") }
+                    try await powerDemo(app, table: table, snapshots: snapshots)
+                } catch {
+                    print("power demo failed: \(error)")
+                }
+                NSApp.terminate(nil)
+            }
+            return
+        }
         if let table = env["TABULA_OPENDB"] {
             Task {
                 do {
@@ -530,7 +545,11 @@ enum DevHarness {
         let undo = changes.undoManager
         /// A key press sent through the app, so menus' key equivalents see it first.
         func press(_ characters: String, code: UInt16, _ modifiers: NSEvent.ModifierFlags = []) async throws {
-            if !window.isKeyWindow { window.makeKeyAndOrderFront(nil) }
+            if !window.isKeyWindow || !NSApp.isActive {
+                let responder = window.firstResponder
+                try await makeKey(window)
+                if let responder, window.firstResponder !== responder { window.makeFirstResponder(responder) }
+            }
             let event = try require(NSEvent.keyEvent(
                 with: .keyDown, location: .zero, modifierFlags: modifiers, timestamp: ProcessInfo.processInfo.systemUptime,
                 windowNumber: window.windowNumber, context: nil, characters: characters,

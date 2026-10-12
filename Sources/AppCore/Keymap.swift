@@ -122,6 +122,8 @@ public enum Keymap {
         KeyCommand("redo:", "Redo", "General", "z", [.command, .shift]),
         KeyCommand("toggleRightSidebar:", "Toggle Right Sidebar", "General", " ", []),
         KeyCommand("toggleSidebar:", "Toggle Left Sidebar", "General", "0"),
+        KeyCommand("toggleQueryLog:", "Toggle Query Log", "General", "c", [.command, .control]),
+        KeyCommand("showRunningQueries:", "Running Queries", "General", ""),
 
         KeyCommand("quickOpen:", "Quick Open", "Navigate", "p"),
         KeyCommand("openDatabase:", "Open Database", "Navigate", "k"),
@@ -138,10 +140,15 @@ public enum Keymap {
         KeyCommand("selectNextTab:", "Select Next Tab", "Tabs", "]"),
         KeyCommand("selectPreviousTab:", "Select Previous Tab", "Tabs", "["),
 
-        KeyCommand("runCurrentQuery:", "Run Current Statement", "SQL Editor", "\r"),
+        // In a grid, Run Current opens the cell editor and Add Row's shortcut is Beautify in the
+        // editor (AppKit lets only one menu item have a shortcut); the item takes its title from
+        // the focus.
+        KeyCommand("runCurrentQuery:", "Run Current Statement / Open Cell Editor", "SQL Editor", "\r"),
         KeyCommand("runAllQueries:", "Run All Statements", "SQL Editor", "\r", [.command, .shift]),
         KeyCommand("cancelQuery:", "Stop Query", "SQL Editor", "."),
         KeyCommand("toggleLineComment:", "Toggle Comment", "SQL Editor", "/"),
+        KeyCommand("toggleBlockComment:", "Toggle Block Comment", "SQL Editor", "/", [.command, .option]),
+        KeyCommand("compactSQL:", "Compact SQL", "SQL Editor", "i", [.command, .shift]),
         KeyCommand("saveSQLAs:", "Save SQL As", "SQL Editor", "s", [.command, .shift]),
         KeyCommand("addToQueries:", "Add to Queries", "SQL Editor", ""),
 
@@ -150,11 +157,13 @@ public enum Keymap {
         KeyCommand("commitChanges:", "Commit Changes", "Table", "s"),
         KeyCommand("discardChanges:", "Discard Changes", "Table", "\u{8}", [.command, .shift]),
         KeyCommand("previewChanges:", "Preview Changes", "Table", "p", [.command, .shift]),
-        KeyCommand("addRow:", "Add Row", "Table", "i"),
+        KeyCommand("addRow:", "Add Row / Beautify SQL", "Table", "i"),
         KeyCommand("duplicateRows:", "Duplicate Rows", "Table", "d"),
         KeyCommand("deleteRows:", "Delete Rows or Items", "Table", "\u{8}"),
         KeyCommand("truncateTable:", "Truncate Table", "Table", "\u{8}", .option),
         KeyCommand("toggleFilters:", "Show Filters", "Table", "f"),
+        KeyCommand("copySelectedCells:", "Copy Selected Cells", "Table", "c", [.command, .shift]),
+        KeyCommand("pasteIntoSelectedCells:", "Paste into Selected Cells", "Table", "v", [.command, .shift]),
         KeyCommand("reloadCurrentTab:", "Reload Table", "Table", "r", [.command, .option]),
         KeyCommand("previousPage:", "Previous Page", "Table", "\u{F702}"),
         KeyCommand("nextPage:", "Next Page", "Table", "\u{F703}"),
@@ -173,9 +182,14 @@ public enum Keymap {
         _ binding: KeyBinding, for id: String, overrides: [String: KeyBinding],
         fixed: [(title: String, binding: KeyBinding)] = []
     ) -> [String] {
+        conflictingCommands(binding, for: id, overrides: overrides).map(\.title)
+            + fixed.filter { !binding.isEmpty && $0.binding == binding }.map(\.title)
+    }
+
+    /// Other listed commands that have `binding`.
+    public static func conflictingCommands(_ binding: KeyBinding, for id: String, overrides: [String: KeyBinding]) -> [KeyCommand] {
         guard !binding.isEmpty else { return [] }
-        let listed = commands.filter { $0.id != id && self.binding(for: $0.id, overrides: overrides) == binding }.map(\.title)
-        return listed + fixed.filter { $0.binding == binding }.map(\.title)
+        return commands.filter { $0.id != id && self.binding(for: $0.id, overrides: overrides) == binding }
     }
 
     /// Overrides without the entries that just restate a default.

@@ -4,7 +4,8 @@ import DBKit
 import SQLScript
 
 /// A query run's output: one tab per statement that returned rows, plus Messages, which logs
-/// every statement with its row count, time or error.
+/// every statement with its row count, time or error. A pinned result stays through the next
+/// runs, until it's closed or unpinned; each result can show its rows as a chart.
 @MainActor
 final class ResultsViewController: NSViewController {
     private let strip = TabStrip()
@@ -14,6 +15,8 @@ final class ResultsViewController: NSViewController {
     private let statusLabel = NSTextField(labelWithString: "")
     private let placeholder = NSTextField(labelWithString: "Run a query with ⌘↩ (current) or ⇧⌘↩ (all)")
     private let exportButton = NSButton(title: "Export…", target: nil, action: #selector(TabulaActions.exportData(_:)))
+    private let pinButton = NSButton(title: "", target: nil, action: nil)
+    private let chartButton = NSButton(title: "Chart", target: nil, action: nil)
     /// For Copy Rows As ▸ SQL INSERT.
     var dialect: any Dialect = SQLiteDialect()
 
@@ -30,7 +33,8 @@ final class ResultsViewController: NSViewController {
 
     override func loadView() {
         strip.onSelect = { [weak self] i in self?.select(tab: i) }
-        strip.onClose = nil
+        // Only pinned results have a close button.
+        strip.onClose = { [weak self] i in self?.closeResult(at: i) }
 
         messages.isEditable = false
         messages.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
@@ -48,7 +52,24 @@ final class ResultsViewController: NSViewController {
         exportButton.font = .systemFont(ofSize: 11)
         exportButton.toolTip = "Export the shown result (⌘E)"
         exportButton.isHidden = true
-        let bottom = NSStackView(views: [statusLabel, exportButton])
+        pinButton.image = NSImage(systemSymbolName: "pin", accessibilityDescription: "Pin")
+        pinButton.setButtonType(.pushOnPushOff)
+        pinButton.target = self
+        pinButton.action = #selector(togglePin(_:))
+        pinButton.toolTip = "Pin this result: the next runs keep it"
+        chartButton.image = NSImage(systemSymbolName: "chart.bar", accessibilityDescription: nil)
+        chartButton.imagePosition = .imageLeading
+        chartButton.setButtonType(.pushOnPushOff)
+        chartButton.target = self
+        chartButton.action = #selector(toggleChart(_:))
+        chartButton.toolTip = "Show the rows as a chart"
+        for b in [pinButton, chartButton] {
+            b.bezelStyle = .accessoryBarAction
+            b.controlSize = .small
+            b.font = .systemFont(ofSize: 11)
+            b.isHidden = true
+        }
+        let bottom = NSStackView(views: [statusLabel, chartButton, pinButton, exportButton])
         bottom.edgeInsets = NSEdgeInsets(top: 0, left: 8, bottom: 0, right: 8)
         bottom.heightAnchor.constraint(equalToConstant: 24).isActive = true
         let line = NSBox()
@@ -87,8 +108,9 @@ final class ResultsViewController: NSViewController {
     // MARK: - Run lifecycle
 
     func beginRun(_ statements: [SQLStatementRange]) {
-        for r in results { r.view.removeFromSuperview() }
-        results = []
+        shown?.shownView.removeFromSuperview()
+        for r in results where !r.isPinned { r.removeFromParent() }
+        results = results.filter(\.isPinned)
         resultForStatement = [:]
         shown = nil
         showsMessages = false
@@ -108,7 +130,9 @@ final class ResultsViewController: NSViewController {
             log(statementLine(i), color: .labelColor, time: true)
             status(statements.count > 1 ? "Running statement \(i + 1) of \(statements.count)…" : "Running…")
         case .columns(let i, let columns):
-            let result = ResultGridController(columns: columns, statement: statements[i].text, number: results.count + 1)
+            let used = Set(results.map(\.number))
+            let number = (1...).first { !used.contains($0) }!
+            let result = ResultGridController(columns: columns, statement: statements[i].text, number: number)
             result.dialect = dialect
             results.append(result)
             resultForStatement[i] = result
@@ -120,6 +144,7 @@ final class ResultsViewController: NSViewController {
             if shown === resultForStatement[i] { updateStatus() }
         case .finished(let i, let outcome):
             resultForStatement[i]?.outcome = outcome
+            resultForStatement[i]?.rowsFinished()
             log("  " + describe(outcome, returnsRows: resultForStatement[i] != nil), color: .secondaryLabelColor)
             if shown === resultForStatement[i] { updateStatus() }
         case .failed(let i, let message, let duration):
@@ -154,7 +179,8 @@ final class ResultsViewController: NSViewController {
 
     private func updateStrip() {
         var items = results.map {
-            TabStrip.Item(title: "Result \($0.number)", symbol: "tablecells", closable: false, toolTip: $0.statement)
+            TabStrip.Item(title: "Result \($0.number)", symbol: $0.isPinned ? "pin.fill" : "tablecells", closable: $0.isPinned,
+                          toolTip: ($0.isPinned ? "Pinned. " : "") + $0.statement)
         }
         items.append(TabStrip.Item(title: "Messages", symbol: "text.alignleft", closable: false,
                                    tint: failedStatement == nil ? nil : .systemRed))
@@ -171,22 +197,58 @@ final class ResultsViewController: NSViewController {
     }
 
     private func show(_ result: ResultGridController) {
-        shown?.view.removeFromSuperview()
+        shown?.shownView.removeFromSuperview()
         showsMessages = false
         messagesScroll.isHidden = true
         shown = result
-        exportButton.isHidden = false
-        container.addSubview(result.view)
-        result.view.translatesAutoresizingMaskIntoConstraints = false
-        result.view.pin(to: container)
+        let v = result.shownView
+        container.addSubview(v)
+        v.translatesAutoresizingMaskIntoConstraints = false
+        v.pin(to: container)
+        updateButtons()
         updateStrip()
         updateStatus()
     }
 
+    private func updateButtons() {
+        for b in [exportButton, pinButton, chartButton] { b.isHidden = shown == nil }
+        pinButton.state = shown?.isPinned == true ? .on : .off
+        pinButton.image = NSImage(systemSymbolName: shown?.isPinned == true ? "pin.fill" : "pin", accessibilityDescription: "Pin")
+        chartButton.state = shown?.showsChart == true ? .on : .off
+    }
+
+    @objc func togglePin(_ sender: Any?) {
+        guard let shown else { return NSSound.beep() }
+        shown.isPinned.toggle()
+        updateButtons()
+        updateStrip()
+    }
+
+    @objc func toggleChart(_ sender: Any?) {
+        guard let result = shown else { return NSSound.beep() }
+        result.shownView.removeFromSuperview()
+        result.showsChart.toggle()
+        show(result)
+    }
+
+    /// A pinned result's close button: it goes; Messages or the next result shows instead.
+    private func closeResult(at i: Int) {
+        guard results.indices.contains(i) else { return }
+        let result = results.remove(at: i)
+        resultForStatement = resultForStatement.filter { $0.value !== result }
+        result.removeFromParent()
+        if shown === result {
+            result.shownView.removeFromSuperview()
+            shown = nil
+            if results.indices.contains(min(i, results.count - 1)) { show(results[min(i, results.count - 1)]) } else { showMessages() }
+        }
+        updateStrip()
+    }
+
     func showMessages() {
-        shown?.view.removeFromSuperview()
+        shown?.shownView.removeFromSuperview()
         shown = nil
-        exportButton.isHidden = true
+        updateButtons()
         showsMessages = true
         messagesScroll.isHidden = false
         placeholder.isHidden = true
@@ -267,7 +329,7 @@ final class ResultsViewController: NSViewController {
 
 /// One result set in a read-only grid. Rows arrive in batches while the statement runs.
 @MainActor
-final class ResultGridController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
+final class ResultGridController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSMenuItemValidation {
     let columns: [ResultColumn]
     let statement: String
     let number: Int
@@ -275,8 +337,19 @@ final class ResultGridController: NSViewController, NSTableViewDataSource, NSTab
     var outcome: ScriptRunner.Outcome?
     var wasCancelled = false
     var dialect: any Dialect = SQLiteDialect()
+    /// Kept through the next runs.
+    var isPinned = false
+    /// The rows as a chart instead of the grid.
+    var showsChart = false
+    private(set) lazy var chart: ChartViewController = {
+        let c = ChartViewController(columns: columns) { [weak self] in self?.rows ?? [] }
+        addChild(c)
+        return c
+    }()
     let grid = DataGrid()
     private var columnsSized = false
+    private var lastSelection = IndexSet()
+    private var cellViewer: CellEditorController?
     private static let copyLimit = 100_000
 
     init(columns: [ResultColumn], statement: String, number: Int) {
@@ -304,11 +377,18 @@ final class ResultGridController: NSViewController, NSTableViewDataSource, NSTab
         grid.dataSource = self
         grid.delegate = self
         let menu = NSMenu()
+        // No shortcuts in context menus: AppKit would take them off the main menu's items.
+        menu.addItem(withTitle: "Open Cell Viewer…", action: #selector(quickLook(_:)), keyEquivalent: "").target = self
+        menu.addItem(.separator())
         menu.addItem(withTitle: "Copy Rows", action: #selector(copy(_:)), keyEquivalent: "").target = self
         menu.addItem(CopyFormat.menuItem(target: self, action: #selector(copyRowsAs(_:))))
+        menu.addItem(withTitle: "Copy Selected Cells", action: #selector(copySelectedCells(_:)), keyEquivalent: "").target = self
+        menu.addItem(CopyFormat.menuItem(target: self, action: #selector(copySelectedCellsAs(_:)), title: "Copy Selected Cells As"))
+        menu.addItem(withTitle: "Copy Column Values", action: #selector(copyColumnValues(_:)), keyEquivalent: "").target = self
         menu.addItem(.separator())
         menu.addItem(withTitle: "Export…", action: #selector(TabulaActions.exportData(_:)), keyEquivalent: "")
         grid.menu = menu
+        grid.onFocusChange = { [weak self] _ in self?.refresh(self?.grid.selectedRowIndexes ?? []) }
         for (i, c) in columns.enumerated() {
             let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(String(i)))
             column.title = c.name
@@ -325,6 +405,14 @@ final class ResultGridController: NSViewController, NSTableViewDataSource, NSTab
         scroll.hasHorizontalScroller = true
         scroll.autohidesScrollers = true
         view = scroll
+    }
+
+    /// The grid, or the chart.
+    var shownView: NSView { showsChart ? chart.view : view }
+
+    /// The statement finished: a chart picks up every row.
+    func rowsFinished() {
+        if showsChart { chart.refreshColumns() }
     }
 
     func append(_ batch: [[DBValue]]) {
@@ -351,12 +439,85 @@ final class ResultGridController: NSViewController, NSTableViewDataSource, NSTab
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard let tableColumn, let i = Int(tableColumn.identifier.rawValue) else { return nil }
         let cell = tableView.makeView(withIdentifier: GridCell.identifier, owner: nil) as? GridCell ?? GridCell()
-        cell.show(.value(rows[row][i]))
+        cell.show(.value(rows[row][i]), focused: grid.isCellSelected(row: row, column: tableColumn))
         return cell
     }
 
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
         tableView.makeView(withIdentifier: GridRowView.identifier, owner: nil) as? GridRowView ?? GridRowView()
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        refresh(lastSelection.union(grid.selectedRowIndexes))
+        lastSelection = grid.selectedRowIndexes
+    }
+
+    private func refresh(_ rows: IndexSet) {
+        let rows = rows.filteredIndexSet { $0 < grid.numberOfRows }
+        grid.reloadData(forRowIndexes: rows, columnIndexes: IndexSet(integersIn: 0..<grid.numberOfColumns))
+    }
+
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        switch item.action {
+        case #selector(copySelectedCells(_:)), #selector(copySelectedCellsAs(_:)):
+            return !grid.selectedRowIndexes.isEmpty && grid.selectedColumnSpan != nil
+        case #selector(quickLook(_:)):
+            return grid.selectedRow >= 0 && grid.focusedColumnIndex != nil
+        case #selector(runCurrentQuery(_:)):
+            // ⌘↩ on a selected cell views it; otherwise the query editor runs.
+            guard viewsCellOnRun else { return editor?.validateMenuItem(item) ?? false }
+            item.title = "Open Cell Viewer"
+            return true
+        case #selector(copyColumnValues(_:)):
+            return !rows.isEmpty
+        default:
+            return true
+        }
+    }
+
+    /// ⌘↩ (Run Current's shortcut) while the result has the focus.
+    @objc func runCurrentQuery(_ sender: Any?) {
+        viewsCellOnRun ? quickLook(sender) : editor?.runCurrentQuery(sender)
+    }
+
+    private var viewsCellOnRun: Bool {
+        view.window?.firstResponder === grid && grid.selectedRow >= 0 && grid.focusedColumnIndex != nil
+    }
+
+    private var editor: QueryEditorViewController? { parent?.parent as? QueryEditorViewController }
+
+    /// ⌘↩: the value at the cursor in a window of its own, read-only.
+    @objc func quickLook(_ sender: Any?) {
+        let row = grid.clickedRow >= 0 ? grid.clickedRow : grid.selectedRow
+        guard row >= 0, row < rows.count, let display = grid.focusedColumnIndex, let window = view.window,
+              window.attachedSheet == nil, let i = Int(grid.tableColumns[display].identifier.rawValue) else { return NSSound.beep() }
+        let viewer = CellEditorController(title: columns[i].name, value: .value(rows[row][i]), typeName: columns[i].typeName ?? "",
+                                          isEditable: false, fileName: columns[i].name)
+        cellViewer = viewer
+        viewer.begin(on: window)
+    }
+
+    var shownCellViewer: CellEditorController? { cellViewer?.window?.isSheet == true ? cellViewer : nil }
+
+    /// ⇧⌘C: the selected rows across the selected columns.
+    @objc func copySelectedCells(_ sender: Any?) { copyCells(as: nil) }
+
+    @objc func copySelectedCellsAs(_ sender: Any?) {
+        guard let tag = (sender as? NSMenuItem)?.tag, CopyFormat.allCases.indices.contains(tag) else { return }
+        copyCells(as: CopyFormat.allCases[tag])
+    }
+
+    private func copyCells(as format: CopyFormat?) {
+        guard let span = grid.selectedColumnSpan else { return NSSound.beep() }
+        put(grid.selectedRowIndexes, columns: span.compactMap { Int(grid.tableColumns[$0].identifier.rawValue) }, as: format)
+    }
+
+    /// Every value of the clicked column, one per line.
+    @objc func copyColumnValues(_ sender: Any?) {
+        guard let display = grid.clickedColumn >= 0 ? grid.clickedColumn : grid.focusedColumnIndex,
+              let i = Int(grid.tableColumns[display].identifier.rawValue) else { return NSSound.beep() }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(CellText.tsv(rows.map { [$0[i]] }), forType: .string)
     }
 
     /// Copies the selected rows as tab-separated text, in the grid's column order.
@@ -371,9 +532,12 @@ final class ResultGridController: NSViewController, NSTableViewDataSource, NSTab
     private func copyRows(as format: CopyFormat?) {
         var selection = grid.selectedRowIndexes
         if grid.clickedRow >= 0, !selection.contains(grid.clickedRow) { selection = [grid.clickedRow] }
+        put(selection, columns: grid.tableColumns.compactMap { Int($0.identifier.rawValue) }, as: format)
+    }
+
+    private func put(_ selection: IndexSet, columns order: [Int], as format: CopyFormat?) {
         guard !selection.isEmpty else { return NSSound.beep() }
         guard selection.count <= Self.copyLimit else { return NSSound.beep() }
-        let order = grid.tableColumns.compactMap { Int($0.identifier.rawValue) }
         let ordered = selection.map { r in order.map { rows[r][$0] } }
         let text = format?.text(columns: order.map { columns[$0].name }, rows: ordered, dialect: dialect, table: nil)
             ?? CellText.tsv(ordered)

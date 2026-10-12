@@ -78,18 +78,27 @@ final class LeftSidebarController: NSViewController {
 /// A search field over a list; the base for the Queries and History panes.
 @MainActor
 class SidebarListController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
-    let table = NSTableView()
+    lazy var table: NSTableView = makeTable()
     let search = NSSearchField()
     let empty = NSTextField(wrappingLabelWithString: "")
+
+    /// The list view; the Queries pane uses an outline.
+    func makeTable() -> NSTableView { NSTableView() }
 
     override func loadView() {
         search.delegate = self
         search.sendsSearchStringImmediately = true
+        // Every keystroke filters (the action fires as the text changes).
+        search.target = self
+        search.action = #selector(searchChanged(_:))
         table.addTableColumn(NSTableColumn(identifier: .init("item")))
+        if let outline = table as? NSOutlineView { outline.outlineTableColumn = outline.tableColumns.first }
         table.headerView = nil
         table.style = .sourceList
-        table.dataSource = self
-        table.delegate = self
+        if !(table is NSOutlineView) {
+            table.dataSource = self
+            table.delegate = self
+        }
         table.target = self
         table.doubleAction = #selector(doubleClicked(_:))
         table.allowsMultipleSelection = false
@@ -122,7 +131,7 @@ class SidebarListController: NSViewController, NSTableViewDataSource, NSTableVie
 
     func numberOfRows(in tableView: NSTableView) -> Int { 0 }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? { nil }
-    func controlTextDidChange(_ obj: Notification) { reloadList() }
+    @objc private func searchChanged(_ sender: Any?) { reloadList() }
     func reloadList() {}
     @objc func doubleClicked(_ sender: Any?) {}
 
@@ -144,15 +153,31 @@ class SidebarListController: NSViewController, NSTableViewDataSource, NSTableVie
     }
 }
 
-/// Saved queries. Double-click opens one in a tab of its own.
+/// Saved queries, in folders (one level) then those in no folder. Double-click opens one in a
+/// tab of its own; dragging a query onto a folder (or the empty area) files it there.
 @MainActor
-final class SavedQueriesViewController: SidebarListController {
+final class SavedQueriesViewController: SidebarListController, NSOutlineViewDataSource, NSOutlineViewDelegate, NSMenuDelegate {
     let store: SavedQueries
     var onOpen: ((SavedQueries.Query) -> Void)?
     var onInsert: ((String) -> Void)?
-    /// After a rename (new value) or delete (nil).
+    /// After a rename or move (new value) or delete (nil).
     var onChange: ((SavedQueries.Query, SavedQueries.Query?) -> Void)?
-    private var shown: [SavedQueries.Query] = []
+
+    /// A row: a folder, or a query. Kept per path so the outline remembers what's expanded.
+    final class Node: NSObject {
+        let folder: String?
+        var query: SavedQueries.Query?
+        init(folder: String?, query: SavedQueries.Query?) {
+            self.folder = folder
+            self.query = query
+        }
+    }
+    private var roots: [Node] = []
+    private var folderChildren: [String: [Node]] = [:]
+    private var nodes: [String: Node] = [:]
+    private var collapsed = Set<String>()
+    private static let dragType = NSPasteboard.PasteboardType("app.tabula.saved-query")
+    var outline: NSOutlineView { table as! NSOutlineView }
 
     init(store: SavedQueries) {
         self.store = store
@@ -162,41 +187,89 @@ final class SavedQueriesViewController: SidebarListController {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
+    override func makeTable() -> NSTableView { NSOutlineView() }
+
     override func loadView() {
         super.loadView()
         search.placeholderString = "Search queries"
-        table.rowHeight = 24
+        outline.rowHeight = 24
+        outline.dataSource = self
+        outline.delegate = self
+        outline.indentationPerLevel = 12
+        outline.registerForDraggedTypes([Self.dragType])
+        outline.setDraggingSourceOperationMask(.move, forLocal: true)
         let menu = NSMenu()
-        for (title, action) in [("Open", #selector(open(_:))), ("Insert into Editor", #selector(insert(_:))),
-                                ("Rename…", #selector(rename(_:))), ("Show in Finder", #selector(reveal(_:))),
-                                ("Delete…", #selector(delete(_:)))] {
-            menu.addItem(withTitle: title, action: action, keyEquivalent: "").target = self
-        }
-        table.menu = menu
+        menu.delegate = self
+        outline.menu = menu
         NotificationCenter.default.addObserver(self, selector: #selector(storeChanged), name: SavedQueries.didChange, object: store)
         reloadList()
     }
 
     @objc private func storeChanged() { reloadList() }
 
+    private func node(folder: String?, query: SavedQueries.Query?) -> Node {
+        let key = query.map { "q:" + $0.path } ?? "f:" + (folder ?? "")
+        if let n = nodes[key] {
+            n.query = query
+            return n
+        }
+        let n = Node(folder: folder, query: query)
+        nodes[key] = n
+        return n
+    }
+
     override func reloadList() {
         store.reload()
         let q = search.stringValue.trimmingCharacters(in: .whitespaces)
-        shown = q.isEmpty ? store.queries : store.queries.filter { $0.name.localizedCaseInsensitiveContains(q) }
-        table.reloadData()
-        empty.stringValue = store.queries.isEmpty ? "No saved queries.\nIn a query tab, choose Add to Queries… from the Run menu." : "Nothing matches “\(q)”."
-        empty.isHidden = !shown.isEmpty
+        func matches(_ query: SavedQueries.Query) -> Bool { q.isEmpty || query.name.localizedCaseInsensitiveContains(q) }
+        folderChildren = [:]
+        var folderNodes: [Node] = []
+        for folder in store.folders {
+            let inside = store.queries(in: folder).filter(matches).map { node(folder: folder, query: $0) }
+            // While searching, folders without a match hide.
+            if !q.isEmpty && inside.isEmpty && !folder.localizedCaseInsensitiveContains(q) { continue }
+            folderChildren[folder] = inside
+            folderNodes.append(node(folder: folder, query: nil))
+        }
+        roots = folderNodes + store.queries(in: "").filter(matches).map { node(folder: nil, query: $0) }
+        outline.reloadData()
+        for n in folderNodes where !q.isEmpty || !collapsed.contains(n.folder!) { outline.expandItem(n) }
+        empty.stringValue = store.queries.isEmpty && store.folders.isEmpty
+            ? "No saved queries.\nIn a query tab, choose Add to Queries… from the Run menu." : "Nothing matches “\(q)”."
+        empty.isHidden = !roots.isEmpty
     }
 
-    override func numberOfRows(in tableView: NSTableView) -> Int { shown.count }
+    // MARK: - Outline
 
-    override func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+    func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
+        guard let n = item as? Node else { return roots.count }
+        return n.query == nil ? folderChildren[n.folder ?? ""]?.count ?? 0 : 0
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
+        guard let n = item as? Node else { return roots[index] }
+        return folderChildren[n.folder ?? ""]![index]
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
+        (item as? Node)?.query == nil
+    }
+
+    func outlineViewItemDidCollapse(_ notification: Notification) {
+        if let n = notification.userInfo?["NSObject"] as? Node, let f = n.folder, search.stringValue.isEmpty { collapsed.insert(f) }
+    }
+
+    func outlineViewItemDidExpand(_ notification: Notification) {
+        if let n = notification.userInfo?["NSObject"] as? Node, let f = n.folder { collapsed.remove(f) }
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
+        guard let n = item as? Node else { return nil }
         let id = NSUserInterfaceItemIdentifier("Query")
-        let cell = tableView.makeView(withIdentifier: id, owner: nil) as? NSTableCellView ?? {
+        let cell = outlineView.makeView(withIdentifier: id, owner: nil) as? NSTableCellView ?? {
             let c = NSTableCellView()
             c.identifier = id
             let image = NSImageView()
-            image.image = NSImage(systemSymbolName: "doc.text", accessibilityDescription: "Saved query")
             image.contentTintColor = .secondaryLabelColor
             let text = makeLabel(.systemFont(ofSize: NSFont.systemFontSize))
             for v in [image, text] {
@@ -204,7 +277,7 @@ final class SavedQueriesViewController: SidebarListController {
                 c.addSubview(v)
             }
             NSLayoutConstraint.activate([
-                image.leadingAnchor.constraint(equalTo: c.leadingAnchor, constant: 4),
+                image.leadingAnchor.constraint(equalTo: c.leadingAnchor, constant: 2),
                 image.centerYAnchor.constraint(equalTo: c.centerYAnchor),
                 image.widthAnchor.constraint(equalToConstant: 16),
                 text.leadingAnchor.constraint(equalTo: image.trailingAnchor, constant: 6),
@@ -212,55 +285,109 @@ final class SavedQueriesViewController: SidebarListController {
                 text.centerYAnchor.constraint(equalTo: c.centerYAnchor),
             ])
             c.textField = text
+            c.imageView = image
             return c
         }()
-        cell.textField?.stringValue = shown[row].name
-        cell.toolTip = "Modified \(shown[row].modified.formatted(date: .abbreviated, time: .shortened))"
+        if let query = n.query {
+            cell.textField?.stringValue = query.name
+            cell.imageView?.image = NSImage(systemSymbolName: "doc.text", accessibilityDescription: "Saved query")
+            cell.toolTip = "Modified \(query.modified.formatted(date: .abbreviated, time: .shortened))"
+        } else {
+            let count = store.queries(in: n.folder!).count
+            cell.textField?.stringValue = n.folder!
+            cell.imageView?.image = NSImage(systemSymbolName: "folder", accessibilityDescription: "Folder")
+            cell.toolTip = "\(count) quer\(count == 1 ? "y" : "ies")"
+        }
         return cell
     }
 
+    private func item(at row: Int) -> Node? { row >= 0 ? outline.item(atRow: row) as? Node : nil }
+    private var target: Node? { item(at: outline.clickedRow >= 0 ? outline.clickedRow : outline.selectedRow) }
+
+    /// The folder of the selected row, for Add to Queries.
+    var selectedFolder: String? {
+        guard let n = item(at: outline.selectedRow) else { return nil }
+        return n.query?.folder ?? n.folder
+    }
+
     override func doubleClicked(_ sender: Any?) {
-        if table.clickedRow >= 0 { onOpen?(shown[table.clickedRow]) }
+        guard let n = item(at: outline.clickedRow) else { return }
+        if let query = n.query { onOpen?(query) }
+        else if outline.isItemExpanded(n) { outline.collapseItem(n) } else { outline.expandItem(n) }
+    }
+
+    // MARK: - Menu
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        func add(_ title: String, _ action: Selector) -> NSMenuItem {
+            let item = menu.addItem(withTitle: title, action: action, keyEquivalent: "")
+            item.target = self
+            return item
+        }
+        if let query = target?.query {
+            _ = add("Open", #selector(open(_:)))
+            _ = add("Insert into Editor", #selector(insert(_:)))
+            _ = add("Rename…", #selector(rename(_:)))
+            let move = menu.addItem(withTitle: "Move to", action: nil, keyEquivalent: "")
+            move.submenu = NSMenu(title: "Move to")
+            for (title, folder) in [("No Folder", "")] + store.folders.map({ ($0, $0) }) {
+                let item = move.submenu!.addItem(withTitle: title, action: #selector(moveToFolder(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = folder
+                item.state = folder == query.folder ? .on : .off
+                item.isEnabled = folder != query.folder
+            }
+            _ = add("Show in Finder", #selector(reveal(_:)))
+            _ = add("Delete…", #selector(delete(_:)))
+            menu.addItem(.separator())
+        } else if target?.folder != nil {
+            _ = add("Rename Folder…", #selector(renameFolder(_:)))
+            _ = add("Delete Folder…", #selector(deleteFolder(_:)))
+            menu.addItem(.separator())
+        }
+        _ = add("New Folder…", #selector(newFolder(_:)))
     }
 
     @objc private func open(_ sender: Any?) {
-        if let row = targetRow { onOpen?(shown[row]) }
+        if let query = target?.query { onOpen?(query) }
     }
 
     @objc private func insert(_ sender: Any?) {
-        guard let row = targetRow, let text = try? store.text(of: shown[row]) else { return NSSound.beep() }
+        guard let query = target?.query, let text = try? store.text(of: query) else { return NSSound.beep() }
         onInsert?(text)
     }
 
     @objc private func reveal(_ sender: Any?) {
-        if let row = targetRow { NSWorkspace.shared.activateFileViewerSelecting([shown[row].url]) }
+        if let query = target?.query { NSWorkspace.shared.activateFileViewerSelecting([query.url]) }
     }
 
     @objc private func rename(_ sender: Any?) {
-        guard let row = targetRow, let window = view.window else { return }
-        let query = shown[row]
-        let alert = NSAlert()
-        alert.messageText = "Rename “\(query.name)”"
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 22))
-        field.stringValue = query.name
-        alert.accessoryView = field
-        alert.addButton(withTitle: "Rename")
-        alert.addButton(withTitle: "Cancel")
-        alert.window.initialFirstResponder = field
-        alert.beginSheetModal(for: window) { [weak self] response in
-            guard response == .alertFirstButtonReturn, let self else { return }
-            do {
-                let renamed = try self.store.rename(query, to: field.stringValue)
-                self.onChange?(query, renamed)
-            } catch {
-                self.show(error)
-            }
+        guard let query = target?.query else { return }
+        ask("Rename “\(query.name)”", value: query.name, button: "Rename") { [weak self] name in
+            guard let self else { return }
+            let renamed = try self.store.rename(query, to: name)
+            self.onChange?(query, renamed)
+        }
+    }
+
+    @objc private func moveToFolder(_ sender: NSMenuItem) {
+        guard let query = target?.query, let folder = sender.representedObject as? String else { return }
+        move(query, to: folder)
+    }
+
+    /// Files a query in a folder ("" for none), as the menu or a drag does.
+    func move(_ query: SavedQueries.Query, to folder: String) {
+        do {
+            let moved = try store.move(query, to: folder)
+            onChange?(query, moved)
+        } catch {
+            show(error)
         }
     }
 
     @objc private func delete(_ sender: Any?) {
-        guard let row = targetRow, let window = view.window else { return }
-        let query = shown[row]
+        guard let query = target?.query, let window = view.window else { return }
         let alert = NSAlert()
         alert.messageText = "Delete “\(query.name)”?"
         alert.informativeText = "The file is moved to the Trash."
@@ -280,12 +407,106 @@ final class SavedQueriesViewController: SidebarListController {
         }
     }
 
+    @objc func newFolder(_ sender: Any?) {
+        ask("New Folder", value: "", button: "Create") { [weak self] name in
+            guard let self else { return }
+            let folder = try self.store.addFolder(name)
+            self.collapsed.remove(folder)
+        }
+    }
+
+    @objc private func renameFolder(_ sender: Any?) {
+        guard let folder = target?.folder, target?.query == nil else { return }
+        let before = store.queries(in: folder)
+        ask("Rename Folder “\(folder)”", value: folder, button: "Rename") { [weak self] name in
+            guard let self else { return }
+            let new = try self.store.renameFolder(folder, to: name)
+            for q in before { self.onChange?(q, self.store.query(named: q.name, in: new)) }
+        }
+    }
+
+    @objc private func deleteFolder(_ sender: Any?) {
+        guard let folder = target?.folder, target?.query == nil, let window = view.window else { return }
+        let inside = store.queries(in: folder)
+        let alert = NSAlert()
+        alert.messageText = "Delete the folder “\(folder)”?"
+        alert.informativeText = inside.isEmpty ? "The folder is empty." : "It and its \(inside.count) quer\(inside.count == 1 ? "y" : "ies") are moved to the Trash."
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons[0].hasDestructiveAction = true
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn, let self else { return }
+            do {
+                try self.store.deleteFolder(folder)
+                for q in inside { self.onChange?(q, nil) }
+            } catch {
+                self.show(error)
+            }
+        }
+    }
+
+    private func ask(_ title: String, value: String, button: String, _ apply: @escaping (String) throws -> Void) {
+        guard let window = view.window else { return }
+        let alert = NSAlert()
+        alert.messageText = title
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 22))
+        field.stringValue = value
+        alert.accessoryView = field
+        alert.addButton(withTitle: button)
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            do { try apply(field.stringValue) } catch { self?.show(error) }
+        }
+    }
+
+    // MARK: - Drag to file
+
+    func outlineView(_ outlineView: NSOutlineView, pasteboardWriterForItem item: Any) -> (any NSPasteboardWriting)? {
+        guard let query = (item as? Node)?.query else { return nil }
+        let p = NSPasteboardItem()
+        p.setString(query.path, forType: Self.dragType)
+        return p
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, validateDrop info: any NSDraggingInfo, proposedItem item: Any?,
+                     proposedChildIndex index: Int) -> NSDragOperation {
+        guard info.draggingPasteboard.string(forType: Self.dragType) != nil else { return [] }
+        // Onto a folder (or a query inside it) files it there; anywhere else, out of folders.
+        if let n = item as? Node, n.query == nil {
+            outlineView.setDropItem(n, dropChildIndex: NSOutlineViewDropOnItemIndex)
+        } else if let n = item as? Node, let folder = n.query?.folder, !folder.isEmpty {
+            outlineView.setDropItem(nodes["f:" + folder], dropChildIndex: NSOutlineViewDropOnItemIndex)
+        } else {
+            outlineView.setDropItem(nil, dropChildIndex: NSOutlineViewDropOnItemIndex)
+        }
+        return .move
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, acceptDrop info: any NSDraggingInfo, item: Any?, childIndex index: Int) -> Bool {
+        guard let path = info.draggingPasteboard.string(forType: Self.dragType), let query = store.query(path: path) else { return false }
+        let folder = (item as? Node)?.folder ?? ""
+        guard folder != query.folder else { return false }
+        move(query, to: folder)
+        return true
+    }
+
     private func show(_ error: any Error) {
         DispatchQueue.main.async { [weak self] in
             guard let window = self?.view.window else { return }
             let alert = NSAlert()
             alert.messageText = "\(error)"
             alert.beginSheetModal(for: window)
+        }
+    }
+
+    // MARK: - For the dev harness
+
+    var shownRows: [String] {
+        (0..<outline.numberOfRows).compactMap { row in
+            guard let n = outline.item(atRow: row) as? Node else { return nil }
+            return n.query.map { ($0.folder.isEmpty ? "" : "  ") + $0.name } ?? "[\(n.folder!)]"
         }
     }
 }
@@ -296,7 +517,9 @@ final class HistoryViewController: SidebarListController {
     let history: QueryHistory
     var onInsert: ((String) -> Void)?
     var onOpenInNewTab: ((String) -> Void)?
-    private var shown: [QueryHistory.Entry] = []
+    /// Date headings, each followed by its entries.
+    private enum Row { case heading(String), entry(QueryHistory.Entry) }
+    private var rows: [Row] = []
 
     init(history: QueryHistory) {
         self.history = history
@@ -327,42 +550,84 @@ final class HistoryViewController: SidebarListController {
     @objc private func historyChanged() { reloadList() }
 
     override func reloadList() {
-        shown = history.search(search.stringValue)
+        let found = history.search(search.stringValue)
+        rows = QueryHistory.grouped(found).flatMap { [Row.heading($0.title)] + $0.entries.map(Row.entry) }
         table.reloadData()
         empty.stringValue = history.entries.isEmpty ? "Statements you run appear here." : "Nothing matches."
-        empty.isHidden = !shown.isEmpty
+        empty.isHidden = !found.isEmpty
     }
 
-    override func numberOfRows(in tableView: NSTableView) -> Int { shown.count }
+    private func entry(_ row: Int?) -> QueryHistory.Entry? {
+        guard let row, rows.indices.contains(row), case .entry(let e) = rows[row] else { return nil }
+        return e
+    }
+
+    override func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
 
     override func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        let id = NSUserInterfaceItemIdentifier("History")
-        let cell = tableView.makeView(withIdentifier: id, owner: nil) as? HistoryCell ?? HistoryCell(self)
-        cell.show(shown[row])
-        return cell
+        switch rows[row] {
+        case .heading(let title):
+            let label = makeLabel(.systemFont(ofSize: 11, weight: .semibold), color: .secondaryLabelColor)
+            label.stringValue = title
+            let cell = NSTableCellView()
+            label.translatesAutoresizingMaskIntoConstraints = false
+            cell.addSubview(label)
+            NSLayoutConstraint.activate([
+                label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 8),
+                label.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+            ])
+            return cell
+        case .entry(let e):
+            let id = NSUserInterfaceItemIdentifier("History")
+            let cell = tableView.makeView(withIdentifier: id, owner: nil) as? HistoryCell ?? HistoryCell(self)
+            cell.show(e)
+            return cell
+        }
     }
 
+    func tableView(_ tableView: NSTableView, isGroupRow row: Int) -> Bool {
+        if case .heading = rows[row] { return true }
+        return false
+    }
+
+    func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
+        if case .heading = rows[row] { return 22 }
+        return 58
+    }
+
+    func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool { entry(row) != nil }
+
     override func doubleClicked(_ sender: Any?) {
-        if table.clickedRow >= 0 { onInsert?(shown[table.clickedRow].sql) }
+        if let e = entry(table.clickedRow) { onInsert?(e.sql) }
     }
 
     @objc private func insert(_ sender: Any?) {
-        if let row = targetRow { onInsert?(shown[row].sql) }
+        if let e = entry(targetRow) { onInsert?(e.sql) }
     }
 
     @objc private func openInNewTab(_ sender: Any?) {
-        if let row = targetRow { onOpenInNewTab?(shown[row].sql) }
+        if let e = entry(targetRow) { onOpenInNewTab?(e.sql) }
     }
 
     @objc func copy(_ sender: Any?) {
-        guard let row = targetRow else { return NSSound.beep() }
+        guard let e = entry(targetRow) else { return NSSound.beep() }
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(shown[row].sql, forType: .string)
+        NSPasteboard.general.setString(e.sql, forType: .string)
     }
 
     @objc private func delete(_ sender: Any?) {
-        guard let row = targetRow else { return }
-        try? history.remove(shown[row])
+        guard let e = entry(targetRow) else { return }
+        try? history.remove(e)
+    }
+
+    /// For the dev harness: headings in brackets, entries as their SQL.
+    var shownRows: [String] {
+        rows.map { row in
+            switch row {
+            case .heading(let t): "[\(t)]"
+            case .entry(let e): e.sql
+            }
+        }
     }
 
     @objc private func clear(_ sender: Any?) {

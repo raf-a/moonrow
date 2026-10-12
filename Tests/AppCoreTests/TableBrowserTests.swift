@@ -123,6 +123,8 @@ private func tempDB(rows: Int) async throws -> URL {
     }
 
     @Test func smallFilteredOrUnknownTablesAreCounted() async throws {
+        // 999,999 estimated rows are counted; estimates start at 1,000,000.
+        #expect(try await count(estimate: 999_999).0 == RowCount(42))
         #expect(try await count(estimate: 99_999).0 == RowCount(42))
         #expect(try await count(estimate: -1).0 == RowCount(42))   // never analyzed
         #expect(try await count(estimate: nil, estimateFails: true).0 == RowCount(42))

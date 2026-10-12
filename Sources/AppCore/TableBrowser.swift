@@ -99,8 +99,8 @@ public struct TableBrowser: Sendable {
     }
 
     /// Unfiltered tables with at least this many rows (by the planner's estimate) show the
-    /// estimate instead of being counted. Our own threshold.
-    public static let estimateThreshold = 100_000
+    /// estimate instead of being counted.
+    public static let estimateThreshold = 1_000_000
 
     /// The row count the grid shows: the planner's estimate for a large unfiltered table where
     /// the database keeps one (Postgres), else `COUNT(*)`.
