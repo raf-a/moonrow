@@ -952,6 +952,15 @@ enum DevHarness {
         let item = menuItem(NSApp.mainMenu, action: #selector(TabulaActions.runAllQueries(_:)))
         print("Run All in the menu: \(item.map { KeyBinding($0.keyEquivalent, .init($0.keyEquivalentModifierMask)).display } ?? "missing")")
 
+        // The query tab is selected before the switch: its tab must follow the new appearance.
+        prefs.close()
+        let window = try require(workspace.window, "workspace window")
+        try app.settings.update { $0.appearance = .light }
+        workspace.newQueryTab(nil)
+        let query = try require(workspace.queryController, "query tab")
+        query.setText("-- paper theme, dark\nselect id, 'text' as s, 42 from \(table) where id > $1;")
+        try await Task.sleep(for: .milliseconds(200))
+        snap("p4b-light-editor.png", window)
         try app.settings.update {
             $0.appearance = .dark
             $0.editorTheme = EditorTheme.paper.id
@@ -959,18 +968,13 @@ enum DevHarness {
             $0.gridFontSize = 14
             $0.alternatingRows = false
         }
-        prefs.close()
-        let window = try require(workspace.window, "workspace window")
+        try await Task.sleep(for: .milliseconds(200))
+        snap("p5-dark-editor.png", window)
         _ = workspace.sidebar.select(named: table)
         let data = try await waitFor("table tab") { workspace.tableController }
         _ = try await waitFor("rows") { data.cache.flatMap { visibleLoaded(data.grid, $0) ? true : nil } }
         print("grid row height: \(data.grid.rowHeight)")
-        snap("p5-dark-grid.png", window)
-        workspace.newQueryTab(nil)
-        let query = try require(workspace.queryController, "query tab")
-        query.setText("-- paper theme, dark\nselect id, 'text' as s, 42 from \(table) where id > $1;")
-        try await Task.sleep(for: .milliseconds(200))
-        snap("p6-dark-editor.png", window)
+        snap("p6-dark-grid.png", window)
         try app.settings.update { $0 = AppSettings() }
     }
 

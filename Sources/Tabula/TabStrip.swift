@@ -206,12 +206,19 @@ private final class TabView: NSView {
         // The × keeps its space so titles don't shift on hover.
         close.isHidden = !item.closable
         close.alphaValue = isSelected || isHovered ? 1 : 0
-        layer?.backgroundColor = isSelected ? NSColor.controlBackgroundColor.cgColor
-            : isHovered ? NSColor.quaternaryLabelColor.withAlphaComponent(0.08).cgColor : nil
         needsDisplay = true
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        // Filled here rather than as a layer colour: a CGColor is resolved once, against whatever
+        // appearance is current at the time, and doesn't follow the window into dark mode.
+        if isSelected {
+            NSColor.controlBackgroundColor.setFill()
+            bounds.fill()
+        } else if isHovered {
+            NSColor.quaternaryLabelColor.withAlphaComponent(0.08).setFill()
+            bounds.fill(using: .sourceOver)
+        }
         // A hairline between tabs, and an accent line under the selected one.
         NSColor.separatorColor.setFill()
         NSRect(x: bounds.maxX - 1, y: 5, width: 1, height: bounds.height - 10).fill()
