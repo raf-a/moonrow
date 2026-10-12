@@ -57,6 +57,7 @@ final class PagingController: NSViewController {
 final class ChangesPreviewController: NSViewController {
     var onCommit: (() -> Void)?
     var onDiscard: (() -> Void)?
+    var onCancel: (() -> Void)?
     private let statements: [String]
     private let note: String?
     private let summary: String?
@@ -86,14 +87,16 @@ final class ChangesPreviewController: NSViewController {
         noteLabel.textColor = .systemOrange
         noteLabel.isHidden = note == nil
 
-        let discard = NSButton(title: "Discard", target: self, action: #selector(discard(_:)))
+        let discard = NSButton(title: "Discard All", target: self, action: #selector(discard(_:)))
+        let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancel(_:)))
+        cancel.keyEquivalent = "\u{1b}"
         let commit = NSButton(title: "Commit", target: self, action: #selector(commit(_:)))
         commit.keyEquivalent = "\r"
         let count = NSTextField(labelWithString: summary
             ?? "\(statements.count) \(statements.count == 1 ? "statement" : "statements"), run in one transaction")
         count.font = .systemFont(ofSize: 11)
         count.textColor = .secondaryLabelColor
-        let buttons = NSStackView(views: [count, NSView(), discard, commit])
+        let buttons = NSStackView(views: [count, NSView(), discard, cancel, commit])
 
         let stack = NSStackView(views: [scroll, noteLabel, buttons])
         stack.orientation = .vertical
@@ -109,6 +112,7 @@ final class ChangesPreviewController: NSViewController {
 
     @objc private func commit(_ sender: Any?) { onCommit?() }
     @objc private func discard(_ sender: Any?) { onDiscard?() }
+    @objc private func cancel(_ sender: Any?) { onCancel?() }
 }
 
 /// Edits a value that doesn't fit an inline field (several lines, or long).

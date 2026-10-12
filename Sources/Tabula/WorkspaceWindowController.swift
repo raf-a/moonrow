@@ -16,7 +16,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     let sidebar: SidebarViewController
     let leftSidebar: LeftSidebarController
     let content = WorkspaceTabsController()
+    /// Everything staged in this workspace; one commit (⌘S) covers it all.
+    let changes = StagedChanges()
     private var queryCount = 0
+    var isCommitting = false
+    /// The open preview sheet, if any.
+    var previewSheet: NSWindowController?
 
     /// `password` is the database password the workspace logged in with; safe mode's password
     /// levels ask for it.
@@ -56,6 +61,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         window.delegate = self
         safety.window = window
         NotificationCenter.default.addObserver(self, selector: #selector(safetyLevelChanged), name: SafetyGate.levelDidChange, object: safety)
+        NotificationCenter.default.addObserver(self, selector: #selector(stagedChangesChanged), name: StagedChanges.didChange, object: changes)
 
         let toolbar = NSToolbar(identifier: "Workspace")
         toolbar.delegate = self
@@ -69,6 +75,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         sidebar.onOpen = { [weak self] object in self?.open(object, newTab: false) }
         sidebar.onOpenInNewTab = { [weak self] object in self?.open(object, newTab: true) }
         sidebar.onObjectsLoaded = { [weak self] objects in self?.environment.catalog.setObjects(objects) }
+        sidebar.markFor = { [weak self] table in self?.changes.mark(for: table) }
+        sidebar.stagedNewTables = { [weak self] in
+            self?.changes.newTables.map { ($0.id, $0.editor.name) } ?? []
+        }
+        sidebar.onOpenNewTable = { [weak self] id in self?.openNewTable(id) }
         leftSidebar.queries.onOpen = { [weak self] query in self?.openSavedQuery(query) }
         leftSidebar.queries.onInsert = { [weak self] text in self?.insertIntoEditor(text) }
         leftSidebar.queries.onChange = { [weak self] old, new in self?.savedQueryChanged(old, to: new) }
@@ -90,36 +101,44 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     /// The selected tab's rows, if it shows a table's data.
     var tableController: TableDataViewController? { tableTab?.data }
     var queryController: QueryEditorViewController? { content.current as? QueryEditorViewController }
-    private var tableTabs: [TableTabViewController] { content.tabs.compactMap { $0 as? TableTabViewController } }
+    var tableTabs: [TableTabViewController] { content.tabs.compactMap { $0 as? TableTabViewController } }
 
     // MARK: - Opening
 
     /// Opens a table or view. A tab already showing it is selected. Otherwise it replaces the
     /// selected table tab, or opens a new tab when the selected tab is a query (or `newTab`).
+    /// Staged changes stay with the workspace, so replacing a tab never asks.
     func open(_ object: DatabaseObject, newTab: Bool, mode: TableTabViewController.Mode = .data) {
-        if let i = content.tabs.firstIndex(where: { ($0 as? TableTabViewController)?.table == object.ref }) {
+        if let i = content.tabs.firstIndex(where: {
+            ($0 as? TableTabViewController).map { $0.newTableID == nil && $0.table == object.ref } ?? false
+        }) {
             content.select(i)
             tableTab?.switchTo(mode)
             return
         }
-        let make = { [self] in makeTab(object, mode: mode) }
-        guard !newTab, let current = tableTab else {
-            return content.add(make())
+        let tab = makeTab(object, mode: mode)
+        guard !newTab, let current = tableTab, let i = content.tabs.firstIndex(where: { $0 === current }) else {
+            return content.add(tab)
         }
-        // Keep the sidebar on the table with staged edits until the user decides.
-        sidebar.reveal(current.table)
-        current.resolvePendingEdits(before: "Opening \(object.ref.name)") { [weak self] in
-            guard let self, let i = self.content.tabs.firstIndex(where: { $0 === current }) else { return }
-            self.content.replace(at: i, with: make())
-        }
+        current.endEditing()
+        content.replace(at: i, with: tab)
     }
 
-    /// A new tab with an empty structure; the table is created on commit.
+    /// Stages a new table and opens its structure; it is created on commit.
     @objc func newTable(_ sender: Any?) {
         guard !config.readOnly else { return NSSound.beep() }
-        content.add(configure(TableTabViewController(
-            connection: connection, newTable: TableRef(schema: sidebar.schema, ""), pageSize: config.pageSize)))
+        let taken = Set(environment.catalog.objects.map { $0.ref.name.lowercased() })
+        let id = changes.addNewTable(schema: sidebar.schema, dialect: connection.dialect, taken: taken)
+        openNewTable(id)
+    }
 
+    /// Selects the tab of a staged new table, or opens one.
+    func openNewTable(_ id: UUID) {
+        if let i = content.tabs.firstIndex(where: { ($0 as? TableTabViewController)?.newTableID == id }) {
+            return content.select(i)
+        }
+        content.add(configure(TableTabViewController(
+            connection: connection, changes: changes, newTable: id, schema: sidebar.schema, pageSize: config.pageSize)))
     }
 
     @discardableResult
@@ -157,10 +176,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         }
     }
 
-    private func tabChanged() {
+    func tabChanged() {
         let table = tableTab?.table
-        sidebar.reveal(table)
-        if let table {
+        if let id = tableTab?.newTableID { sidebar.reveal(newTable: id) } else { sidebar.reveal(table) }
+        if let table, tableTab?.newTableID == nil {
             window?.subtitle = "\(table) — \(config.summary)"
         } else if let editor = queryController {
             window?.subtitle = "\(editor.tabItem.title) — \(config.summary)"
@@ -169,25 +188,44 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         }
     }
 
-    // MARK: - Pending edits
+    // MARK: - Staged changes
 
-    var hasPendingEdits: Bool { tableTabs.contains { $0.hasPendingEdits } }
+    @objc private func stagedChangesChanged() {
+        window?.isDocumentEdited = !changes.isEmpty
+        sidebar.stagedChangesChanged()
+        content.refreshTabItems()
+    }
 
-    /// Asks, one tab at a time, to commit or discard staged edits, then runs `proceed`.
-    func resolvePendingEdits(before action: String, then proceed: @escaping () -> Void) {
-        guard let tab = tableTabs.first(where: \.hasPendingEdits),
-              let i = content.tabs.firstIndex(where: { $0 === tab }) else { return proceed() }
-        window?.makeKeyAndOrderFront(nil)
-        content.select(i)
-        tab.resolvePendingEdits(before: action) { [weak self] in
-            self?.resolvePendingEdits(before: action, then: proceed)
+    /// Asks to commit or discard everything staged before `action` (closing, quitting), then
+    /// runs `proceed`. Cancel does nothing.
+    func resolveStagedChanges(before action: String, then proceed: @escaping () -> Void) {
+        for tab in tableTabs { tab.endEditing() }
+        guard !changes.isEmpty, let window else { return proceed() }
+        window.makeKeyAndOrderFront(nil)
+        let alert = NSAlert()
+        alert.messageText = "Commit staged changes to \(config.displayName)?"
+        alert.informativeText = "\(action) drops changes that aren't committed:\n\(changes.summary)"
+        alert.addButton(withTitle: "Commit")
+        alert.addButton(withTitle: "Discard")
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons[1].hasDestructiveAction = true
+        alert.beginSheetModal(for: window) { [weak self] response in
+            switch response {
+            case .alertFirstButtonReturn: self?.commitStaged(then: proceed)
+            case .alertSecondButtonReturn:
+                self?.changes.discardAll()
+                proceed()
+            default: break
+            }
         }
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        guard hasPendingEdits else { return true }
-        resolvePendingEdits(before: "Closing the window") { sender.close() }
-        return false
+        guard changes.isEmpty else {
+            resolveStagedChanges(before: "Closing the window") { sender.close() }
+            return false
+        }
+        return true
     }
 
     /// Commands work wherever the focus is in the window, e.g. ⌘S or ⌘↩ from the sidebar.
@@ -206,11 +244,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
 
     // MARK: - Actions
 
+    /// ⌘R: reads the items and open tables again. Staged changes stay.
     @objc func reloadWorkspace(_ sender: Any?) {
-        resolvePendingEdits(before: "Reloading") { [self] in
-            sidebar.reload()
-            for tab in tableTabs { tab.reload() }
-        }
+        for tab in tableTabs { tab.endEditing() }
+        sidebar.reload()
+        for tab in tableTabs { tab.reload() }
     }
 
     @objc func focusItemFilter(_ sender: Any?) {

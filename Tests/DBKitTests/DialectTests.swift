@@ -45,6 +45,28 @@ private let my = MySQLDialect()
         #expect(render(pg, .init(.column("n"), .isEmpty)) == #""n"::text = ''"#)
     }
 
+    @Test func notBetweenAndLike() {
+        let notBetween = FilterCondition(.column("n"), .notBetween, "1", "100")
+        #expect(render(pg, notBetween) == #""n" NOT BETWEEN '1' AND '100'"#)
+        #expect(render(my, notBetween) == "`n` NOT BETWEEN '1' AND '100'")
+        #expect(render(sqlite, notBetween) == #""n" NOT BETWEEN '1' AND '100'"#)
+
+        // The pattern is used as typed: wildcards are not escaped.
+        let like = FilterCondition(.column("name"), .like, "a%_b")
+        #expect(render(pg, like) == #""name" LIKE 'a%_b'"#)
+        #expect(render(my, like) == "`name` LIKE 'a%_b'")
+        #expect(render(sqlite, like) == #""name" LIKE 'a%_b'"#)
+
+        let ilike = FilterCondition(.column("name"), .ilike, "A%")
+        #expect(render(pg, ilike) == #""name" ILIKE 'A%'"#)
+        #expect(render(my, ilike) == "LOWER(`name`) LIKE LOWER('A%')")
+        #expect(render(sqlite, ilike) == #"LOWER("name") LIKE LOWER('A%')"#)
+
+        // Any column compares as text, as the other operators do.
+        #expect(render(pg, .init(.anyColumn, .ilike, "x%"))
+                == #"("a"::text ILIKE 'x%' OR "b"::text ILIKE 'x%')"#)
+    }
+
     @Test func containsPerDialect() {
         let ci = FilterCondition(.column("name"), .contains, "50%_off")
         #expect(render(pg, ci) == #""name"::text ILIKE '%50\%\_off%'"#)

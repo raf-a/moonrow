@@ -179,8 +179,8 @@ final class Fixture: @unchecked Sendable {
     }
 
     /// The previewed statements in the form the log is compared in.
-    func expected(_ browser: TableBrowser, _ edits: StagedEdits) -> [String] {
-        let fragments = browser.dialect.statements(for: browser.changeSet(edits))
+    func expected(_ browser: TableBrowser, _ edits: TableEdits) -> [String] {
+        let fragments = browser.dialect.statements(for: edits.changeSet(dialect: browser.dialect))
         return fragments.map { expected($0, browser.dialect) }
     }
 
@@ -236,7 +236,7 @@ final class TraceLog: @unchecked Sendable {
 
 @Suite(.serialized) struct EditRoundTripTests {
     /// Commits, and returns what the database ran next to what the preview promised.
-    private func commit(_ f: Fixture, _ browser: TableBrowser, _ edits: StagedEdits) async throws -> (preview: [String], expected: [String], ran: [String]) {
+    private func commit(_ f: Fixture, _ browser: TableBrowser, _ edits: TableEdits) async throws -> (preview: [String], expected: [String], ran: [String]) {
         let preview = browser.preview(edits).map { String($0.dropLast()) }
         let expected = f.expected(browser, edits)
         try await f.startLog()
@@ -249,14 +249,14 @@ final class TraceLog: @unchecked Sendable {
         defer { Task { await f.tearDown() } }
         let (b, rows) = try await f.browser("items")
         func type(_ column: Int) -> String { b.columns[column].typeName }
-        var e = StagedEdits(baseRowCount: rows.count)
-        e.set(.value(CellInput.parse("plum's", typeName: type(1))), row: 0, column: 1, original: rows[0])
-        e.set(.value(CellInput.parse("7", typeName: type(2))), row: 0, column: 2, original: rows[0])
-        e.set(.value(CellInput.parse("0.75", typeName: type(3))), row: 0, column: 3, original: rows[0])
-        e.set(.value(.null), row: 1, column: 4, original: rows[1])         // Set Value ▸ NULL
-        e.set(.value(.text("")), row: 2, column: 1, original: rows[2])     // Set Value ▸ EMPTY
-        e.set(.defaultValue, row: 2, column: 4, original: rows[2])         // Set Value ▸ DEFAULT
-        e.set(.defaultValue, row: 1, column: 5, original: rows[1])         // DEFAULT CURRENT_TIMESTAMP
+        var e = b.newEdits()
+        e.set(.value(CellInput.parse("plum's", typeName: type(1))), column: 1, in: rows[0])
+        e.set(.value(CellInput.parse("7", typeName: type(2))), column: 2, in: rows[0])
+        e.set(.value(CellInput.parse("0.75", typeName: type(3))), column: 3, in: rows[0])
+        e.set(.value(.null), column: 4, in: rows[1])         // Set Value ▸ NULL
+        e.set(.value(.text("")), column: 1, in: rows[2])     // Set Value ▸ EMPTY
+        e.set(.defaultValue, column: 4, in: rows[2])         // Set Value ▸ DEFAULT
+        e.set(.defaultValue, column: 5, in: rows[1])         // DEFAULT CURRENT_TIMESTAMP
 
         let (preview, expected, ran) = try await commit(f, b, e)
         switch backend.kind {
@@ -291,8 +291,8 @@ final class TraceLog: @unchecked Sendable {
         let f = try await Fixture(backend)
         defer { Task { await f.tearDown() } }
         let (b, rows) = try await f.browser("items")
-        var e = StagedEdits(baseRowCount: rows.count)
-        e.set(.value(.integer(10)), row: 1, column: 0, original: rows[1])
+        var e = b.newEdits()
+        e.set(.value(.integer(10)), column: 0, in: rows[1])
         let (_, expected, ran) = try await commit(f, b, e)
         #expect(ran == expected && ran.count == 1)
         #expect(try await f.rows("SELECT id FROM items ORDER BY id") == [[.integer(1)], [.integer(3)], [.integer(10)]])
@@ -302,13 +302,13 @@ final class TraceLog: @unchecked Sendable {
         let f = try await Fixture(backend)
         defer { Task { await f.tearDown() } }
         let (b, rows) = try await f.browser("items")
-        var e = StagedEdits(baseRowCount: rows.count)
+        var e = b.newEdits()
         e.addRow([1: .value(.text("kiwi")), 2: .value(.integer(4))])
         e.addRow([1: .value(.text("blank"))])
         // Duplicate: every value but the primary key, which takes its default.
         let pk = Set(b.columns.indices.filter { b.columns[$0].primaryKeyPosition != nil })
         e.addRow(Dictionary(uniqueKeysWithValues: rows[0].indices.filter { !pk.contains($0) }.map { ($0, CellChange.value(rows[0][$0])) }))
-        e.delete(rows: [2], original: { rows[$0] })
+        e.delete(rows[2])
 
         let (preview, expected, ran) = try await commit(f, b, e)
         #expect(preview.count == 4)
@@ -329,8 +329,8 @@ final class TraceLog: @unchecked Sendable {
         let f = try await Fixture(backend)
         defer { Task { await f.tearDown() } }
         _ = try await f.db.execute("CREATE TABLE " + backend.ddl("d"))
-        let (b, rows) = try await f.browser("d")
-        var e = StagedEdits(baseRowCount: rows.count)
+        let (b, _) = try await f.browser("d")
+        var e = b.newEdits()
         e.addRow()
         let (preview, expected, ran) = try await commit(f, b, e)
         #expect(preview == [backend.kind == .mysql ? "INSERT INTO `d` () VALUES ()" : #"INSERT INTO "d" DEFAULT VALUES"#])
@@ -343,8 +343,8 @@ final class TraceLog: @unchecked Sendable {
         defer { Task { await f.tearDown() } }
         let (b, rows) = try await f.browser("nokey")
         #expect(!b.hasPrimaryKey)
-        var e = StagedEdits(baseRowCount: rows.count)
-        e.set(.value(.text("z")), row: 0, column: 0, original: rows[0])
+        var e = b.newEdits()
+        e.set(.value(.text("z")), column: 0, in: rows[0])
         let (preview, expected, ran) = try await commit(f, b, e)
         let q = b.dialect.quoteIdentifier
         #expect(preview == ["UPDATE \(q("nokey")) SET \(q("a")) = 'z' WHERE \(q("a")) = 'x' AND \(q("b")) = 1"])
@@ -355,9 +355,9 @@ final class TraceLog: @unchecked Sendable {
         let f = try await Fixture(backend)
         defer { Task { await f.tearDown() } }
         let (b, rows) = try await f.browser("nokey")
-        var e = StagedEdits(baseRowCount: rows.count)
-        e.set(.value(.text("first")), row: 0, column: 0, original: rows[0])
-        e.delete(rows: [1], original: { rows[$0] })   // matches both ('y', 2) rows
+        var e = b.newEdits()
+        e.set(.value(.text("first")), column: 0, in: rows[0])
+        e.delete(rows[1])   // matches both ('y', 2) rows
         await #expect(throws: DatabaseError.self) { try await b.commit(e) }
         // Rolled back, including the statement that succeeded.
         #expect(try await f.rows("SELECT a FROM nokey ORDER BY a") == [[.text("x")], [.text("y")], [.text("y")]])
@@ -367,9 +367,9 @@ final class TraceLog: @unchecked Sendable {
         let f = try await Fixture(backend)
         defer { Task { await f.tearDown() } }
         let (b, rows) = try await f.browser("items")
-        var e = StagedEdits(baseRowCount: rows.count)
+        var e = b.newEdits()
         e.addRow([1: .value(.text("new"))])
-        e.set(.value(.text("gone")), row: 0, column: 1, original: rows[0])
+        e.set(.value(.text("gone")), column: 1, in: rows[0])
         _ = try await f.db.execute("DELETE FROM items WHERE id = 1")
         await #expect(throws: DatabaseError.self) { try await b.commit(e) }
         #expect(try await f.rows("SELECT count(*) FROM items") == [[.integer(2)]])
@@ -396,16 +396,60 @@ final class TraceLog: @unchecked Sendable {
         #expect(try await f.ran(count: 1) == [f.expected(select, b.dialect)])
     }
 
-    /// Postgres pages without a sort are ordered by the primary key.
-    @Test(arguments: Backend.all) func unsortedPagesFollowTheKeyWhereScansAreUnstable(_ backend: Backend) async throws {
+    /// Server pages without a sort are ordered by the primary key.
+    @Test(arguments: Backend.all) func unsortedPagesFollowTheKeyOnServers(_ backend: Backend) async throws {
         let f = try await Fixture(backend)
         defer { Task { await f.tearDown() } }
         let b = try await TableBrowser.open(TableRef("items"), on: f.db)
         let sql = b.select(GridQuery(), offset: 0, limit: 10).inlined(for: b.dialect)
         let q = b.dialect.quoteIdentifier
-        let order = backend.kind == .postgres ? " ORDER BY \(q("id")) ASC" : ""
+        let order = backend.kind == .sqlite ? "" : " ORDER BY \(q("id")) ASC"
         #expect(sql == "SELECT * FROM \(q("items"))\(order) LIMIT 10")
         let keyless = try await TableBrowser.open(TableRef("nokey"), on: f.db)
         #expect(!keyless.select(GridQuery(), offset: 0, limit: 10).inlined(for: b.dialect).contains("ORDER BY"))
+    }
+
+    /// One workspace commit: row edits on two tables, a truncate and a drop. What the server ran
+    /// is what the preview listed, in that order (M6.5).
+    @Test(arguments: Backend.all) func workspaceCommit(_ backend: Backend) async throws {
+        let f = try await Fixture(backend)
+        defer { Task { await f.tearDown() } }
+        _ = try await f.db.execute("CREATE TABLE " + backend.ddl("d"))
+        let (items, rows) = try await f.browser("items")
+        let changes = await StagedChanges()
+        var e = items.newEdits()
+        e.set(.value(.text("plum")), column: 1, in: rows[0])
+        e.delete(rows[2])
+        await changes.setEdits(e)
+        let d = f.db.dialect
+        let nokey = DatabaseObject(TableRef("nokey"), kind: .table)
+        await changes.stage(StagedAction(.truncate, nokey, plan: try await ObjectActions.truncatePlan([nokey.ref], options: TruncateOptions(), on: f.db)))
+        let drop = DatabaseObject(TableRef("d"), kind: .table)
+        await changes.stage(StagedAction(.drop, drop, plan: try await ObjectActions.dropPlan([drop], options: DropOptions(), on: f.db)))
+        let plan = try await changes.plan(dialect: d)
+
+        let rowStatements = plan.sections.flatMap(\.rows)
+        let ddl = plan.sections.compactMap(\.ddl).flatMap { $0.setup + $0.statements + $0.teardown }
+        let expected = rowStatements.map { f.expected($0, d) } + ddl
+        #expect(plan.statements == rowStatements.map { $0.inlined(for: d) } + ddl)
+        #expect(plan.isAtomic == (backend.kind != .mysql))
+        try await f.startLog()
+        try await f.db.run(plan)
+        #expect(try await f.ran(count: expected.count) == expected)
+        #expect(try await f.rows("SELECT name FROM items ORDER BY id") == [[.text("plum")], [.text("pear")]])
+        #expect(try await f.rows("SELECT COUNT(*) FROM nokey").first?.first?.displayString == "0")
+        #expect(try await f.db.objects(schema: nil).map(\.ref.name).sorted() == ["items", "nokey"])
+    }
+
+    /// The planner estimate runs on Postgres and small tables still get counted.
+    @Test(arguments: Backend.all) func rowCountOfSmallTables(_ backend: Backend) async throws {
+        let f = try await Fixture(backend)
+        defer { Task { await f.tearDown() } }
+        let b = try await TableBrowser.open(TableRef("items"), on: f.db)
+        if let sql = b.dialect.estimatedCount(b.table) {
+            _ = try await f.db.execute("ANALYZE items")
+            #expect(try await f.db.execute(sql).rows == [[.integer(3)]])
+        }
+        #expect(try await b.rowCount() == RowCount(3))
     }
 }

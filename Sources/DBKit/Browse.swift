@@ -50,6 +50,14 @@ extension Dialect {
             + whereClause(filter, allColumns: allColumns)
     }
 
+    /// A planner estimate of the table's rows, cheaper than COUNT(*); nil where the database
+    /// keeps none worth showing. The result is one integer, negative when unknown.
+    public func estimatedCount(_ table: TableRef) -> SQLFragment? {
+        guard self is PostgresDialect else { return nil }
+        // reltuples is -1 until the table is first vacuumed or analyzed (PG 14+).
+        return "SELECT reltuples::bigint FROM pg_class WHERE oid = " + .value(.text(qualified(table))) + "::regclass"
+    }
+
     private func whereClause(_ filter: Filter?, allColumns: [String]) -> SQLFragment {
         guard let filter, let p = predicate(for: filter, columns: allColumns) else { return SQLFragment() }
         return " WHERE " + p

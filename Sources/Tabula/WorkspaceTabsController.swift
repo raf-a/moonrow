@@ -134,6 +134,9 @@ final class WorkspaceTabsController: NSViewController {
         select(i)
     }
 
+    /// Redraws tab titles (a staged new table was renamed, say).
+    func refreshTabItems() { updateStrip() }
+
     private func updateStrip() {
         strip.items = tabs.map(\.tabItem)
         strip.selectedIndex = selectedIndex

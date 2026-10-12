@@ -3,8 +3,9 @@ import AppKit
 import DBKit
 
 /// A table's columns and indexes, editable. Changes are staged in a `StructureEditor` and drawn
-/// over the loaded structure (new rows green, deleted rows struck out, changed cells yellow)
-/// until Commit (⌘S) runs the DDL or Discard (⇧⌘⌫) drops them.
+/// over the loaded structure (new rows green, deleted rows struck out, changed cells yellow).
+/// The editor lives in the workspace's `StagedChanges`, so it outlives the tab; the workspace
+/// commits (⌘S) or discards (⇧⌘⌫) it with everything else staged.
 @MainActor
 final class StructureViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate,
     NSTextFieldDelegate, NSSearchFieldDelegate, NSMenuItemValidation, TabulaActions
@@ -61,8 +62,6 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
     var safety: SafetyGate?
     /// Why the structure can't be changed (a view, a read-only connection), or nil.
     let readOnlyReason: String?
-    /// After a commit: the table's name now (it may have been renamed), and whether it was created.
-    var onCommitted: ((_ table: TableRef, _ created: Bool) -> Void)?
     /// When staged changes appear or go away.
     var onPendingChange: (() -> Void)?
     /// Tables the foreign-key editor offers.
@@ -72,10 +71,11 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
 
     private(set) var editor: StructureEditor?
     let kind: ObjectKind
-    /// True until a new table has been created.
-    private(set) var creating: Bool
+    private let changes: StagedChanges
+    /// Set for a table that exists only as staged so far.
+    let newTableID: UUID?
+    var creating: Bool { newTableID != nil }
     private var loadTask: Task<Void, Never>?
-    private var isCommitting = false
     let columnsGrid = DataGrid()
     let indexGrid = DataGrid()
     let nameField = NSTextField()
@@ -94,25 +94,48 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
     private var loadedKey: Set<String> = []
 
     /// Opens an existing table's structure.
-    init(connection: any DatabaseConnection, object: DatabaseObject, readOnlyConnection: Bool) {
+    init(connection: any DatabaseConnection, changes: StagedChanges, object: DatabaseObject, readOnlyConnection: Bool) {
         self.connection = connection
+        self.changes = changes
         self.table = object.ref
         self.kind = object.kind
-        self.creating = false
+        self.newTableID = nil
         self.readOnlyReason = readOnlyConnection ? "The connection is read-only."
             : object.kind == .table ? nil : "Only a table's structure can be changed here."
         super.init(nibName: nil, bundle: nil)
+        observeChanges()
     }
 
-    /// Starts a new table that is created on commit.
-    init(connection: any DatabaseConnection, newTable: TableRef) {
+    /// A staged new table, created when the workspace commits.
+    init(connection: any DatabaseConnection, changes: StagedChanges, newTable id: UUID, schema: String?) {
         self.connection = connection
-        self.table = newTable
+        self.changes = changes
+        self.newTableID = id
+        self.editor = changes.newTable(id)
+        self.table = TableRef(schema: schema, editor?.name ?? "")
         self.kind = .table
-        self.creating = true
         self.readOnlyReason = nil
-        self.editor = StructureEditor.newTable(newTable, dialect: connection.dialect)
         super.init(nibName: nil, bundle: nil)
+        observeChanges()
+    }
+
+    private func observeChanges() {
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(stagedChangesChanged), name: StagedChanges.didChange, object: changes)
+    }
+
+    /// The workspace discarded (or committed) what this editor staged: show the table as loaded
+    /// until it reloads.
+    @objc private func stagedChangesChanged() {
+        guard isViewLoaded, editing == nil, let editor else { return }
+        if let newTableID {
+            guard let staged = changes.newTable(newTableID) else { return }
+            self.editor = staged
+            refresh()
+        } else if editor.hasChanges, changes.structure(for: table) == nil {
+            self.editor = StructureEditor(editor.original)
+            refresh()
+        }
     }
 
     @available(*, unavailable)
@@ -236,8 +259,8 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
         definitionButton.toolTip = "Show the statements that create this table"
         definitionButton.isEnabled = !creating
         changesButton.target = self
-        changesButton.action = #selector(previewChanges(_:))
-        changesButton.toolTip = "Review the SQL for staged changes (⇧⌘P)"
+        changesButton.action = #selector(showChanges(_:))
+        changesButton.toolTip = "Review the SQL for every staged change (⇧⌘P)"
         changesButton.contentTintColor = .systemOrange
         changesButton.isHidden = true
         for b in [addColumnButton, addIndexButton, definitionButton, changesButton] {
@@ -281,9 +304,17 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
         loadTask?.cancel()
     }
 
-    /// Reads the structure again. Staged changes are dropped: callers ask first.
+    /// Reads the structure again, unless changes to it are staged: those are kept.
     func reload() {
-        guard !creating else { return refresh() }
+        if let newTableID {
+            editor = changes.newTable(newTableID) ?? editor
+            return refresh()
+        }
+        if let staged = changes.structure(for: table) {
+            editor = staged
+            loadedKey = Set(staged.original.primaryKey)
+            return refresh()
+        }
         stop()
         abortInlineEdit()
         showStatus("Loading…")
@@ -326,7 +357,7 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
         }
         let count = editor.exists ? changeCount(editor) : 1
         changesButton.isHidden = !editor.hasChanges
-        changesButton.title = creating && !editor.exists ? "Create table" : "\(count) \(count == 1 ? "change" : "changes")"
+        changesButton.title = creating ? "New table" : "\(count) \(count == 1 ? "change" : "changes")"
         onPendingChange?()
     }
 
@@ -585,6 +616,7 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
     private func change(_ edit: (inout StructureEditor) -> Void) {
         guard editor != nil else { return }
         edit(&editor!)
+        if let newTableID { changes.setNewTable(newTableID, editor!) } else { changes.setStructure(editor!) }
         refresh()
     }
 
@@ -731,8 +763,10 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
         showForeignKeyEditor(forColumnRow: visibleColumns[row], grid: columnsGrid, row: row)
     }
 
+    /// ⌥⌘R: reads the structure again; staged changes to it stay.
     @objc func reloadCurrentTab(_ sender: Any?) {
-        resolvePendingChanges(before: "Reloading") { [weak self] in self?.reload() }
+        endInlineEdit()
+        reload()
     }
 
     private func makeColumnMenu() -> NSMenu {
@@ -766,8 +800,6 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         guard let editor else { return false }
         switch item.action {
-        case #selector(commitChanges(_:)), #selector(discardChanges(_:)), #selector(previewChanges(_:)):
-            return isEditable && editor.hasChanges
         case #selector(restoreRows(_:)):
             if item.menu === indexGrid.menu { return indexGrid.selectedRowIndexes.contains { editor.indexes[$0].isDeleted } }
             return columnsGrid.selectedRowIndexes.contains { editor.columns[visibleColumns[$0]].isDeleted }
@@ -789,106 +821,12 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
         }
     }
 
-    // MARK: - Commit, discard, preview
+    // MARK: - Staged changes
 
-    @objc func commitChanges(_ sender: Any?) {
+    /// The bottom bar's change count: shows the workspace's preview.
+    @objc private func showChanges(_ sender: Any?) {
         endInlineEdit()
-        guard isEditable, editor?.hasChanges == true else { return NSSound.beep() }
-        commit(then: nil)
-    }
-
-    private func commit(then proceed: (() -> Void)?) {
-        guard let editor, !isCommitting else { return }
-        let plan: DDLPlan
-        do {
-            plan = try editor.plan(for: dialect)
-        } catch {
-            return showError(error, title: "Can't apply these changes", staged: true)
-        }
-        isCommitting = true
-        popover?.close()
-        showStatus(creating && !editor.exists ? "Creating…" : "Applying…")
-        let newRef = TableRef(schema: table.schema, editor.name)
-        let created = !editor.exists
-        Task {
-            defer { isCommitting = false }
-            if let safety, await !safety.approve(plan.setup + plan.statements + plan.teardown) {
-                showStatus("")
-                return
-            }
-            do {
-                try await connection.apply(plan)
-                table = newRef
-                showStatus("")
-                if created {
-                    self.editor = nil
-                    creating = false
-                    definitionButton.isEnabled = true
-                }
-                onCommitted?(newRef, created)
-                if let proceed {
-                    proceed()
-                } else {
-                    reload()
-                }
-            } catch {
-                showStatus("")
-                if plan.isAtomic {
-                    showError(error, title: "Couldn't apply structure changes", staged: true)
-                } else {
-                    // Some statements went through; what's staged no longer matches the table.
-                    showError(error, title: "Couldn't apply all structure changes", staged: false)
-                    reload()
-                }
-            }
-        }
-    }
-
-    private func showError(_ error: any Error, title: String, staged: Bool) {
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = title
-        var info = "\(error)"
-        if let sql = (error as? DatabaseError)?.sql { info += "\n\n\(sql)" }
-        info += staged ? "\n\nNothing was changed. Your edits are still staged."
-            : "\n\nThe structure has been reloaded to show what the table looks like now."
-        alert.informativeText = info
-        if let window = view.window { alert.beginSheetModal(for: window) } else { alert.runModal() }
-    }
-
-    @objc func discardChanges(_ sender: Any?) {
-        abortInlineEdit()
-        guard isEditable, editor?.hasChanges == true, !creating else { return NSSound.beep() }
-        discardStaged()
-    }
-
-    private func discardStaged() {
-        popover?.close()
-        if let structure = editor?.original { editor = StructureEditor(structure) }
-        refresh()
-    }
-
-    @objc func previewChanges(_ sender: Any?) {
-        endInlineEdit()
-        guard let editor, editor.hasChanges else { return NSSound.beep() }
-        let plan: DDLPlan
-        do {
-            plan = try editor.plan(for: dialect)
-        } catch {
-            return showError(error, title: "Can't apply these changes", staged: true)
-        }
-        let n = plan.setup.count + plan.statements.count + plan.teardown.count
-        let summary = plan.isAtomic
-            ? "\(n) \(n == 1 ? "statement" : "statements")\(plan.statements.count > 1 ? ", run in one transaction" : "")"
-            : "\(n) statements; \(dialect.name) applies each one as it runs"
-        let controller = ChangesPreviewController(statements: [plan.preview], note: nil, summary: summary)
-        controller.onCommit = { [weak self] in self?.commitChanges(nil) }
-        controller.onDiscard = { [weak self] in
-            self?.popover?.close()
-            self?.discardChanges(nil)
-        }
-        let anchor: NSView = changesButton.isHidden ? definitionButton : changesButton
-        present(controller, from: anchor, size: NSSize(width: 680, height: 360))
+        NSApp.sendAction(#selector(TabulaActions.previewChanges(_:)), to: nil, from: self)
     }
 
     @objc private func showDefinition(_ sender: Any?) {
@@ -903,29 +841,5 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
                 showStatus("\(error)", isError: true)
             }
         }
-    }
-
-    /// Asks to commit or discard staged changes before `action`, then runs `proceed`.
-    func resolvePendingChanges(before action: String, then proceed: @escaping () -> Void) {
-        endInlineEdit()
-        guard let editor, editor.hasChanges, isEditable else { return proceed() }
-        let alert = NSAlert()
-        alert.messageText = creating ? "Create table \(editor.name)?" : "Apply structure changes to \(table.name)?"
-        alert.informativeText = "\(action) leaves the structure editor, so staged changes (\(changesButton.title)) must be applied or discarded first."
-        alert.addButton(withTitle: creating ? "Create" : "Apply")
-        alert.addButton(withTitle: "Discard")
-        alert.addButton(withTitle: "Cancel")
-        alert.buttons[1].hasDestructiveAction = true
-        let handle: (NSApplication.ModalResponse) -> Void = { [weak self] response in
-            guard let self else { return }
-            switch response {
-            case .alertFirstButtonReturn: self.commit(then: proceed)
-            case .alertSecondButtonReturn:
-                if !self.creating { self.discardStaged() }
-                proceed()
-            default: break
-            }
-        }
-        if let window = view.window { alert.beginSheetModal(for: window, completionHandler: handle) } else { handle(alert.runModal()) }
     }
 }

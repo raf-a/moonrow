@@ -23,6 +23,8 @@ public protocol Dialect: Sendable {
         _ expression: String, _ kind: PatternKind, _ value: String,
         caseSensitive: Bool, negated: Bool
     ) -> SQLFragment
+    /// `expression ILIKE pattern`, the pattern as given.
+    func caseInsensitiveLike(_ expression: String, _ pattern: DBValue) -> SQLFragment
     func limitClause(limit: Int?, offset: Int) -> String
     func insertDefaultValues(into table: String) -> String
     /// What `SET column = …` writes to restore the column's default.
@@ -32,9 +34,13 @@ public protocol Dialect: Sendable {
     var commitTransaction: String { get }
     var rollbackTransaction: String { get }
 
-    /// Whether an unsorted page needs an ORDER BY (the primary key) to stay stable across
-    /// OFFSETs. SQLite's and InnoDB's scans are; Postgres's may not be (synchronized scans).
+    /// Whether an unsorted page is ordered by the primary key. Postgres's scan order can change
+    /// between OFFSETs (synchronized scans); MySQL's pages are ordered too.
+    /// SQLite's rowid scan is stable.
     var pagesNeedKeyOrder: Bool { get }
+    /// Whether DDL can run inside a transaction and roll back with it. MySQL commits each DDL
+    /// statement (TRUNCATE included) as it runs.
+    var transactionalDDL: Bool { get }
 
     /// Makes `schema` where unqualified names resolve for the rest of the session; nil where
     /// the database has a single namespace.
@@ -76,6 +82,11 @@ extension Dialect {
         return "LOWER(\(expression))\(not) LIKE LOWER(" + .value(pattern) + ")"
     }
 
+    /// No ILIKE outside Postgres: lower-case both sides.
+    public func caseInsensitiveLike(_ expression: String, _ pattern: DBValue) -> SQLFragment {
+        "LOWER(\(expression)) LIKE LOWER(" + .value(pattern) + ")"
+    }
+
     public func limitClause(limit: Int?, offset: Int) -> String {
         var s = ""
         if let limit { s += " LIMIT \(limit)" }
@@ -93,6 +104,7 @@ extension Dialect {
     public var commitTransaction: String { "COMMIT" }
     public var rollbackTransaction: String { "ROLLBACK" }
     public var pagesNeedKeyOrder: Bool { false }
+    public var transactionalDDL: Bool { true }
     public func useSchema(_ schema: String) -> String? { nil }
 
     /// LIKE pattern with `\` as the escape character.

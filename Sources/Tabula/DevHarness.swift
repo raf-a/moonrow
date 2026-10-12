@@ -16,6 +16,7 @@ import Darwin
 ///     TABULA_PREFS=users TABULA_STORE=… TABULA_SNAPSHOTS=… Tabula build/sample.sqlite
 ///     TABULA_EXPORT=events TABULA_STORE=… TABULA_SNAPSHOTS=build/snapshots Tabula build/sample.sqlite
 ///     TABULA_IMPORT=empty_table=/tmp/rows.csv TABULA_STORE=… TABULA_SNAPSHOTS=… Tabula /tmp/copy-of-sample.sqlite
+///     TABULA_STAGED=users TABULA_STORE=… TABULA_SNAPSHOTS=… Tabula build/sample.sqlite
 ///
 /// The bench opens the table in the first workspace with every row in one page, scrolls it like
 /// a fast trackpad, jumps to far-apart rows, prints timings and quits. The demo drives the grid's
@@ -99,6 +100,19 @@ enum DevHarness {
                     try await demo(app, table, snapshots)
                 } catch {
                     print("\(key) demo failed: \(error)")
+                }
+                NSApp.terminate(nil)
+            }
+            return
+        }
+        // Staged changes across pages, tabs and reloads, then discarded: it never commits.
+        if let table = env["TABULA_STAGED"] {
+            Task {
+                do {
+                    guard env["TABULA_STORE"] != nil else { throw HarnessError("TABULA_STAGED needs TABULA_STORE") }
+                    try await stagedDemo(app, table: table, snapshots: snapshots)
+                } catch {
+                    print("staged demo failed: \(error)")
                 }
                 NSApp.terminate(nil)
             }
@@ -314,15 +328,13 @@ enum DevHarness {
         window.displayIfNeeded()
         snap("2-staged-top.png", window)
 
-        data.previewChanges(nil)
+        workspace.previewChanges(nil)
         try await Task.sleep(for: .milliseconds(300))
-        let preview = NSApp.windows.first { $0.className.contains("Popover") && $0.isVisible }
-        snap("3-preview.png", preview)
-        print("preview:")
-        for line in data.browser!.preview(data.edits) { print("  \(line)") }
+        snap("3-preview.png", window.attachedSheet)
+        print("preview:\n" + (try workspace.changes.plan(dialect: workspace.connection.dialect).preview))
 
         let staged = data.cache.map(ObjectIdentifier.init)
-        data.commitChanges(nil)
+        workspace.commitChanges(nil)
         do {
             _ = try await waitFor("reload after commit") { data.cache.map(ObjectIdentifier.init) != staged ? true : nil }
         } catch {
@@ -330,8 +342,97 @@ enum DevHarness {
             throw error
         }
         try await loaded()
-        print("committed; staged changes left: \(data.edits.isEmpty ? 0 : 1), page: \(data.query.page.describe(total: data.total))")
+        print("committed; staged changes left: \(workspace.changes.isEmpty ? 0 : 1), page: \(data.query.page.describe(total: data.total))")
         snap("4-committed.png", window)
+    }
+
+    /// Staged changes belong to the workspace (M6.5): an edit survives paging, closing the tab
+    /// and reopening the table, and ⌘R; a truncate, a drop and a new table join it in one
+    /// preview; Discard All drops everything. Nothing is committed.
+    private static func stagedDemo(_ app: AppDelegate, table: String, snapshots: URL?) async throws {
+        if let snapshots { try FileManager.default.createDirectory(at: snapshots, withIntermediateDirectories: true) }
+        func snap(_ name: String, _ window: NSWindow?) {
+            window?.displayIfNeeded()
+            if let snapshots, let window { snapshot(window, to: snapshots.appending(path: name)) }
+        }
+        func check(_ ok: Bool, _ what: String) throws {
+            guard ok else { throw HarnessError("expected: \(what)") }
+            print("ok: \(what)")
+        }
+        let workspace = try await waitFor("workspace") { app.workspaces.first }
+        let window = try require(workspace.window, "workspace window")
+        let changes = workspace.changes
+        let ref = TableRef(schema: workspace.sidebar.schema, table)
+        func open() async throws -> TableDataViewController {
+            _ = try await waitFor("sidebar item \(table)") { workspace.sidebar.select(named: table) ? true : nil }
+            let data = try await waitFor("table view") { workspace.tableController.flatMap { $0.table.name == table ? $0 : nil } }
+            _ = try await waitFor("rows") { data.cache.flatMap { visibleLoaded(data.grid, $0) ? true : nil } }
+            return data
+        }
+        func pageChange(_ data: TableDataViewController, _ go: () -> Void) async throws {
+            let before = data.cache.map(ObjectIdentifier.init)
+            go()
+            _ = try await waitFor("page") { data.cache.map(ObjectIdentifier.init) != before ? true : nil }
+            _ = try await waitFor("rows") { data.cache.flatMap { visibleLoaded(data.grid, $0) ? true : nil } }
+        }
+
+        var data = try await open()
+        let grid = data.grid
+        window.makeFirstResponder(grid)
+        grid.selectRowIndexes([0], byExtendingSelection: false)
+        grid.focusedColumn = grid.tableColumns[1].identifier
+        grid.keyDown(with: try key("\r", code: 36))
+        let editor = try require(window.firstResponder as? NSTextView, "field editor")
+        editor.selectAll(nil)
+        editor.insertText("staged by demo", replacementRange: editor.selectedRange())
+        window.makeFirstResponder(grid)
+        let edited = try require(data.cache?.row(at: 0), "row 0")
+        try check(data.edits.state(of: edited) == .edited, "row 0 is edited")
+
+        try await pageChange(data) { data.nextPage(nil) }
+        try check(data.edits.state(of: data.cache?.row(at: 0)) == .unchanged && data.edits.summary == "1 edited",
+                  "page 2 shows other rows; the edit is still staged")
+        try await pageChange(data) { data.previousPage(nil) }
+        try check(data.edits.state(of: data.cache?.row(at: 0)) == .edited, "back on page 1 the edit shows again")
+
+        workspace.closeTab(nil)
+        try check(workspace.tableTab == nil && changes.edits(for: ref) != nil, "closing the tab keeps the edit, without asking")
+        data = try await open()
+        try check(data.edits.state(of: data.cache?.row(at: 0)) == .edited, "reopening the table shows the edit")
+        snap("1-reopened.png", window)
+
+        try await pageChange(data) { workspace.reloadWorkspace(nil) }
+        try check(data.edits.state(of: data.cache?.row(at: 0)) == .edited, "⌘R keeps the edit")
+
+        // The sidebar's Truncate and Delete stage what their dialogs worked out.
+        let others = workspace.environment.catalog.objects.filter { $0.kind == .table && $0.ref.name != table }
+        if let truncated = others.first {
+            let plan = try await ObjectActions.truncatePlan([truncated.ref], options: TruncateOptions(), on: workspace.connection)
+            changes.stage(StagedAction(.truncate, truncated, plan: plan))
+        }
+        if others.count > 1 {
+            let plan = try await ObjectActions.dropPlan([others[1]], options: DropOptions(), on: workspace.connection)
+            changes.stage(StagedAction(.drop, others[1], plan: plan))
+        }
+        workspace.newTable(nil)
+        _ = try await waitFor("new table tab") { workspace.tableTab?.newTableID }
+        snap("2-marks.png", window)
+        let plan = try changes.plan(dialect: workspace.connection.dialect)
+        print("preview:\n" + plan.preview)
+        try check(plan.sections.count == 2 + min(2, others.count), "one preview covers every table")
+        workspace.previewChanges(nil)
+        try await Task.sleep(for: .milliseconds(300))
+        snap("3-preview.png", window.attachedSheet)
+        if let sheet = window.attachedSheet { window.endSheet(sheet) }
+        workspace.previewSheet = nil
+
+        workspace.discardChanges(nil)
+        try check(changes.isEmpty, "Discard All empties the workspace")
+        try check(!workspace.tableTabs.contains { $0.newTableID != nil }, "the new table's tab closed")
+        let shown = try await waitFor("table tab") { workspace.tableTabs.first { $0.table == ref }?.data }
+        _ = try await waitFor("rows") { shown.cache.flatMap { visibleLoaded(shown.grid, $0) ? true : nil } }
+        try check(shown.edits.state(of: shown.cache?.row(at: 0)) == .unchanged, "the grid shows the loaded value again")
+        snap("4-discarded.png", window)
     }
 
     /// Edits a table's structure through the editor's controls, commits, then creates a table.
@@ -389,13 +490,12 @@ enum DevHarness {
         window.makeFirstResponder(grid)
         snap("2-staged.png", window)
 
-        s.previewChanges(nil)
+        workspace.previewChanges(nil)
         try await Task.sleep(for: .milliseconds(300))
-        snap("3-preview.png", NSApp.windows.first { $0.className.contains("Popover") && $0.isVisible })
-        let editor = try require(s.editor, "editor")
-        print("preview:\n" + (try editor.plan(for: workspace.connection.dialect).preview))
+        snap("3-preview.png", window.attachedSheet)
+        print("preview:\n" + (try workspace.changes.plan(dialect: workspace.connection.dialect).preview))
 
-        s.commitChanges(nil)
+        workspace.commitChanges(nil)
         _ = try await waitFor("structure after commit") {
             s.editor.flatMap { $0.hasChanges ? nil : $0.original.columns.contains { $0.name == "demo_note" } ? $0 : nil }
         }
@@ -421,9 +521,11 @@ enum DevHarness {
         }
         window.makeFirstResponder(ns.columnsGrid)
         snap("6-new-table.png", window)
-        print("create:\n" + (try require(ns.editor, "new editor").plan(for: workspace.connection.dialect).preview))
-        ns.commitChanges(nil)
-        _ = try await waitFor("created table") { ns.editor.flatMap { $0.exists && !$0.hasChanges ? $0 : nil } }
+        print("create:\n" + (try workspace.changes.plan(dialect: workspace.connection.dialect).preview))
+        workspace.commitChanges(nil)
+        _ = try await waitFor("created table") {
+            newTab.newTableID == nil ? newTab.structure?.editor.flatMap { $0.exists && !$0.hasChanges ? $0 : nil } : nil
+        }
         print("created: \(newTab.table)")
         snap("7-created.png", window)
     }

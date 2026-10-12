@@ -18,7 +18,8 @@ public enum SQLSplitter {
     ///
     /// Inside a statement (or touching its end) → that statement. In the gap between two
     /// statements → the previous one if the cursor is still on its last line, else the next.
-    /// These rules are our own.
+    /// A comment after `;` leads the next statement, so the end of `select 1; -- note`
+    /// runs the next one.
     public static func statement(
         at offset: Int, in sql: String, dialect: LexerDialect
     ) -> SQLStatementRange? {
@@ -101,13 +102,9 @@ public enum SQLSplitter {
                 }
             }
 
+            // A comment after the delimiter, even on its line, starts the next statement
+            // (`select 1; -- note` → the note leads statement 2).
             if kind == .whitespace { continue }
-            // `select 1; -- note`: a comment on the delimiter's line belongs to the
-            // statement before it, not the next one.
-            if first == nil, kind.isComment, segmentStart > 0,
-               !units[segmentStart..<token.range.lowerBound].contains(ch("\n")) {
-                continue
-            }
             if first == nil { first = token.range.lowerBound }
             lastEnd = token.range.upperBound
             if kind.isComment { continue }

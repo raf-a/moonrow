@@ -88,6 +88,10 @@ public struct PostgresDialect: Dialect {
         let op = (negated ? "NOT " : "") + (caseSensitive ? "LIKE" : "ILIKE")
         return "\(expression) \(op) " + .value(.text(likePattern(kind, value)))
     }
+
+    public func caseInsensitiveLike(_ expression: String, _ pattern: DBValue) -> SQLFragment {
+        "\(expression) ILIKE " + .value(pattern)
+    }
 }
 
 public struct MySQLDialect: Dialect {
@@ -145,6 +149,8 @@ public struct MySQLDialect: Dialect {
     }
 
     public var beginTransaction: String { "START TRANSACTION" }
+    public var transactionalDDL: Bool { false }
+    public var pagesNeedKeyOrder: Bool { true }
 
     public func useSchema(_ schema: String) -> String? { "USE \(quoteIdentifier(schema))" }
 }

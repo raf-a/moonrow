@@ -3,8 +3,8 @@ import AppKit
 import DBKit
 
 /// A table tab: the rows (Data) or the columns and indexes (Structure), switched with the
-/// control at the bottom left or ⌃⌘[ / ⌃⌘]. Each side asks about its own staged changes before
-/// the other is shown, so only one of them ever has any.
+/// control at the bottom left or ⌃⌘[ / ⌃⌘]. Both sides stage into the workspace's
+/// `StagedChanges`, so switching, closing the tab or opening another table never asks.
 @MainActor
 final class TableTabViewController: NSViewController, WorkspaceTab, NSMenuItemValidation {
     enum Mode { case data, structure }
@@ -12,11 +12,10 @@ final class TableTabViewController: NSViewController, WorkspaceTab, NSMenuItemVa
     private(set) var table: TableRef
     private(set) var kind: ObjectKind
     private let connection: any DatabaseConnection
+    private let changes: StagedChanges
     private let readOnlyConnection: Bool
     private let pageSize: Int?
     var onTabItemChange: (() -> Void)?
-    /// After a structure commit: the table as it is named now, and whether it was just created.
-    var onStructureCommitted: ((_ tab: TableTabViewController, _ created: Bool) -> Void)?
     /// Tables the foreign-key editor offers.
     var knownTables: () -> [TableRef] = { [] }
     /// Asks before commits are sent.
@@ -25,11 +24,14 @@ final class TableTabViewController: NSViewController, WorkspaceTab, NSMenuItemVa
     private(set) var data: TableDataViewController?
     private(set) var structure: StructureViewController?
     private(set) var mode: Mode = .data
-    /// A table that exists only in the structure editor so far.
-    private var isNewTable = false
+    /// Set while the tab shows a staged new table.
+    private(set) var newTableID: UUID?
+    private var isNewTable: Bool { newTableID != nil }
 
-    init(connection: any DatabaseConnection, object: DatabaseObject, readOnlyConnection: Bool, pageSize: Int?, mode: Mode = .data) {
+    init(connection: any DatabaseConnection, changes: StagedChanges, object: DatabaseObject, readOnlyConnection: Bool,
+         pageSize: Int?, mode: Mode = .data) {
         self.connection = connection
+        self.changes = changes
         self.table = object.ref
         self.kind = object.kind
         self.readOnlyConnection = readOnlyConnection
@@ -38,15 +40,16 @@ final class TableTabViewController: NSViewController, WorkspaceTab, NSMenuItemVa
         super.init(nibName: nil, bundle: nil)
     }
 
-    /// A tab for designing a new table; it becomes a regular table tab once created.
-    init(connection: any DatabaseConnection, newTable: TableRef, pageSize: Int?) {
+    /// A tab for a staged new table; it becomes a regular table tab once committed.
+    init(connection: any DatabaseConnection, changes: StagedChanges, newTable id: UUID, schema: String?, pageSize: Int?) {
         self.connection = connection
-        self.table = newTable
+        self.changes = changes
+        self.table = TableRef(schema: schema, changes.newTable(id)?.name ?? "")
         self.kind = .table
         self.readOnlyConnection = false
         self.pageSize = pageSize
         self.mode = .structure
-        self.isNewTable = true
+        self.newTableID = id
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -85,12 +88,9 @@ final class TableTabViewController: NSViewController, WorkspaceTab, NSMenuItemVa
 
     func switchTo(_ wanted: Mode) {
         guard wanted != mode, !(wanted == .data && isNewTable) else { return }
-        let leave: (String, @escaping () -> Void) -> Void = mode == .data
-            ? { [weak self] action, go in self?.data?.resolvePendingEdits(before: action, then: go) ?? go() }
-            : { [weak self] action, go in self?.structure?.resolvePendingChanges(before: action, then: go) ?? go() }
-        leave(wanted == .data ? "Showing the rows" : "Showing the structure") { [weak self] in
-            self?.show(wanted)
-        }
+        data?.endInlineEdit()
+        structure?.endInlineEdit()
+        show(wanted)
     }
 
     private func show(_ wanted: Mode) {
@@ -101,7 +101,7 @@ final class TableTabViewController: NSViewController, WorkspaceTab, NSMenuItemVa
         case .data:
             if data == nil {
                 let d = TableDataViewController(
-                    connection: connection, object: DatabaseObject(table, kind: kind),
+                    connection: connection, changes: changes, object: DatabaseObject(table, kind: kind),
                     readOnlyConnection: readOnlyConnection, pageSize: pageSize)
                 d.leadingAccessory = makeSwitch()
                 d.safety = safety
@@ -112,14 +112,15 @@ final class TableTabViewController: NSViewController, WorkspaceTab, NSMenuItemVa
             controller = data!
         case .structure:
             if structure == nil {
-                let s = isNewTable
-                    ? StructureViewController(connection: connection, newTable: table)
-                    : StructureViewController(connection: connection, object: DatabaseObject(table, kind: kind), readOnlyConnection: readOnlyConnection)
+                let s = newTableID.map {
+                    StructureViewController(connection: connection, changes: changes, newTable: $0, schema: table.schema)
+                } ?? StructureViewController(
+                    connection: connection, changes: changes, object: DatabaseObject(table, kind: kind),
+                    readOnlyConnection: readOnlyConnection)
                 s.leadingAccessory = makeSwitch()
                 s.safety = safety
                 s.knownTables = { [weak self] in self?.knownTables() ?? [] }
                 s.onPendingChange = { [weak self] in self?.onTabItemChange?() }
-                s.onCommitted = { [weak self] table, created in self?.structureCommitted(table, created: created) }
                 addChild(s)
                 structure = s
             }
@@ -135,37 +136,32 @@ final class TableTabViewController: NSViewController, WorkspaceTab, NSMenuItemVa
         onTabItemChange?()
     }
 
-    /// The rows are read again under the table's current name the next time Data is shown.
-    private func structureCommitted(_ newTable: TableRef, created: Bool) {
+    // MARK: - After a commit
+
+    /// The table now exists under `newTable` (it was created or renamed): both sides are built
+    /// again for it, keeping the side that shows.
+    func becomeTable(_ newTable: TableRef) {
         table = newTable
-        if created {
-            isNewTable = false
-            for case let control as NSSegmentedControl in [structure?.leadingAccessory] { control.setEnabled(true, forSegment: 0) }
+        newTableID = nil
+        for child in [data, structure] as [NSViewController?] {
+            (child as? TableDataViewController)?.stop()
+            (child as? StructureViewController)?.stop()
+            child?.view.removeFromSuperview()
+            child?.removeFromParent()
         }
-        if let data {
-            data.stop()
-            data.view.removeFromSuperview()
-            data.removeFromParent()
-            self.data = nil
-        }
+        data = nil
+        structure = nil
+        if isViewLoaded { show(mode) }
         onTabItemChange?()
-        onStructureCommitted?(self, created)
     }
 
-    // MARK: - Pending changes
-
-    var hasPendingEdits: Bool { (data?.hasPendingEdits ?? false) || (structure?.hasPendingChanges ?? false) }
-
-    func resolvePendingEdits(before action: String, then proceed: @escaping () -> Void) {
-        let resolveData: () -> Void = { [weak self] in
-            guard let data = self?.data else { return proceed() }
-            data.resolvePendingEdits(before: action, then: proceed)
-        }
-        guard let structure else { return resolveData() }
-        structure.resolvePendingChanges(before: action, then: resolveData)
+    /// Ends inline edits so what's typed is staged. Before a commit or preview.
+    func endEditing() {
+        data?.endInlineEdit()
+        structure?.endInlineEdit()
     }
 
-    /// Reads rows and structure again. Callers resolve staged changes first.
+    /// Reads rows and structure again. Staged changes stay.
     func reload() {
         data?.reload()
         structure?.reload()
@@ -188,7 +184,8 @@ final class TableTabViewController: NSViewController, WorkspaceTab, NSMenuItemVa
 
     var tabItem: TabStrip.Item {
         let symbol = isNewTable ? "plus.rectangle" : kind == .table ? "tablecells" : "eye"
-        let title = isNewTable ? (structure?.editor?.name).map { $0.isEmpty ? "New table" : $0 } ?? "New table" : table.name
+        let staged = newTableID.flatMap { changes.newTable($0)?.name }
+        let title = isNewTable ? staged.map { $0.isEmpty ? "New table" : $0 } ?? "New table" : table.name
         return TabStrip.Item(title: title, symbol: symbol, toolTip: table.description)
     }
 
@@ -199,8 +196,10 @@ final class TableTabViewController: NSViewController, WorkspaceTab, NSMenuItemVa
         }
     }
 
+    /// Staged changes stay with the workspace, so a table tab always closes at once.
     func prepareToClose(then proceed: @escaping () -> Void) {
-        resolvePendingEdits(before: "Closing the tab", then: proceed)
+        endEditing()
+        proceed()
     }
 
     func tabDidClose() {

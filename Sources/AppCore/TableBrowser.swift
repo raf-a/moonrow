@@ -55,12 +55,23 @@ public struct Paging: Sendable, Hashable {
     }
 
     /// "301–600 of 1,000" style description of the page.
-    public func describe(total: Int) -> String {
+    public func describe(total: Int, estimated: Bool = false) -> String {
         let rows = rows(total: total)
-        let of = total.formatted(.number)
+        let of = (estimated ? "~" : "") + total.formatted(.number)
         if rows.isEmpty { return total == 0 ? "No rows" : "No rows at offset \(offset.formatted(.number)) of \(of)" }
         if pageSize == nil && offset == 0 { return "\(of) \(total == 1 ? "row" : "rows")" }
         return "\((rows.lowerBound + 1).formatted(.number))–\(rows.upperBound.formatted(.number)) of \(of)"
+    }
+}
+
+/// How many rows a table has, exactly or as the planner estimates it.
+public struct RowCount: Sendable, Hashable {
+    public var value: Int
+    public var isEstimate: Bool
+
+    public init(_ value: Int, isEstimate: Bool = false) {
+        self.value = value
+        self.isEstimate = isEstimate
     }
 }
 
@@ -87,6 +98,21 @@ public struct TableBrowser: Sendable {
         return Int(n)
     }
 
+    /// Unfiltered tables with at least this many rows (by the planner's estimate) show the
+    /// estimate instead of being counted. Our own threshold.
+    public static let estimateThreshold = 100_000
+
+    /// The row count the grid shows: the planner's estimate for a large unfiltered table where
+    /// the database keeps one (Postgres), else `COUNT(*)`.
+    public func rowCount(filter: Filter? = nil) async throws -> RowCount {
+        if filter == nil, let sql = dialect.estimatedCount(table),
+           case .integer(let n)? = try? await connection.execute(sql).rows.first?.first,
+           n >= Self.estimateThreshold {
+            return RowCount(Int(n), isEstimate: true)
+        }
+        return RowCount(try await count(filter: filter))
+    }
+
     /// The SELECT for part of the current page. `offset` is relative to the page.
     public func select(_ query: GridQuery, offset: Int, limit: Int) -> SQLFragment {
         var sort = query.sort
@@ -99,7 +125,7 @@ public struct TableBrowser: Sendable {
     }
 
     /// Fetches blocks of the current page for `RowCache`. Without a sort, rows come in the
-    /// database's natural order where that is stable (SQLite, InnoDB).
+    /// database's natural order where that is stable (SQLite).
     public func fetcher(_ query: GridQuery) -> RowCache.Fetch {
         let browser = self
         return { offset, limit in
@@ -112,18 +138,18 @@ public struct TableBrowser: Sendable {
     /// Whether rows can be told apart by a primary key. Without one, edits match every column.
     public var hasPrimaryKey: Bool { !columns.primaryKey.isEmpty }
 
-    public func changeSet(_ edits: StagedEdits) -> ChangeSet {
-        edits.changeSet(for: table, columns: columns, dialect: dialect)
+    /// Empty edits for this table, ready to stage into.
+    public func newEdits() -> TableEdits { TableEdits(table: table, columns: columns) }
+
+    /// The statements a commit of these edits alone runs, with values written inline, each
+    /// ending in `;`.
+    public func preview(_ edits: TableEdits) -> [String] {
+        dialect.statements(for: edits.changeSet(dialect: dialect)).map { $0.inlined(for: dialect) + ";" }
     }
 
-    /// The statements a commit runs, with values written inline, each ending in `;`.
-    public func preview(_ edits: StagedEdits) -> [String] {
-        dialect.statements(for: changeSet(edits)).map { $0.inlined(for: dialect) + ";" }
-    }
-
-    /// Runs the edits in one transaction; see `DatabaseConnection.commit`.
-    public func commit(_ edits: StagedEdits) async throws {
-        let changes = changeSet(edits)
+    /// Runs these edits alone in one transaction; see `DatabaseConnection.commit`.
+    public func commit(_ edits: TableEdits) async throws {
+        let changes = edits.changeSet(dialect: dialect)
         guard !changes.isEmpty else { return }
         try await connection.commit(changes)
     }

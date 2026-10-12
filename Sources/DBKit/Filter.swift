@@ -12,9 +12,13 @@ public enum FilterOperator: String, Sendable, Hashable, CaseIterable {
     case `in` = "IN"
     case notIn = "NOT IN"
     case between = "BETWEEN"
+    case notBetween = "NOT BETWEEN"
     case isNull = "IS NULL"
     case isNotNull = "IS NOT NULL"
     case isEmpty = "EMPTY"
+    /// The value is the pattern as typed: `%` and `_` stay wildcards.
+    case like = "LIKE"
+    case ilike = "ILIKE"
     case contains = "Contains"
     case notContains = "Not contains"
     case hasPrefix = "Has prefix"
@@ -23,7 +27,7 @@ public enum FilterOperator: String, Sendable, Hashable, CaseIterable {
     case raw = "Raw SQL"
 
     public var takesValue: Bool { ![.isNull, .isNotNull, .isEmpty].contains(self) }
-    public var takesSecondValue: Bool { self == .between }
+    public var takesSecondValue: Bool { self == .between || self == .notBetween }
 }
 
 public enum FilterTarget: Sendable, Hashable {
@@ -106,14 +110,18 @@ extension Dialect {
             if items.isEmpty { return SQLFragment(c.op == .in ? "1 = 0" : "1 = 1") }
             let list = items.map { SQLFragment.value(.text($0)) }.joined(separator: ", ")
             return "\(lhs) \(c.op.rawValue) (" + list + ")"
-        case .between:
-            return "\(lhs) BETWEEN " + .value(value) + " AND " + .value(.text(c.secondValue))
+        case .between, .notBetween:
+            return "\(lhs) \(c.op.rawValue) " + .value(value) + " AND " + .value(.text(c.secondValue))
         case .isNull:
             return SQLFragment("\(column) IS NULL")
         case .isNotNull:
             return SQLFragment("\(column) IS NOT NULL")
         case .isEmpty:
             return SQLFragment("\(textCast(column)) = ''")
+        case .like:
+            return "\(lhs) LIKE " + .value(value)
+        case .ilike:
+            return caseInsensitiveLike(lhs, value)
         case .contains, .notContains:
             return patternMatch(textCast(column), .contains, c.value,
                                 caseSensitive: c.caseSensitive, negated: c.op == .notContains)

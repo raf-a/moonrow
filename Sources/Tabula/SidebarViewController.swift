@@ -1,3 +1,4 @@
+import AppCore
 import AppKit
 import DBKit
 
@@ -23,6 +24,11 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     var onImportCSV: ((DatabaseObject) -> Void)?
     /// After the object list (re)loads.
     var onObjectsLoaded: (([DatabaseObject]) -> Void)?
+    /// What's staged for a table, drawn on its row.
+    var markFor: ((TableRef) -> StagedChanges.Mark?)?
+    /// Staged new tables, listed with the tables until they're created.
+    var stagedNewTables: () -> [(id: UUID, name: String)] = { [] }
+    var onOpenNewTable: ((UUID) -> Void)?
     /// Set while the selection follows the open tab, so it doesn't open anything.
     private var isRevealing = false
 
@@ -52,7 +58,12 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     final class Item {
         let object: DatabaseObject
-        init(_ object: DatabaseObject) { self.object = object }
+        /// Set for a staged new table.
+        let newTableID: UUID?
+        init(_ object: DatabaseObject, newTableID: UUID? = nil) {
+            self.object = object
+            self.newTableID = newTableID
+        }
     }
 
     init(connection: any DatabaseConnection) {
@@ -167,9 +178,16 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     /// Selects the item for `ref` (or nothing) without opening it, so the list follows the
     /// selected tab.
     func reveal(_ ref: TableRef?) {
+        reveal(row: ref.flatMap { r in rowOfItem { $0.newTableID == nil && $0.object.ref == r } })
+    }
+
+    func reveal(newTable id: UUID) {
+        reveal(row: rowOfItem { $0.newTableID == id })
+    }
+
+    private func reveal(row: Int?) {
         isRevealing = true
         defer { isRevealing = false }
-        let row = ref.flatMap { r in rowOf { $0.ref == r } }
         if let row {
             outline.selectRowIndexes([row], byExtendingSelection: false)
             outline.scrollRowToVisible(row)
@@ -181,13 +199,27 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     /// The item a context-menu command applies to: the clicked row, else the selection.
     private var targetObject: DatabaseObject? {
         let row = outline.clickedRow >= 0 ? outline.clickedRow : outline.selectedRow
-        return (outline.item(atRow: row) as? Item)?.object
+        guard let item = outline.item(atRow: row) as? Item, item.newTableID == nil else { return nil }
+        return item.object
     }
 
     @objc private func doubleClicked(_ sender: Any?) {
-        guard outline.clickedRow >= 0, let object = (outline.item(atRow: outline.clickedRow) as? Item)?.object,
-              Self.opensInGrid(object) else { return }
-        onOpen?(object)
+        guard outline.clickedRow >= 0, let item = outline.item(atRow: outline.clickedRow) as? Item else { return }
+        open(item)
+    }
+
+    private func open(_ item: Item) {
+        if let id = item.newTableID {
+            onOpenNewTable?(id)
+            return
+        }
+        if Self.opensInGrid(item.object) { onOpen?(item.object) }
+    }
+
+    /// Redraws staged marks and the staged new tables.
+    func stagedChangesChanged() {
+        guard isViewLoaded else { return }
+        rebuild()
     }
 
     /// Tables and views open in a grid; functions are listed only (their editor comes later).
@@ -342,26 +374,33 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     }
 
     private func rebuild() {
-        let selected = (outline.item(atRow: outline.selectedRow) as? Item)?.object
+        let selectedItem = outline.item(atRow: outline.selectedRow) as? Item
         let query = filter.stringValue.trimmingCharacters(in: .whitespaces)
         let matching = query.isEmpty ? objects : objects.filter { $0.ref.name.localizedCaseInsensitiveContains(query) }
+        let newTables = stagedNewTables()
+            .filter { query.isEmpty || $0.name.localizedCaseInsensitiveContains(query) }
+            .map { Item(DatabaseObject(TableRef(schema: schema, $0.name), kind: .table), newTableID: $0.id) }
 
         let sections: [(ObjectKind, String)] = [
             (.table, "Tables"), (.view, "Views"), (.materializedView, "Materialized Views"), (.function, "Functions"),
         ]
         groups = sections.compactMap { kind, title in
-            let items = matching.filter { $0.kind == kind }.map(Item.init)
+            var items = matching.filter { $0.kind == kind }.map { Item($0) }
+            if kind == .table { items += newTables }
             return items.isEmpty ? nil : Group(title: title, items: items)
         }
         outline.reloadData()
         for g in groups { outline.expandItem(g) }
 
-        if let selected, let row = rowOf({ $0 == selected }) {
+        if let selectedItem, let row = rowOfItem({ item in
+            if let id = selectedItem.newTableID { return item.newTableID == id }
+            return item.newTableID == nil && item.object == selectedItem.object
+        }) {
             isRevealing = true
             outline.selectRowIndexes([row], byExtendingSelection: false)
             isRevealing = false
         }
-        if objects.isEmpty {
+        if objects.isEmpty && newTables.isEmpty {
             showMessage(schema.map { "“\($0)” has no tables yet." } ?? "This database has no tables yet.")
         } else if groups.isEmpty {
             showMessage("Nothing matches “\(query)”.")
@@ -375,9 +414,9 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         message.isHidden = false
     }
 
-    private func rowOf(_ predicate: (DatabaseObject) -> Bool) -> Int? {
+    private func rowOfItem(_ predicate: (Item) -> Bool) -> Int? {
         for g in groups {
-            if let item = g.items.first(where: { predicate($0.object) }) {
+            if let item = g.items.first(where: predicate) {
                 let row = outline.row(forItem: item)
                 return row >= 0 ? row : nil
             }
@@ -463,21 +502,47 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             c.textField = text
             return c
         }()
-        cell.textField?.stringValue = item.object.ref.name
-        let (symbol, tint): (String, NSColor) = switch item.object.kind {
+        var (symbol, tint): (String, NSColor) = switch item.object.kind {
         case .table: ("tablecells", .systemBlue)
         case .function, .sequence: ("function", .systemOrange)
         default: ("eye", .systemPurple)
         }
+        // Staged changes: edited and truncated tables in orange, dropped ones struck out in
+        // red, new ones in green, until the workspace commits or discards them.
+        let mark = item.newTableID == nil ? markFor?(item.object.ref) : nil
+        var attributes: [NSAttributedString.Key: Any] = [:]
+        var tip: String?
+        if item.newTableID != nil {
+            (symbol, tint) = ("plus.rectangle", .systemGreen)
+            attributes[.foregroundColor] = NSColor.systemGreen
+            tip = "New table, created when you commit (⌘S)"
+        } else if let mark {
+            switch mark {
+            case .edited:
+                attributes[.foregroundColor] = NSColor.systemOrange
+                tip = "Staged changes"
+            case .truncated:
+                attributes[.foregroundColor] = NSColor.systemOrange
+                symbol = "tablecells.badge.ellipsis"
+                tip = "Truncate staged"
+            case .dropped:
+                attributes[.foregroundColor] = NSColor.systemRed
+                attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
+                tip = "Delete staged"
+            }
+            tint = attributes[.foregroundColor] as? NSColor ?? tint
+        }
+        cell.textField?.attributedStringValue = NSAttributedString(string: item.object.ref.name, attributes: attributes)
+        cell.toolTip = tip
         cell.imageView?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: item.object.kind.rawValue)
+            ?? NSImage(systemSymbolName: "tablecells", accessibilityDescription: item.object.kind.rawValue)
         cell.imageView?.contentTintColor = tint
         return cell
     }
 
     /// Selecting an item opens it, so arrow keys browse tables one after another.
     func outlineViewSelectionDidChange(_ notification: Notification) {
-        guard !isRevealing, let item = outline.item(atRow: outline.selectedRow) as? Item,
-              Self.opensInGrid(item.object) else { return }
-        onOpen?(item.object)
+        guard !isRevealing, let item = outline.item(atRow: outline.selectedRow) as? Item else { return }
+        open(item)
     }
 }

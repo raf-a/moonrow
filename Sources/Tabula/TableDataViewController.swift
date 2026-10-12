@@ -6,8 +6,9 @@ import DBKit
 ///
 /// The grid shows one page of the table (filter, sort and page from `query`). Within the page
 /// the row cache fills in whatever is on screen, so even "all rows" stays fast. Edits are staged
-/// in `edits` and drawn over the loaded rows until Commit (⌘S) or Discard (⇧⌘⌫). While edits
-/// are staged, anything that would load different rows asks to commit or discard first.
+/// in the workspace's `StagedChanges`, keyed by row, and drawn over the rows as they load, so
+/// they outlive paging, sorting, filtering, reloads and the tab itself. The workspace commits
+/// (⌘S) or discards (⇧⌘⌫) them, together with everything else staged.
 @MainActor
 final class TableDataViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate,
     NSTextFieldDelegate, NSMenuItemValidation, TabulaActions
@@ -24,6 +25,7 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
     var isEditable: Bool { readOnlyReason == nil }
 
     private let connection: any DatabaseConnection
+    private let changes: StagedChanges
     let grid = DataGrid()
     let filterBar = FilterBar()
     private let statusLabel = NSTextField(labelWithString: "")
@@ -35,12 +37,12 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
 
     private(set) var browser: TableBrowser?
     private(set) var cache: RowCache?
-    private(set) var edits = StagedEdits(baseRowCount: 0)
     private(set) var query: GridQuery
     /// Rows matching the filter, across all pages.
     private(set) var total = 0
+    /// `total` is the planner's estimate (a large unfiltered Postgres table).
+    private var totalIsEstimate = false
     private var loadTask: Task<Void, Never>?
-    private var isCommitting = false
     private var columnsSized = false
     private var lastSelection = IndexSet()
     private var popover: NSPopover?
@@ -52,20 +54,52 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
     /// Copying more rows than this asks the user to narrow the selection.
     private static let copyLimit = 100_000
 
-    init(connection: any DatabaseConnection, object: DatabaseObject, readOnlyConnection: Bool, pageSize: Int?) {
+    init(connection: any DatabaseConnection, changes: StagedChanges, object: DatabaseObject,
+         readOnlyConnection: Bool, pageSize: Int?) {
         self.connection = connection
+        self.changes = changes
         self.table = object.ref
         self.kind = object.kind
         self.readOnlyReason = readOnlyConnection ? "The connection is read-only."
             : object.kind == .table ? nil : "Only tables can be edited."
         self.query = GridQuery(page: Paging(pageSize: pageSize))
         super.init(nibName: nil, bundle: nil)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(stagedChangesChanged), name: StagedChanges.didChange, object: changes)
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
-    var hasPendingEdits: Bool { !edits.isEmpty || editing != nil }
+    /// This table's staged edits (empty when none are staged).
+    var edits: TableEdits {
+        changes.edits(for: table) ?? TableEdits(table: table, columns: browser?.columns ?? [])
+    }
+
+    private func updateEdits(_ body: (inout TableEdits) -> Void) {
+        var e = edits
+        body(&e)
+        changes.setEdits(e)
+    }
+
+    /// Rows loaded from the database on this page; new rows follow them.
+    private var baseRowCount: Int { cache?.rowCount ?? 0 }
+    private var rowCount: Int { baseRowCount + edits.insertedRowCount }
+    private func isInserted(_ row: Int) -> Bool { row >= baseRowCount && row < rowCount }
+    private func loadedRow(_ row: Int) -> [DBValue]? { row < baseRowCount ? cache?.row(at: row) : nil }
+    private func state(of row: Int) -> TableEdits.RowState {
+        isInserted(row) ? .inserted : edits.state(of: loadedRow(row))
+    }
+    private func change(row: Int, column: Int) -> CellChange? {
+        isInserted(row) ? edits.inserts[row - baseRowCount][column] : edits.change(in: loadedRow(row), column: column)
+    }
+
+    /// Anything staged or unstaged anywhere in the workspace (a commit, a discard, another tab).
+    @objc private func stagedChangesChanged() {
+        guard isViewLoaded, editing == nil else { return }
+        grid.reloadData()
+        updateBar()
+    }
 
     // MARK: - Layout
 
@@ -146,8 +180,8 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
         filtersButton.action = #selector(toggleFilters(_:))
         filtersButton.toolTip = "Show or hide filters (⌘F)"
         changesButton.target = self
-        changesButton.action = #selector(previewChanges(_:))
-        changesButton.toolTip = "Review the SQL for staged changes (⇧⌘P)"
+        changesButton.action = #selector(showChanges(_:))
+        changesButton.toolTip = "Review the SQL for every staged change (⇧⌘P)"
         changesButton.contentTintColor = .systemOrange
         changesButton.isHidden = true
         pageButton.target = self
@@ -196,7 +230,8 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
         cache?.cancel()
     }
 
-    /// Re-reads columns, count and the current page. Staged edits are dropped: callers ask first.
+    /// Re-reads columns, count and the current page. Staged edits stay; they find their rows
+    /// again by key.
     func reload() {
         stop()
         abortInlineEdit()
@@ -207,11 +242,14 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
                 guard !Task.isCancelled else { return }
                 if browser.columns != self.browser?.columns { install(browser.columns) }
                 self.browser = browser
+                if var e = changes.edits(for: table), e.columns != browser.columns {
+                    e.rebase(columns: browser.columns)
+                    changes.setEdits(e)
+                }
                 try await loadPage(recount: true, scrollToTop: false)
             } catch {
                 guard !Task.isCancelled else { return }
                 cache = nil
-                edits = StagedEdits(baseRowCount: 0)
                 grid.reloadData()
                 showError(error)
             }
@@ -219,12 +257,12 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
     }
 
     /// Loads the page `query` describes, recounting rows first when the filter changed.
-    private func reloadPage(recount: Bool, scrollToTop: Bool = true) {
+    private func reloadPage(recount: Bool, scrollToTop: Bool = true, exact: Bool = false) {
         stop()
         abortInlineEdit()
         loadTask = Task {
             do {
-                try await loadPage(recount: recount, scrollToTop: scrollToTop)
+                try await loadPage(recount: recount, scrollToTop: scrollToTop, exact: exact)
             } catch {
                 guard !Task.isCancelled else { return }
                 showError(error)
@@ -232,13 +270,17 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
         }
     }
 
-    private func loadPage(recount: Bool, scrollToTop: Bool) async throws {
+    private func loadPage(recount: Bool, scrollToTop: Bool, exact: Bool = false) async throws {
         guard let browser else { return }
         if recount || cache == nil {
             showStatus("Counting rows…")
-            let n = try await browser.count(filter: query.filter)
+            // An estimate can't address every row of one virtual page; count those exactly.
+            let n = query.page.pageSize == nil || exact
+                ? RowCount(try await browser.count(filter: query.filter))
+                : try await browser.rowCount(filter: query.filter)
             guard !Task.isCancelled else { return }
-            total = n
+            total = n.value
+            totalIsEstimate = n.isEstimate
         }
         // A page past the end (rows were deleted, or a narrower filter): go to the last one.
         if let size = query.page.pageSize, query.page.offset >= total, total > 0 {
@@ -248,7 +290,6 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
         cache.onLoad = { [weak self] rows in self?.rowsLoaded(rows) }
         cache.onError = { [weak self] error in self?.showError(error) }
         self.cache = cache
-        edits = StagedEdits(baseRowCount: cache.rowCount)
         lastSelection = []
         grid.reloadData()
         if scrollToTop { grid.scrollRowToVisible(0) }
@@ -288,6 +329,11 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
 
     private func rowsLoaded(_ rows: Range<Int>) {
         if !columnsSized { sizeColumnsToContent(rows) }
+        // The estimate overshot: the page ends early. Count exactly and show the real end.
+        if totalIsEstimate, let cache, rows.upperBound == cache.rowCount, cache.row(at: rows.upperBound - 1) == nil {
+            totalIsEstimate = false
+            return reloadPage(recount: true, scrollToTop: false, exact: true)
+        }
         let visible = grid.rows(in: grid.visibleRect)
         let shown = rows.clamped(to: visible.location..<(visible.location + visible.length))
         guard !shown.isEmpty else { return }
@@ -321,18 +367,17 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
     }
 
     private func updateBar() {
-        pageButton.title = cache == nil ? "" : query.page.describe(total: total)
+        pageButton.title = cache == nil ? "" : query.page.describe(total: total, estimated: totalIsEstimate)
+        pageButton.toolTip = totalIsEstimate ? "Page size and offset. The row count is the planner's estimate." : "Page size and offset"
         pageControl.setEnabled(query.page.previous != nil, forSegment: 0)
         pageControl.setEnabled(query.page.next(total: total) != nil, forSegment: 1)
         pageControl.isHidden = query.page.pageSize == nil
         filtersButton.state = filterBar.isHidden ? .off : .on
         filtersButton.contentTintColor = query.filter == nil ? nil : .controlAccentColor
 
-        let parts = [
-            (edits.updatedRowCount, "edited"), (edits.insertedRowCount, "new"), (edits.deleted.count, "deleted"),
-        ].filter { $0.0 > 0 }.map { "\($0.0) \($0.1)" }
-        changesButton.isHidden = parts.isEmpty
-        changesButton.title = parts.joined(separator: ", ")
+        let summary = edits.summary
+        changesButton.isHidden = summary.isEmpty
+        changesButton.title = summary
     }
 
     /// Column titles are the column names.
@@ -348,13 +393,13 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
 
     // MARK: - Grid data
 
-    func numberOfRows(in tableView: NSTableView) -> Int { cache == nil ? 0 : edits.rowCount }
+    func numberOfRows(in tableView: NSTableView) -> Int { cache == nil ? 0 : rowCount }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard let tableColumn, let column = Int(tableColumn.identifier.rawValue) else { return nil }
         let cell = tableView.makeView(withIdentifier: GridCell.identifier, owner: nil) as? GridCell ?? GridCell()
-        let state = edits.state(of: row)
-        let change = edits.change(row: row, column: column)
+        let state = state(of: row)
+        let change = change(row: row, column: column)
         cell.show(
             content(row: row, column: column),
             edited: change != nil && state != .inserted,
@@ -365,17 +410,17 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
 
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
         let view = tableView.makeView(withIdentifier: GridRowView.identifier, owner: nil) as? GridRowView ?? GridRowView()
-        view.state = edits.state(of: row)
+        view.state = state(of: row)
         return view
     }
 
     /// What a cell shows: its staged change, else the loaded value.
     private func content(row: Int, column: Int) -> CellContent {
-        switch edits.change(row: row, column: column) {
+        switch change(row: row, column: column) {
         case .value(let v)?: return .value(v)
         case .defaultValue?: return .defaultValue
         case nil:
-            if edits.isInserted(row) { return .defaultValue }
+            if isInserted(row) { return .defaultValue }
             guard let values = cache?.row(at: row), column < values.count else { return .pending }
             return .value(values[column])
         }
@@ -384,7 +429,7 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
     /// The row as shown, for copying and duplicating. Nil while it hasn't loaded.
     private func shownValues(row: Int) -> [DBValue?]? {
         guard let columns = browser?.columns else { return nil }
-        if !edits.isInserted(row), cache?.row(at: row) == nil { return nil }
+        if !isInserted(row), cache?.row(at: row) == nil { return nil }
         return columns.indices.map { i in
             if case .value(let v) = content(row: row, column: i) { return v }
             return nil
@@ -395,7 +440,7 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
     private func refreshCells(_ rows: IndexSet, columns: IndexSet? = nil) {
         guard editing == nil else { return }
         let rows = rows.filteredIndexSet { $0 < grid.numberOfRows }
-        for row in rows { (grid.rowView(atRow: row, makeIfNecessary: false) as? GridRowView)?.state = edits.state(of: row) }
+        for row in rows { (grid.rowView(atRow: row, makeIfNecessary: false) as? GridRowView)?.state = state(of: row) }
         grid.reloadData(forRowIndexes: rows, columnIndexes: columns ?? IndexSet(integersIn: 0..<grid.numberOfColumns))
     }
 
@@ -416,29 +461,23 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
 
     func tableView(_ tableView: NSTableView, didClick tableColumn: NSTableColumn) {
         guard browser != nil else { return }
-        let name = tableColumn.title
-        resolvePendingEdits(before: "Sorting") { [self] in
-            query.cycleSort(name)
-            query.page.offset = 0
-            updateSortIndicators()
-            reloadPage(recount: false)
-        }
+        endInlineEdit()
+        query.cycleSort(tableColumn.title)
+        query.page.offset = 0
+        updateSortIndicators()
+        reloadPage(recount: false)
     }
 
     // MARK: - Filtering and paging
 
     private func applyFilter(_ filter: Filter?) {
-        guard filter != query.filter else { return reloadPageIfFilterUnchanged() }
-        resolvePendingEdits(before: "Filtering") { [self] in
+        endInlineEdit()
+        // Applying the filter that is already applied refreshes the rows.
+        if filter != query.filter {
             query.filter = filter
             query.page.offset = 0
-            reloadPage(recount: true)
         }
-    }
-
-    /// Applying the filter that is already applied refreshes the rows.
-    private func reloadPageIfFilterUnchanged() {
-        resolvePendingEdits(before: "Refreshing") { [self] in reloadPage(recount: true) }
+        reloadPage(recount: true)
     }
 
     @objc func toggleFilters(_ sender: Any?) {
@@ -454,10 +493,9 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
 
     private func go(to page: Paging) {
         guard page != query.page else { return }
-        resolvePendingEdits(before: "Changing page") { [self] in
-            query.page = page
-            reloadPage(recount: false)
-        }
+        endInlineEdit()
+        query.page = page
+        reloadPage(recount: false)
     }
 
     @objc func nextPage(_ sender: Any?) {
@@ -487,100 +525,12 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
         reloadPage(recount: false)
     }
 
-    // MARK: - Pending edits
+    // MARK: - Staged changes
 
-    /// Runs `proceed` once there's nothing staged, asking to commit or discard if there is.
-    func resolvePendingEdits(before action: String, then proceed: @escaping () -> Void) {
+    /// The bottom bar's change count: shows the workspace's preview.
+    @objc private func showChanges(_ sender: Any?) {
         endInlineEdit()
-        guard !edits.isEmpty else { return proceed() }
-        let alert = NSAlert()
-        alert.messageText = "Commit changes to \(table.name)?"
-        alert.informativeText = "\(action) reloads the rows, so staged changes (\(changesButton.title)) must be committed or discarded first."
-        alert.addButton(withTitle: "Commit")
-        alert.addButton(withTitle: "Discard")
-        alert.addButton(withTitle: "Cancel")
-        alert.buttons[1].hasDestructiveAction = true
-        let handle: (NSApplication.ModalResponse) -> Void = { [weak self] response in
-            guard let self else { return }
-            switch response {
-            case .alertFirstButtonReturn: self.commit(then: proceed)
-            case .alertSecondButtonReturn:
-                self.discardStaged()
-                proceed()
-            default: break
-            }
-        }
-        if let window = view.window { alert.beginSheetModal(for: window, completionHandler: handle) } else { handle(alert.runModal()) }
-    }
-
-    // MARK: - Commit, discard, preview
-
-    @objc func commitChanges(_ sender: Any?) {
-        endInlineEdit()
-        guard !edits.isEmpty else { return NSSound.beep() }
-        commit(then: nil)
-    }
-
-    private func commit(then proceed: (() -> Void)?) {
-        guard let browser, !isCommitting else { return }
-        isCommitting = true
-        popover?.close()
-        let edits = edits
-        showStatus("Committing…")
-        Task {
-            defer { isCommitting = false }
-            if let safety, await !safety.approve(browser.preview(edits)) {
-                showStatus("")
-                return
-            }
-            do {
-                try await browser.commit(edits)
-                if let proceed {
-                    self.edits.discard()
-                    proceed()
-                } else {
-                    reloadPage(recount: true, scrollToTop: false)
-                }
-            } catch {
-                showStatus("")
-                showCommitError(error)
-            }
-        }
-    }
-
-    private func showCommitError(_ error: any Error) {
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = "Couldn't commit changes"
-        var info = "\(error)"
-        if let sql = (error as? DatabaseError)?.sql { info += "\n\n\(sql)" }
-        alert.informativeText = info + "\n\nNothing was changed. Your edits are still staged."
-        if let window = view.window { alert.beginSheetModal(for: window) } else { alert.runModal() }
-    }
-
-    @objc func discardChanges(_ sender: Any?) {
-        abortInlineEdit()
-        guard !edits.isEmpty else { return NSSound.beep() }
-        discardStaged()
-    }
-
-    private func discardStaged() {
-        popover?.close()
-        edits.discard()
-        grid.reloadData()
-        updateBar()
-    }
-
-    @objc func previewChanges(_ sender: Any?) {
-        endInlineEdit()
-        guard let browser, !edits.isEmpty else { return NSSound.beep() }
-        let note = browser.hasPrimaryKey ? nil
-            : "\(table.name) has no primary key, so rows are matched on every column. If a statement would change no row or more than one, nothing is committed."
-        let controller = ChangesPreviewController(statements: browser.preview(edits), note: note)
-        controller.onCommit = { [weak self] in self?.commitChanges(nil) }
-        controller.onDiscard = { [weak self] in self?.discardChanges(nil) }
-        let anchor: NSView = changesButton.isHidden ? pageButton : changesButton
-        present(controller, from: anchor, edge: .maxY, size: NSSize(width: 640, height: 320))
+        NSApp.sendAction(#selector(TabulaActions.previewChanges(_:)), to: nil, from: self)
     }
 
     private func present(_ controller: NSViewController, from anchor: NSView, edge: NSRectEdge, size: NSSize? = nil, at rect: NSRect? = nil) {
@@ -609,7 +559,7 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
     private func beginEditing(row: Int, displayColumn: Int) {
         guard browser != nil, let column = Int(grid.tableColumns[displayColumn].identifier.rawValue) else { return }
         if let readOnlyReason { return refuse(readOnlyReason) }
-        guard edits.state(of: row) != .deleted else { return refuse("This row is marked for deletion.") }
+        guard state(of: row) != .deleted else { return refuse("This row is marked for deletion.") }
         let text: String
         switch content(row: row, column: column) {
         case .pending: return NSSound.beep()
@@ -648,9 +598,17 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
     private func stage(_ text: String, row: Int, column: Int) {
         guard let browser else { return }
         let value = CellInput.parse(text, typeName: browser.columns[column].typeName)
-        edits.set(.value(value), row: row, column: column, original: cache?.row(at: row))
-        refreshCells([row])
-        updateBar()
+        stage(.value(value), row: row, column: column)
+    }
+
+    /// Stages one cell of a loaded or new row; the change notification redraws the grid.
+    private func stage(_ change: CellChange, row: Int, column: Int) {
+        let loaded = loadedRow(row)
+        let inserted = isInserted(row) ? row - baseRowCount : nil
+        updateEdits { e in
+            if let inserted { e.setInserted(change, row: inserted, column: column) }
+            else if let loaded { e.set(change, column: column, in: loaded) }
+        }
     }
 
     func controlTextDidEndEditing(_ notification: Notification) {
@@ -673,8 +631,8 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
         return true
     }
 
-    /// Ends an inline edit, keeping what was typed.
-    private func endInlineEdit() {
+    /// Ends an inline edit, keeping what was typed. The workspace calls it before a commit.
+    func endInlineEdit() {
         guard editing != nil else { return }
         view.window?.makeFirstResponder(grid)
     }
@@ -701,8 +659,9 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
     @objc func addRow(_ sender: Any?) {
         guard isEditable, cache != nil, let browser else { return NSSound.beep() }
         endInlineEdit()
-        let row = edits.addRow()
-        grid.insertRows(at: [row])
+        var index = 0
+        updateEdits { index = $0.addRow() }
+        let row = baseRowCount + index
         grid.selectRowIndexes([row], byExtendingSelection: false)
         // Start in the first column that isn't part of the key; keys are usually generated.
         let first = browser.columns.firstIndex { $0.primaryKeyPosition == nil } ?? 0
@@ -715,17 +674,19 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
         guard isEditable, let browser else { return NSSound.beep() }
         endInlineEdit()
         let key = Set(browser.columns.indices.filter { browser.columns[$0].primaryKeyPosition != nil })
-        var added = IndexSet()
-        for row in targetRows where edits.state(of: row) != .deleted {
+        var copies: [[Int: CellChange]] = []
+        for row in targetRows where state(of: row) != .deleted {
             guard let values = shownValues(row: row) else { continue }
             var cells: [Int: CellChange] = [:]
             for (i, v) in values.enumerated() where !key.contains(i) {
                 if let v { cells[i] = .value(v) }
             }
-            added.insert(edits.addRow(cells))
+            copies.append(cells)
         }
-        guard !added.isEmpty else { return NSSound.beep() }
-        grid.insertRows(at: added)
+        guard !copies.isEmpty else { return NSSound.beep() }
+        let first = rowCount
+        updateEdits { e in for c in copies { e.addRow(c) } }
+        let added = IndexSet(integersIn: first..<rowCount)
         grid.selectRowIndexes(added, byExtendingSelection: false)
         grid.scrollRowToVisible(added.last!)
         updateBar()
@@ -736,15 +697,13 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
         let rows = targetRows
         guard !rows.isEmpty else { return NSSound.beep() }
         abortInlineEdit()
-        let before = edits.rowCount
-        edits.delete(rows: rows, original: { [cache] in cache?.row(at: $0) })
-        if edits.rowCount != before {
-            grid.reloadData()
-            grid.selectRowIndexes(IndexSet(rows.filter { $0 < edits.rowCount }), byExtendingSelection: false)
-        } else {
-            refreshCells(rows)
+        let base = baseRowCount
+        let loaded = rows.filter { $0 < base }.compactMap { cache?.row(at: $0) }
+        updateEdits { e in
+            for row in loaded { e.delete(row) }
+            e.removeInserted(rows.filter { $0 >= base }.map { $0 - base })
         }
-        updateBar()
+        grid.selectRowIndexes(IndexSet(rows.filter { $0 < rowCount }), byExtendingSelection: false)
     }
 
     @objc func setNull(_ sender: Any?) { setFocusedCells(.value(.null)) }
@@ -756,16 +715,21 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
         guard isEditable, let display = grid.focusedColumnIndex,
               let column = Int(grid.tableColumns[display].identifier.rawValue) else { return NSSound.beep() }
         endInlineEdit()
-        let rows = targetRows
-        for row in rows where edits.state(of: row) != .deleted {
-            edits.set(change, row: row, column: column, original: cache?.row(at: row))
+        let base = baseRowCount
+        let targets = targetRows.filter { state(of: $0) != .deleted }
+            .map { ($0 >= base ? $0 - base : nil, loadedRow($0)) }
+        updateEdits { e in
+            for (inserted, loaded) in targets {
+                if let inserted { e.setInserted(change, row: inserted, column: column) }
+                else if let loaded { e.set(change, column: column, in: loaded) }
+            }
         }
-        refreshCells(rows)
-        updateBar()
     }
 
+    /// ⌥⌘R: reads the table again; staged edits stay.
     @objc func reloadCurrentTab(_ sender: Any?) {
-        resolvePendingEdits(before: "Reloading") { [self] in reload() }
+        endInlineEdit()
+        reload()
     }
 
     // MARK: - Menus
@@ -806,9 +770,6 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
         let hasRows = !targetRows.isEmpty
         switch item.action {
         case #selector(copy(_:)), #selector(copyRowsAs(_:)): return hasRows
-        case #selector(commitChanges(_:)), #selector(discardChanges(_:)), #selector(previewChanges(_:)):
-            if item.action == #selector(commitChanges(_:)) { item.title = "Commit Changes" }
-            return !edits.isEmpty || editing != nil
         case #selector(addRow(_:)): return isEditable && cache != nil
         case #selector(duplicateRows(_:)), #selector(setNull(_:)), #selector(setEmpty(_:)), #selector(setDefault(_:)):
             return isEditable && hasRows
@@ -873,7 +834,7 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
     /// A loaded row with its staged changes applied.
     private func overlay(_ values: [DBValue], row: Int) -> [DBValue] {
         values.indices.map { i in
-            switch edits.change(row: row, column: i) {
+            switch change(row: row, column: i) {
             case .value(let v)?: v
             case .defaultValue?: .null
             case nil: values[i]

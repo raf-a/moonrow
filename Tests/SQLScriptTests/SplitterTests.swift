@@ -15,11 +15,12 @@ private func texts(_ sql: String, _ d: LexerDialect = .postgres) -> [String] {
             select 'a;b', "c;d" from t; -- x; y
             /* z; */ select 2
             """
-        #expect(texts(sql) == ["select 'a;b', \"c;d\" from t", "/* z; */ select 2"])
+        #expect(texts(sql) == ["select 'a;b', \"c;d\" from t", "-- x; y\n/* z; */ select 2"])
     }
 
     @Test func commentOnlySegmentsAreDropped() {
         #expect(texts("select 1; -- trailing\n;; /* nothing */") == ["select 1"])
+        #expect(texts("select 1; -- trailing") == ["select 1"])
     }
 
     @Test func doubledQuotesAndBackslashes() {
@@ -88,6 +89,20 @@ private func texts(_ sql: String, _ d: LexerDialect = .postgres) -> [String] {
         #expect(at(12) == "select 2")     // start of next line
         #expect(at(22) == "select 3")     // blank line between → next
         #expect(at(sql.utf16.count) == "select 3")
+    }
+
+    /// A comment after `;` and the blank lines after it
+    /// lead the next statement.
+    @Test func trailingCommentLeadsNextStatement() {
+        let sql = "SELECT 1 AS one; -- trailing comment\n\nSELECT 2 AS two;\nSELECT 3 AS three;"
+        func at(_ i: Int) -> String? { SQLSplitter.statement(at: i, in: sql, dialect: .postgres)?.text }
+        let endOfLine1 = Array(sql.utf16).firstIndex(of: 10)!
+        #expect(texts(sql) == ["SELECT 1 AS one", "-- trailing comment\n\nSELECT 2 AS two", "SELECT 3 AS three"])
+        #expect(at(15) == "SELECT 1 AS one")                           // (a) just after the ;
+        #expect(at(16) == "SELECT 1 AS one")                           // the space before --
+        #expect(at(endOfLine1) == "-- trailing comment\n\nSELECT 2 AS two")  // (b)
+        #expect(at(endOfLine1 + 1) == "-- trailing comment\n\nSELECT 2 AS two")  // (c) blank line
+        #expect(at(endOfLine1 + 2) == "-- trailing comment\n\nSELECT 2 AS two")  // (d) line 3
     }
 }
 

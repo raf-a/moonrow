@@ -3,7 +3,8 @@ import AppKit
 import DBKit
 
 // The sidebar's Rename, Truncate, Delete and Copy Script As. Each confirmation shows the SQL it
-// will run, updated as its options change.
+// will run, updated as its options change. Truncate and Delete are staged with the workspace's
+// other changes; Rename runs at once.
 
 extension WorkspaceWindowController {
     func connectSidebarActions() {
@@ -17,14 +18,32 @@ extension WorkspaceWindowController {
 
     /// Tabs showing `object`.
     func tabs(showing object: DatabaseObject) -> [TableTabViewController] {
-        content.tabs.compactMap { $0 as? TableTabViewController }.filter { $0.table == object.ref }
+        tableTabs.filter { $0.newTableID == nil && $0.table == object.ref }
     }
 
-    /// Resolves staged edits in the tabs showing `object`, then runs `proceed`.
+    /// For actions that run at once (rename, import): when `object` has staged changes, asks to
+    /// commit everything staged or discard what's staged for it, then runs `proceed`.
     func resolveEdits(on object: DatabaseObject, before action: String, then proceed: @escaping () -> Void) {
-        guard let tab = tabs(showing: object).first(where: \.hasPendingEdits) else { return proceed() }
-        if let i = content.tabs.firstIndex(where: { $0 === tab }) { content.select(i) }
-        tab.resolvePendingEdits(before: action) { [weak self] in self?.resolveEdits(on: object, before: action, then: proceed) }
+        for tab in tableTabs { tab.endEditing() }
+        guard changes.mark(for: object.ref) != nil, let window else { return proceed() }
+        let alert = NSAlert()
+        alert.messageText = "\(object.ref.name) has staged changes"
+        alert.informativeText = "\(action) runs at once. Commit everything staged first, or discard what's staged for \(object.ref.name)?"
+        alert.addButton(withTitle: "Commit All")
+        alert.addButton(withTitle: "Discard")
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons[1].hasDestructiveAction = true
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard let self else { return }
+            switch response {
+            case .alertFirstButtonReturn: self.commitStaged(then: proceed)
+            case .alertSecondButtonReturn:
+                self.changes.discard(object.ref)
+                for tab in self.tabs(showing: object) { tab.reload() }
+                proceed()
+            default: break
+            }
+        }
     }
 
     private func rename(_ object: DatabaseObject) {
@@ -66,18 +85,13 @@ extension WorkspaceWindowController {
         let connection = connection
         confirm(
             title: "Delete every row in \(object.ref.name)?", button: "Truncate",
-            message: "This can't be undone.", options: options.map(\.title)
+            message: Self.stagedMessage, options: options.map(\.title)
         ) { chosen in
             var o = TruncateOptions()
             for (i, option) in options.enumerated() where chosen.contains(i) { option.set(&o) }
             return try await ObjectActions.truncatePlan([object.ref], options: o, on: connection)
         } then: { [weak self] plan in
-            guard let self else { return }
-            self.resolveEdits(on: object, before: "Truncating") {
-                self.run({ plan }, failure: "Couldn't truncate \(object.ref.name)") {
-                    for tab in self.tabs(showing: object) { tab.reload() }
-                }
-            }
+            self?.changes.stage(StagedAction(.truncate, object, plan: plan))
         }
     }
 
@@ -91,22 +105,17 @@ extension WorkspaceWindowController {
         let what = object.kind == .table ? "table" : "view"
         confirm(
             title: "Delete \(what) \(object.ref.name)?", button: "Delete",
-            message: "This can't be undone.", options: options.map(\.title)
+            message: Self.stagedMessage, options: options.map(\.title)
         ) { chosen in
             var o = DropOptions()
             for (i, option) in options.enumerated() where chosen.contains(i) { option.set(&o) }
             return try await ObjectActions.dropPlan([object], options: o, on: connection)
         } then: { [weak self] plan in
-            guard let self else { return }
-            self.resolveEdits(on: object, before: "Deleting") {
-                self.run({ plan }, failure: "Couldn't delete \(object.ref.name)") {
-                    for tab in self.tabs(showing: object) {
-                        if let i = self.content.tabs.firstIndex(where: { $0 === tab }) { self.content.close(i) }
-                    }
-                }
-            }
+            self?.changes.stage(StagedAction(.drop, object, plan: plan))
         }
     }
+
+    private static let stagedMessage = "It's staged with your other changes: Commit (⌘S) runs it, Discard (⇧⌘⌫) drops it."
 
     private func copyScript(_ object: DatabaseObject, _ script: SidebarViewController.Script) {
         let connection = connection
@@ -131,18 +140,14 @@ extension WorkspaceWindowController {
 
     func makeTab(_ object: DatabaseObject, mode: TableTabViewController.Mode) -> TableTabViewController {
         configure(TableTabViewController(
-            connection: connection, object: object, readOnlyConnection: config.readOnly, pageSize: config.pageSize, mode: mode))
+            connection: connection, changes: changes, object: object, readOnlyConnection: config.readOnly,
+            pageSize: config.pageSize, mode: mode))
     }
 
     func configure(_ tab: TableTabViewController) -> TableTabViewController {
         tab.safety = environment.safety
         tab.knownTables = { [weak self] in
             self?.environment.catalog.objects.filter { $0.kind == .table }.map(\.ref) ?? []
-        }
-        tab.onStructureCommitted = { [weak self] tab, _ in
-            guard let self else { return }
-            self.sidebar.reload()
-            if self.tableTab === tab { self.window?.subtitle = "\(tab.table) — \(self.config.summary)" }
         }
         return tab
     }

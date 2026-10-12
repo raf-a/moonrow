@@ -108,7 +108,7 @@ final class GridRowView: NSTableRowView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
-    var state: StagedEdits.RowState = .unchanged {
+    var state: TableEdits.RowState = .unchanged {
         didSet { if state != oldValue { needsDisplay = true } }
     }
 
