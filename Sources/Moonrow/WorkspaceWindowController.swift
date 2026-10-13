@@ -89,6 +89,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
             backing: .buffered, defer: true)
         window.isReleasedWhenClosed = false
         window.contentViewController = split
+        window.initialFirstResponder = sidebar.initialFirstResponder
         window.setContentSize(NSSize(width: 1100, height: 680))
         window.minSize = NSSize(width: 600, height: 360)
         // The toolbar shows the name, the connection's tag and the subtitle itself (`titleView`);

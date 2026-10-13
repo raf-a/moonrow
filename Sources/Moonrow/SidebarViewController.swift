@@ -583,6 +583,9 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         view.window?.makeFirstResponder(filter)
     }
 
+    /// What has the focus when the window opens: the list, not the filter.
+    var initialFirstResponder: NSView { outline }
+
     func reload() {
         loadTask?.cancel()
         loadTask = Task {

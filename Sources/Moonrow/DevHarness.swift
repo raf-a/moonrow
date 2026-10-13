@@ -644,6 +644,7 @@ enum DevHarness {
         }
         let outline = try require(descendant(of: workspace.sidebar.view, SidebarOutline.self), "items list")
         let filter = try require(descendant(of: workspace.sidebar.view, NSSearchField.self), "filter field")
+        try check(window.firstResponder === outline, "the items list, not the filter, has the focus when the workspace opens")
 
         // Space and ⌥⌫ are menu shortcuts, but in a text field they still type.
         window.makeFirstResponder(filter)
