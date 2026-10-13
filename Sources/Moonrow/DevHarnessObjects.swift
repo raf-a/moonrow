@@ -59,10 +59,9 @@ extension DevHarness {
         let term = String(value.displayString.prefix(6))
 
         // MARK: A new view, from the + menu
-        let newMenu = try require(descendant(of: workspace.sidebar.view, NSPopUpButton.self) { $0.toolTip == "New view, function or procedure" },
-                                  "New pull-down")
-        let viewItem = try require(newMenu.menu?.items.firstIndex { $0.title == "View" }, "New ▸ View")
-        newMenu.menu?.performActionForItem(at: viewItem)
+        let newMenu = workspace.sidebar.newMenu
+        let viewItem = try require(newMenu.items.firstIndex { $0.title == "New View" }, "the + menu's New View")
+        newMenu.performActionForItem(at: viewItem)
         let newTab = try await waitFor("new view tab") { workspace.content.current as? DefinitionTabViewController }
         try check(newTab.newDefinitionID != nil && newTab.editor.editor.string.contains("untitled_view"), "the new view starts from a template")
         let viewName = "m10_view"

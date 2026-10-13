@@ -11,7 +11,12 @@ final class LeftSidebarController: NSViewController {
     let queries: SavedQueriesViewController
     let history: HistoryViewController
     let search = SearchInDatabaseViewController()
-    private let picker = NSSegmentedControl()
+    private let picker = NavigatorBar(tabs: [
+        .init(symbol: "cylinder", name: "Items", tip: "Items: tables and views"),
+        .init(symbol: "doc.text", name: "Queries", tip: "Queries: saved queries"),
+        .init(symbol: "clock", name: "History", tip: "History: statements run in this connection"),
+        .init(symbol: "magnifyingglass", name: "Search", tip: "Search in Database: a text in every table"),
+    ])
     private let container = NSView()
     private(set) var pane = Pane.items
 
@@ -26,20 +31,7 @@ final class LeftSidebarController: NSViewController {
     required init?(coder: NSCoder) { fatalError() }
 
     override func loadView() {
-        picker.segmentCount = 4
-        for (i, (symbol, name, tip)) in [("tablecells", "Items", "Items: tables and views"),
-                                         ("doc.text", "Queries", "Queries: saved queries"),
-                                         ("clock.arrow.circlepath", "History", "History: statements run in this connection"),
-                                         ("magnifyingglass", "Search", "Search in Database: a text in every table")].enumerated() {
-            picker.setImage(NSImage(systemSymbolName: symbol, accessibilityDescription: name), forSegment: i)
-            picker.setToolTip(tip, forSegment: i)
-            picker.setWidth(0, forSegment: i)
-        }
-        picker.segmentDistribution = .fillEqually
-        picker.controlSize = .small
-        picker.selectedSegment = 0
-        picker.target = self
-        picker.action = #selector(pickerChanged(_:))
+        picker.onSelect = { [weak self] index in self?.show(Pane(rawValue: index) ?? .items) }
 
         let root = NSView(frame: NSRect(x: 0, y: 0, width: 250, height: 600))
         for v in [picker, container] {
@@ -47,10 +39,11 @@ final class LeftSidebarController: NSViewController {
             root.addSubview(v)
         }
         NSLayoutConstraint.activate([
-            picker.topAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor, constant: 8),
+            picker.topAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor, constant: 4),
+            picker.heightAnchor.constraint(equalToConstant: 32),
             picker.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 10),
             picker.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -10),
-            container.topAnchor.constraint(equalTo: picker.bottomAnchor, constant: 0),
+            container.topAnchor.constraint(equalTo: picker.bottomAnchor, constant: 4),
             container.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             container.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             container.bottomAnchor.constraint(equalTo: root.bottomAnchor),
@@ -62,7 +55,7 @@ final class LeftSidebarController: NSViewController {
 
     func show(_ pane: Pane) {
         self.pane = pane
-        picker.selectedSegment = pane.rawValue
+        picker.selectedIndex = pane.rawValue
         for v in container.subviews { v.removeFromSuperview() }
         let child: NSViewController = switch pane {
         case .items: items
@@ -75,8 +68,113 @@ final class LeftSidebarController: NSViewController {
         child.view.pin(to: container)
     }
 
-    @objc private func pickerChanged(_ sender: NSSegmentedControl) {
-        show(Pane(rawValue: sender.selectedSegment) ?? .items)
+}
+
+/// The sidebar's pane picker, as in Xcode's navigators: outline symbols on a capsule (glass on
+/// macOS 26), the selected one on a grey circle that slides to it.
+@MainActor
+private final class NavigatorBar: NSView {
+    struct Tab { let symbol, name, tip: String }
+
+    var onSelect: ((Int) -> Void)?
+    var selectedIndex = 0 {
+        didSet { if selectedIndex != oldValue { update(animated: window != nil) } }
+    }
+    private let buttons: [NSButton]
+    private let track = Track()
+
+    init(tabs: [Tab]) {
+        let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .regular)
+        buttons = tabs.map { tab in
+            let button = NSButton()
+            button.setButtonType(.pushOnPushOff)
+            button.isBordered = false
+            button.imagePosition = .imageOnly
+            button.imageScaling = .scaleNone
+            button.image = NSImage(systemSymbolName: tab.symbol, accessibilityDescription: tab.name)?
+                .withSymbolConfiguration(config)
+            button.contentTintColor = .labelColor
+            button.toolTip = tab.tip
+            button.setAccessibilityLabel(tab.name)
+            button.setAccessibilityRole(.radioButton)
+            return button
+        }
+        super.init(frame: .zero)
+        let stack = NSStackView(views: buttons)
+        stack.distribution = .fillEqually
+        stack.spacing = 0
+        track.count = buttons.count
+        track.highlight.wantsLayer = true
+        track.addSubview(track.highlight)
+        track.addSubview(stack)
+        stack.pin(to: track)
+        let capsule = GlassCapsule(track, padding: 4)
+        addSubview(capsule)
+        capsule.pin(to: self)
+        for (i, button) in buttons.enumerated() {
+            button.tag = i
+            button.target = self
+            button.action = #selector(clicked(_:))
+            button.heightAnchor.constraint(equalToConstant: 24).isActive = true
+        }
+        update(animated: false)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    @objc private func clicked(_ sender: NSButton) {
+        selectedIndex = sender.tag
+        onSelect?(sender.tag)
+    }
+
+    private func update(animated: Bool) {
+        for (i, button) in buttons.enumerated() { button.state = i == selectedIndex ? .on : .off }
+        track.selected = selectedIndex
+        let target = track.highlightFrame
+        guard animated, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            track.highlight.frame = target
+            return
+        }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.3
+            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.3, 1)
+            track.highlight.animator().frame = target
+        }
+    }
+
+    /// The row of tabs, with the highlight behind them.
+    private final class Track: NSView {
+        let highlight = Highlight()
+        var count = 1
+        var selected = 0
+
+        /// A circle centred in the selected tab's slot.
+        var highlightFrame: NSRect {
+            let slot = bounds.width / CGFloat(max(count, 1))
+            let side = min(slot, bounds.height)
+            return NSRect(x: slot * (CGFloat(selected) + 0.5) - side / 2, y: (bounds.height - side) / 2,
+                          width: side, height: side)
+        }
+
+        override func layout() {
+            super.layout()
+            highlight.frame = highlightFrame
+        }
+    }
+
+    private final class Highlight: NSView {
+        override var wantsUpdateLayer: Bool { true }
+
+        override func updateLayer() {
+            // Set here so the colour follows the appearance.
+            layer?.backgroundColor = NSColor.tertiarySystemFill.cgColor
+        }
+
+        override func layout() {
+            super.layout()
+            layer?.cornerRadius = bounds.height / 2
+        }
     }
 }
 
@@ -84,7 +182,7 @@ final class LeftSidebarController: NSViewController {
 @MainActor
 class SidebarListController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
     lazy var table: NSTableView = makeTable()
-    let search = NSSearchField()
+    let search: NSSearchField = SidebarSearchField()
     let empty = NSTextField(wrappingLabelWithString: "")
 
     /// The list view; the Queries pane uses an outline.

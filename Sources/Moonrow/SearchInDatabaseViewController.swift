@@ -18,7 +18,7 @@ final class SearchInDatabaseViewController: NSViewController, NSTableViewDataSou
     /// (`.preview`), a double-click keeps the tab.
     var onOpenRows: ((DatabaseObject, [FilterCondition], TabPlacement.Intent) -> Void)?
 
-    let field = NSSearchField()
+    let field: NSSearchField = SidebarSearchField()
     private let operatorPopup = NSPopUpButton()
     private let scopeButton = NSPopUpButton(frame: .zero, pullsDown: true)
     private let startButton = NSButton(title: "Search", target: nil, action: nil)

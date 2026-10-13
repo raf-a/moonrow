@@ -245,3 +245,88 @@ final class GlassCapsule: NSView {
         }
     }
 }
+
+/// A search field for the sidebars, quieter than the system's: no bezel, a light grey rounded
+/// fill, as in Xcode's navigators.
+final class SidebarSearchField: NSSearchField {
+    static let radius: CGFloat = 7
+
+    override class var cellClass: AnyClass? {
+        get { Cell.self }
+        set {}
+    }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        isBezeled = false
+        isBordered = false
+        drawsBackground = false
+        wantsLayer = true
+        layer?.cornerRadius = Self.radius
+        updateFill()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: super.intrinsicContentSize.width, height: 26)
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateFill()
+    }
+
+    private func updateFill() {
+        // Resolved here so the colour follows the appearance.
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.backgroundColor = NSColor.quaternarySystemFill.cgColor
+        }
+    }
+
+    /// Without a bezel the system lays the field out from the top; this centres the magnifier,
+    /// the text and the clear button.
+    private final class Cell: NSSearchFieldCell {
+        override func searchButtonRect(forBounds rect: NSRect) -> NSRect {
+            NSRect(x: rect.minX + 6, y: rect.midY - 8, width: 16, height: 16)
+        }
+
+        override func cancelButtonRect(forBounds rect: NSRect) -> NSRect {
+            NSRect(x: rect.maxX - 22, y: rect.midY - 8, width: 16, height: 16)
+        }
+
+        override func searchTextRect(forBounds rect: NSRect) -> NSRect {
+            let font = font ?? .systemFont(ofSize: NSFont.systemFontSize)
+            let height = ceil(font.ascender - font.descender + font.leading)
+            return NSRect(x: rect.minX + 26, y: (rect.midY - height / 2).rounded(.down),
+                          width: max(0, rect.width - 26 - 24), height: height)
+        }
+
+        override func drawingRect(forBounds rect: NSRect) -> NSRect { searchTextRect(forBounds: rect) }
+
+        /// The focus ring follows the fill's rounded corners instead of the bounds.
+        override func drawFocusRingMask(withFrame cellFrame: NSRect, in controlView: NSView) {
+            NSBezierPath(roundedRect: cellFrame, xRadius: SidebarSearchField.radius,
+                         yRadius: SidebarSearchField.radius).fill()
+        }
+
+        override func focusRingMaskBounds(forFrame cellFrame: NSRect, in controlView: NSView) -> NSRect {
+            cellFrame
+        }
+
+        override func titleRect(forBounds rect: NSRect) -> NSRect { searchTextRect(forBounds: rect) }
+
+        override func edit(withFrame rect: NSRect, in controlView: NSView, editor textObj: NSText,
+                           delegate: Any?, event: NSEvent?) {
+            super.edit(withFrame: searchTextRect(forBounds: rect), in: controlView, editor: textObj,
+                       delegate: delegate, event: event)
+        }
+
+        override func select(withFrame rect: NSRect, in controlView: NSView, editor textObj: NSText,
+                             delegate: Any?, start selStart: Int, length selLength: Int) {
+            super.select(withFrame: searchTextRect(forBounds: rect), in: controlView, editor: textObj,
+                         delegate: delegate, start: selStart, length: selLength)
+        }
+    }
+}

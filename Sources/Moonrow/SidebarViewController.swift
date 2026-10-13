@@ -18,8 +18,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     var onOpenStructure: ((DatabaseObject) -> Void)?
     var onNewTable: (() -> Void)? {
         didSet {
-            newTableButton.isEnabled = onNewTable != nil
-            newMenuButton.isEnabled = onNewTable != nil
+            newButton.isEnabled = onNewTable != nil
         }
     }
     /// New ▸ View, Materialized View, Function, Procedure.
@@ -68,14 +67,14 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     private let connection: any DatabaseConnection
     private let outline = SidebarOutline()
-    private let filter = NSSearchField()
+    private let filter: NSSearchField = SidebarSearchField()
     private let message = NSTextField(wrappingLabelWithString: "")
     private let schemaPopup = NSPopUpButton()
     private let schemaBar = NSStackView()
-    private let newTableButton = NSButton()
-    /// A plain button rather than a pull-down, so its chevron is drawn as the + beside it is.
-    private let newMenuButton = NSButton()
-    private lazy var newMenu = makeNewMenu()
+    /// A round + that opens the New menu: glass on macOS 26, the system's round button before.
+    private let newButton = NSButton()
+    /// The + button's menu; internal for the harness.
+    lazy var newMenu = makeNewMenu(standalone: true)
     /// The schema (Postgres) or database (MySQL) whose items are listed; nil for SQLite, or a
     /// MySQL connection without a default database.
     private(set) var schema: String?
@@ -203,28 +202,26 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         schemaPopup.target = self
         schemaPopup.action = #selector(schemaChosen(_:))
         schemaPopup.toolTip = "Schema"
-        newTableButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "New table")?
-            .withSymbolConfiguration(.init(pointSize: 14, weight: .medium))
-        newTableButton.bezelStyle = .accessoryBarAction
-        newTableButton.isBordered = false
-        newTableButton.contentTintColor = .secondaryLabelColor
-        newTableButton.controlSize = .small
-        newTableButton.target = self
-        newTableButton.action = #selector(newTable(_:))
-        newTableButton.toolTip = "New table"
-        newMenuButton.image = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: "More new items")?
-            .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold))
-        newMenuButton.bezelStyle = .accessoryBarAction
-        newMenuButton.isBordered = false
-        newMenuButton.contentTintColor = .secondaryLabelColor
-        newMenuButton.controlSize = .small
-        newMenuButton.toolTip = "New view, function or procedure"
-        newMenuButton.target = self
-        newMenuButton.action = #selector(showNewMenu(_:))
-        schemaBar.addArrangedSubview(newTableButton)
-        schemaBar.addArrangedSubview(newMenuButton)
+        newButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "New")?
+            .withSymbolConfiguration(.init(pointSize: 13, weight: .medium))
+        newButton.imagePosition = .imageOnly
+        if #available(macOS 26.0, *) {
+            newButton.bezelStyle = .glass
+            newButton.borderShape = .circle
+            newButton.widthAnchor.constraint(equalToConstant: 30).isActive = true
+            newButton.heightAnchor.constraint(equalToConstant: 30).isActive = true
+        } else {
+            newButton.bezelStyle = .circular
+        }
+        newButton.controlSize = .large
+        newButton.toolTip = "New table, view, function or procedure"
+        newButton.target = self
+        newButton.action = #selector(showNewMenu(_:))
+        newButton.setContentHuggingPriority(.required, for: .horizontal)
+        schemaBar.addArrangedSubview(newButton)
         schemaBar.addArrangedSubview(schemaPopup)
-        schemaBar.edgeInsets = NSEdgeInsets(top: 4, left: 8, bottom: 6, right: 8)
+        schemaBar.spacing = 8
+        schemaBar.edgeInsets = NSEdgeInsets(top: 6, left: 10, bottom: 10, right: 10)
         schemaPopup.isHidden = true
         schemaPopup.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
@@ -395,18 +392,25 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         menu.items.first?.isEnabled = targetObject.map(Self.opens) ?? false
     }
 
-    /// The chevron's menu, under it.
+    /// The + button's menu, above it (the button sits at the window's bottom edge).
     @objc private func showNewMenu(_ sender: NSButton) {
-        let below = sender.isFlipped ? sender.bounds.maxY + 4 : sender.bounds.minY - 4
-        newMenu.popUp(positioning: nil, at: NSPoint(x: sender.bounds.minX, y: below), in: sender)
+        let above = sender.isFlipped ? sender.bounds.minY - 4 : sender.bounds.maxY + 4
+        // Validation hides the kinds the database lacks; it has to run before the menu is measured.
+        newMenu.update()
+        let height = newMenu.size.height
+        let origin = sender.isFlipped ? above - height : above + height
+        newMenu.popUp(positioning: nil, at: NSPoint(x: sender.bounds.minX, y: origin), in: sender)
     }
 
     /// New ▸ Table…, View, Materialized View, Function, Procedure.
-    private func makeNewMenu() -> NSMenu {
+    /// `standalone` is the + button's menu, whose items say "New …" as there is no New ▸ above them.
+    private func makeNewMenu(standalone: Bool = false) -> NSMenu {
         let menu = NSMenu(title: "New")
-        menu.addItem(withTitle: "Table…", action: #selector(newTable(_:)), keyEquivalent: "").target = self
+        menu.addItem(withTitle: standalone ? "New Table" : "Table…", action: #selector(newTable(_:)), keyEquivalent: "")
+            .target = self
         for kind in [DefinitionKind.view, .materializedView, .function, .procedure] {
-            let item = menu.addItem(withTitle: kind.title.capitalized, action: #selector(newDefinitionItem(_:)), keyEquivalent: "")
+            let title = standalone ? "New \(kind.title.capitalized)" : kind.title.capitalized
+            let item = menu.addItem(withTitle: title, action: #selector(newDefinitionItem(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = kind.rawValue
         }
