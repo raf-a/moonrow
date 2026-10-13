@@ -37,16 +37,30 @@ public struct TableRef: Sendable, Hashable, CustomStringConvertible {
 }
 
 public enum ObjectKind: String, Sendable, Hashable, CaseIterable {
-    case table, view, materializedView, function, sequence
+    case table, view, materializedView, function, procedure, sequence
+
+    public var isRoutine: Bool { self == .function || self == .procedure }
+    /// Tables and views: what opens in a grid.
+    public var isRelation: Bool { self == .table || self == .view || self == .materializedView }
 }
 
 public struct DatabaseObject: Sendable, Hashable {
     public var ref: TableRef
     public var kind: ObjectKind
+    /// Postgres routines: the argument types that tell overloads apart (`a integer, b text`,
+    /// `pg_get_function_identity_arguments`). Nil elsewhere.
+    public var signature: String?
 
-    public init(_ ref: TableRef, kind: ObjectKind) {
+    public init(_ ref: TableRef, kind: ObjectKind, signature: String? = nil) {
         self.ref = ref
         self.kind = kind
+        self.signature = signature
+    }
+
+    /// `f(integer)` for a routine with a signature, else the name.
+    public var displayName: String {
+        guard let signature else { return ref.name }
+        return "\(ref.name)(\(signature))"
     }
 }
 
@@ -160,7 +174,7 @@ public struct TriggerInfo: Sendable, Hashable {
     public var timing: String
     /// `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`.
     public var events: [String]
-    /// The full definition, or the action body where that's all the database keeps (MySQL).
+    /// The whole `CREATE TRIGGER` statement, without a final `;`.
     public var definition: String
 
     public init(name: String, timing: String, events: [String], definition: String) {

@@ -16,7 +16,7 @@ public enum QuickOpen {
                 case .table: self = .table
                 case .view: self = .view
                 case .materializedView: self = .materializedView
-                case .function: self = .function
+                case .function, .procedure: self = .function
                 case .sequence: return nil
                 }
             }

@@ -33,6 +33,23 @@ final class SQLTextView: NSTextView {
         return view
     }
 
+    /// The characters the last edit put in (UTF-16), for the highlighter: inserted text arrives
+    /// uncoloured even where it reads the same as before.
+    private(set) var lastEdit: Range<Int>?
+
+    override func shouldChangeText(in affectedCharRange: NSRange, replacementString: String?) -> Bool {
+        guard super.shouldChangeText(in: affectedCharRange, replacementString: replacementString) else { return false }
+        let length = (replacementString as NSString?)?.length ?? 0
+        lastEdit = affectedCharRange.location..<(affectedCharRange.location + length)
+        return true
+    }
+
+    /// The last edit's range, once.
+    func takeLastEdit() -> Range<Int>? {
+        defer { lastEdit = nil }
+        return lastEdit
+    }
+
     /// The editor's own text undo; the window's undo manager holds the staged table changes.
     private let textUndo = UndoManager()
     override var undoManager: UndoManager? { textUndo }
@@ -305,8 +322,9 @@ final class SQLHighlighter {
         return out
     }
 
-    /// Re-colours `storage`. `delta` is the change in length since the last call (0 for a full pass).
-    func highlight(_ storage: NSTextStorage, delta: Int, full: Bool = false) {
+    /// Re-colours `storage`. `delta` is the change in length since the last call (0 for a full pass);
+    /// runs overlapping `edited` are coloured again even when they look unchanged.
+    func highlight(_ storage: NSTextStorage, delta: Int, full: Bool = false, edited: Range<Int>? = nil) {
         let new = Self.runs(storage.string, dialect: dialect)
         let old = runs
         runs = new
@@ -321,9 +339,13 @@ final class SQLHighlighter {
                 lastOld -= 1
             }
         }
-        guard first < lastNew else { return }
+        var recolour = first < lastNew ? Array(new[first..<lastNew]) : []
+        if let edited, !full {
+            recolour += new.filter { $0.range.overlaps(edited) || (edited.isEmpty && $0.range.contains(edited.lowerBound)) }
+        }
+        guard !recolour.isEmpty else { return }
         storage.beginEditing()
-        for run in new[first..<lastNew] {
+        for run in recolour {
             let r = NSRange(location: run.range.lowerBound, length: run.range.count)
             guard NSMaxRange(r) <= storage.length else { continue }
             storage.addAttribute(.foregroundColor, value: run.style.color, range: r)

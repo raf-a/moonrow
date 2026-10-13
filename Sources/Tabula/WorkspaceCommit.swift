@@ -48,7 +48,7 @@ extension WorkspaceWindowController: NSMenuItemValidation {
     /// Ends every edit in progress, so what's typed is staged: grid cells, and fields such as a
     /// table's Name or the right sidebar's.
     func endAllEditing() {
-        for tab in tableTabs { tab.endEditing() }
+        for tab in objectTabs { tab.endEditing() }
         if let editor = window?.firstResponder as? NSTextView, editor.isFieldEditor {
             window?.makeFirstResponder(nil)
         }
@@ -64,8 +64,45 @@ extension WorkspaceWindowController: NSMenuItemValidation {
         for a in changes.actions {
             if case .rename(let name) = a.kind { renamed[a.object.ref] = TableRef(schema: a.object.ref.schema, name) }
         }
+        // Views renamed by editing their definition.
+        for d in changes.definitions where !d.isDropped {
+            if let object = d.object?.object, object.kind.isRelation, d.name != object.ref.name {
+                renamed[object.ref] = TableRef(schema: object.ref.schema, d.name)
+            }
+        }
         let created = Dictionary(uniqueKeysWithValues: changes.newTables.map { ($0.id, $0.editor.name) })
-        let dropped = Set(changes.actions.filter { $0.kind == .drop }.map(\.object.ref))
+        let droppedObjects = Set(changes.actions.filter { $0.kind == .drop }.map(\.object))
+        let dropped = Set(droppedObjects.filter(\.kind.isRelation).map(\.ref))
+        // Routine and new-object tabs find their object again once the list has reloaded: by
+        // kind and the name the definition gave it.
+        var follow: [(tab: DefinitionTabViewController, kind: ObjectKind, name: String, signature: String?)] = []
+        for tab in definitionTabs {
+            if let id = tab.newDefinitionID, let d = changes.definition(id), let kind = d.kind.objectKind {
+                tab.isAwaitingCommit = true
+                follow.append((tab, kind, d.name, nil))
+            } else if let o = tab.object {
+                if droppedObjects.contains(o) {
+                    closeWithoutAsking(tab)
+                } else {
+                    follow.append((tab, o.kind, tab.name, o.signature))
+                }
+            }
+        }
+        sidebar.afterNextLoad = { [weak self] objects in
+            guard let self else { return }
+            for f in follow {
+                guard let pane = self.panes.pane(of: f.tab), let i = pane.index(of: f.tab) else { continue }
+                let candidates = objects.filter { $0.kind == f.kind && $0.ref.name == f.name }
+                if candidates.contains(where: { $0 == f.tab.object }) {
+                    f.tab.reload()
+                } else if let match = candidates.first(where: { $0.signature == f.signature }) ?? candidates.first {
+                    pane.replace(at: i, with: self.makeTab(match, mode: .definition), focus: pane === self.content)
+                } else {
+                    self.closeWithoutAsking(f.tab)
+                }
+            }
+            self.tabChanged()
+        }
         // Tabs of created tables become regular tabs before the new-table tabs would close.
         for tab in tableTabs {
             if let id = tab.newTableID, let name = created[id] { tab.becomeTable(TableRef(schema: tab.table.schema, name)) }

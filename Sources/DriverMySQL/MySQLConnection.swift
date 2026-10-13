@@ -87,7 +87,8 @@ public final class MySQLConnection: DatabaseConnection, @unchecked Sendable {
             guard let name = string(row[0]), let type = string(row[1]) else { return nil }
             let kind: ObjectKind = switch type {
             case "VIEW", "SYSTEM VIEW": .view
-            case "PROCEDURE", "FUNCTION": .function
+            case "FUNCTION": .function
+            case "PROCEDURE": .procedure
             default: .table
             }
             return DatabaseObject(TableRef(schema: schema, name), kind: kind)
@@ -169,27 +170,13 @@ public final class MySQLConnection: DatabaseConnection, @unchecked Sendable {
         switch object.kind {
         case .view:
             return try await rows("SHOW CREATE VIEW \(name)").first.flatMap { string($0[1]) }.map { $0 + ";" } ?? ""
-        case .function:
-            let types = try await rows("""
-                SELECT ROUTINE_TYPE FROM information_schema.ROUTINES
-                WHERE ROUTINE_SCHEMA = COALESCE(?, DATABASE()) AND ROUTINE_NAME = ?
-                """, tableBindings(object.ref)).compactMap { string($0[0]) }
-            var out: [String] = []
-            for type in types {
-                // SHOW CREATE PROCEDURE/FUNCTION: the body is the third column.
-                if let body = try await rows("SHOW CREATE \(type) \(name)").first.flatMap({ string($0[2]) }) {
-                    out.append(body + ";")
-                }
-            }
-            return out.joined(separator: "\n\n")
+        case .function, .procedure:
+            // SHOW CREATE FUNCTION/PROCEDURE: the statement is the third column.
+            let what = object.kind == .function ? "FUNCTION" : "PROCEDURE"
+            return try await rows("SHOW CREATE \(what) \(name)").first.flatMap { string($0[2]) }.map { $0 + ";" } ?? ""
         default:
             var statements = try await rows("SHOW CREATE TABLE \(name)").first.flatMap { string($0[1]) }.map { [$0] } ?? []
-            for t in try await triggers(of: object.ref) {
-                statements.append("""
-                    CREATE TRIGGER \(dialect.quoteIdentifier(t.name)) \(t.timing) \(t.events.joined(separator: " OR ")) \
-                    ON \(name) FOR EACH ROW \(t.definition)
-                    """)
-            }
+            statements += try await triggers(of: object.ref).map(\.definition)
             return statements.map { $0 + ";" }.joined(separator: "\n\n")
         }
     }
@@ -247,17 +234,23 @@ public final class MySQLConnection: DatabaseConnection, @unchecked Sendable {
         return out
     }
 
+    /// The whole `CREATE TRIGGER` statement, as SHOW CREATE TRIGGER gives it (the trigger
+    /// table only keeps the action).
     public func triggers(of table: TableRef) async throws -> [TriggerInfo] {
-        try await rows("""
-            SELECT TRIGGER_NAME, ACTION_TIMING, EVENT_MANIPULATION, ACTION_STATEMENT
+        let found = try await rows("""
+            SELECT TRIGGER_NAME, ACTION_TIMING, EVENT_MANIPULATION, TRIGGER_SCHEMA
             FROM information_schema.TRIGGERS
             WHERE EVENT_OBJECT_SCHEMA = COALESCE(?, DATABASE()) AND EVENT_OBJECT_TABLE = ?
             ORDER BY TRIGGER_NAME
-            """, tableBindings(table)).map { row in
-            TriggerInfo(
-                name: string(row[0]) ?? "", timing: string(row[1]) ?? "",
-                events: [string(row[2]) ?? ""], definition: string(row[3]) ?? "")
+            """, tableBindings(table))
+        var out: [TriggerInfo] = []
+        for row in found {
+            let name = string(row[0]) ?? ""
+            let ref = dialect.qualified(TableRef(schema: string(row[3]), name))
+            let sql = try await rows("SHOW CREATE TRIGGER \(ref)").first.flatMap { string($0[2]) } ?? ""
+            out.append(TriggerInfo(name: name, timing: string(row[1]) ?? "", events: [string(row[2]) ?? ""], definition: sql))
         }
+        return out
     }
 
     private func tableBindings(_ table: TableRef) -> [DBValue] {

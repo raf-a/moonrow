@@ -217,7 +217,7 @@ private final class PickerCell: NSTableCellView {
 
 extension WorkspaceWindowController {
     /// ⌘P: every table, view, materialized view and function in every schema, and the saved
-    /// queries. Return opens the choice in a regular tab; a function is shown in the sidebar.
+    /// queries. Return opens the choice in a regular tab.
     @objc func quickOpen(_ sender: Any?) {
         guard let window else { return }
         picker?.close()
@@ -234,7 +234,8 @@ extension WorkspaceWindowController {
                 case .function: ("function", .systemOrange)
                 case .savedQuery: ("terminal", .secondaryLabelColor)
                 }
-                let detail = item.kind == .savedQuery ? "Saved query" : item.schema ?? ""
+                var detail = item.kind == .savedQuery ? "Saved query" : item.schema ?? ""
+                if let signature = item.object?.signature { detail += (detail.isEmpty ? "" : " · ") + "(\(signature))" }
                 return PickerPanel.Row(title: item.name, detail: detail, symbol: symbol, tint: tint)
             }
         }
@@ -301,17 +302,7 @@ extension WorkspaceWindowController {
             return openSavedQuery(query)
         }
         guard let object = item.object else { return }
-        if SidebarViewController.opensInGrid(object) {
-            return open(object, intent: .regular)
-        }
-        // Functions don't open yet: the sidebar shows them, in their schema.
-        leftSidebar.show(.items)
-        if object.ref.schema != sidebar.schema, let schema = object.ref.schema {
-            sidebar.revealAfterReload = object.ref
-            sidebar.switchSchema(to: schema)
-        } else {
-            sidebar.reveal([object.ref])
-        }
+        if SidebarViewController.opens(object) { open(object, intent: .regular) }
     }
 
     /// ⌘K: the server's databases (MySQL, MariaDB) or schemas (Postgres); choosing one switches

@@ -2,8 +2,9 @@ import AppCore
 import AppKit
 import DBKit
 
-/// The connection's tables, views and functions, grouped by kind, with a filter field on top
-/// and, for servers with several schemas or databases, a switcher at the bottom.
+/// The connection's tables, views, functions and procedures, grouped by kind, with a filter
+/// field on top and, for servers with several schemas or databases, a switcher at the bottom.
+/// Staged new objects and clones are listed in green until the commit creates them.
 @MainActor
 final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NSOutlineViewDelegate,
     NSSearchFieldDelegate, NSMenuDelegate, NSMenuItemValidation
@@ -16,25 +17,43 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     var onOpen: ((DatabaseObject, TabPlacement.Intent) -> Void)?
     var onOpenStructure: ((DatabaseObject) -> Void)?
     var onNewTable: (() -> Void)? {
-        didSet { newTableButton.isEnabled = onNewTable != nil }
+        didSet {
+            newTableButton.isEnabled = onNewTable != nil
+            newMenuButton.isEnabled = onNewTable != nil
+        }
     }
+    /// New ▸ View, Materialized View, Function, Procedure.
+    var onNewDefinition: ((DefinitionKind) -> Void)?
+    /// Which kinds the database has.
+    var supportsDefinition: (DefinitionKind) -> Bool = { _ in false }
+    var onClone: ((DatabaseObject) -> Void)?
+    var onRefreshMaterializedView: ((DatabaseObject) -> Void)?
+    var onShowDiagram: (() -> Void)?
+    var onSearchInDatabase: (() -> Void)?
     var onRename: ((DatabaseObject) -> Void)?
     var onRenameNewTable: ((UUID) -> Void)?
     var onTruncate: ((DatabaseObject) -> Void)?
     /// Delete… from the context menu: the dialog with options.
     var onDelete: ((DatabaseObject) -> Void)?
-    /// ⌫ or ⌘⌫: marks the items for deletion at once and removes staged new tables.
-    var onMarkForDeletion: ((_ objects: [DatabaseObject], _ newTables: [UUID]) -> Void)?
+    /// ⌫ or ⌘⌫: marks the items for deletion at once and removes staged new objects and clones.
+    var onMarkForDeletion: ((Deletion) -> Void)?
     var onCopyScript: ((DatabaseObject, Script) -> Void)?
     var onExport: ((DatabaseObject) -> Void)?
     /// Nil on read-only connections.
     var onImportCSV: ((DatabaseObject) -> Void)?
     /// After the object list (re)loads.
     var onObjectsLoaded: (([DatabaseObject]) -> Void)?
-    /// What's staged for a table, drawn on its row.
-    var markFor: ((TableRef) -> StagedChanges.Mark?)?
+    /// Once, after the next list loads (tabs following what a commit created).
+    var afterNextLoad: (([DatabaseObject]) -> Void)?
+    /// What's staged for an item, drawn on its row.
+    var markFor: ((DatabaseObject) -> StagedChanges.Mark?)?
     /// Staged new tables, listed with the tables until they're created.
     var stagedNewTables: () -> [(id: UUID, name: String)] = { [] }
+    /// Staged new views and routines, listed in their sections until they're created.
+    var stagedNewDefinitions: () -> [(id: UUID, kind: DefinitionKind, name: String)] = { [] }
+    /// Names of staged clones, listed with the tables.
+    var stagedClones: () -> [String] = { [] }
+    var onOpenNewDefinition: ((UUID) -> Void)?
     /// The name a staged rename gives an item.
     var stagedNameFor: ((TableRef) -> String?)?
     var onOpenNewTable: ((UUID) -> Void)?
@@ -52,6 +71,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     private let schemaPopup = NSPopUpButton()
     private let schemaBar = NSStackView()
     private let newTableButton = NSButton()
+    private let newMenuButton = NSPopUpButton(frame: .zero, pullsDown: true)
     /// The schema (Postgres) or database (MySQL) whose items are listed; nil for SQLite, or a
     /// MySQL connection without a default database.
     private(set) var schema: String?
@@ -74,10 +94,31 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         let object: DatabaseObject
         /// Set for a staged new table.
         let newTableID: UUID?
-        init(_ object: DatabaseObject, newTableID: UUID? = nil) {
+        /// Set for a staged new view or routine.
+        let newDefinitionID: UUID?
+        /// A table that a staged clone creates.
+        let isClone: Bool
+        /// An overloaded routine shows its arguments.
+        var showsSignature = false
+
+        init(_ object: DatabaseObject, newTableID: UUID? = nil, newDefinitionID: UUID? = nil, isClone: Bool = false) {
             self.object = object
             self.newTableID = newTableID
+            self.newDefinitionID = newDefinitionID
+            self.isClone = isClone
         }
+
+        /// Exists only as staged so far.
+        var isStaged: Bool { newTableID != nil || newDefinitionID != nil || isClone }
+    }
+
+    /// What ⌫ marks or removes.
+    struct Deletion {
+        var objects: [DatabaseObject] = []
+        var newTables: [UUID] = []
+        var newDefinitions: [UUID] = []
+        var clones: [String] = []
+        var isEmpty: Bool { objects.isEmpty && newTables.isEmpty && newDefinitions.isEmpty && clones.isEmpty }
     }
 
     init(connection: any DatabaseConnection) {
@@ -113,8 +154,12 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         menu.addItem(withTitle: "Open Structure", action: #selector(openStructure(_:)), keyEquivalent: "").target = self
         menu.delegate = self
         menu.addItem(.separator())
-        menu.addItem(withTitle: "New Table…", action: #selector(newTable(_:)), keyEquivalent: "").target = self
+        let new = NSMenuItem(title: "New", action: nil, keyEquivalent: "")
+        new.submenu = makeNewMenu()
+        menu.addItem(new)
         menu.addItem(withTitle: "Rename…", action: #selector(renameItem(_:)), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Clone…", action: #selector(cloneItem(_:)), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Refresh Materialized View", action: #selector(refreshItem(_:)), keyEquivalent: "").target = self
         // The shortcuts shown are the keys the list handles (⌘⌫ marks without the dialog).
         let truncate = menu.addItem(withTitle: "Truncate…", action: #selector(truncateItem(_:)), keyEquivalent: "\u{8}")
         truncate.keyEquivalentModifierMask = .option
@@ -133,6 +178,9 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             item.tag = tag
         }
         menu.addItem(scripts)
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Show Diagram", action: #selector(showDiagramItem(_:)), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Search in Database…", action: #selector(searchItem(_:)), keyEquivalent: "").target = self
         outline.menu = menu
 
         let scroll = NSScrollView()
@@ -155,7 +203,19 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         newTableButton.target = self
         newTableButton.action = #selector(newTable(_:))
         newTableButton.toolTip = "New table"
+        newMenuButton.bezelStyle = .accessoryBarAction
+        newMenuButton.isBordered = false
+        newMenuButton.controlSize = .small
+        newMenuButton.toolTip = "New view, function or procedure"
+        (newMenuButton.cell as? NSPopUpButtonCell)?.arrowPosition = .noArrow
+        let newMenu = makeNewMenu()
+        let title = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        title.image = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: "More new items")
+        newMenu.insertItem(title, at: 0)
+        newMenuButton.menu = newMenu
+        newMenuButton.imagePosition = .imageOnly
         schemaBar.addArrangedSubview(newTableButton)
+        schemaBar.addArrangedSubview(newMenuButton)
         schemaBar.addArrangedSubview(schemaPopup)
         schemaBar.edgeInsets = NSEdgeInsets(top: 4, left: 8, bottom: 6, right: 8)
         schemaPopup.isHidden = true
@@ -205,12 +265,17 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     /// Selects the item for `ref` (or nothing) without opening it, so the list follows the
     /// selected tab.
     func reveal(_ ref: TableRef?) {
-        reveal(row: ref.flatMap { r in rowOfItem { $0.newTableID == nil && $0.object.ref == r } })
+        reveal(row: ref.flatMap { r in rowOfItem { !$0.isStaged && $0.object.ref == r && $0.object.kind.isRelation } })
+    }
+
+    /// Selects a routine's item (or nothing) without opening it.
+    func reveal(_ object: DatabaseObject?) {
+        reveal(row: object.flatMap { o in rowOfItem { !$0.isStaged && $0.object == o } })
     }
 
     /// Selects these items without opening them (after an undo, say).
     func reveal(_ refs: [TableRef]) {
-        let rows = refs.compactMap { r in rowOfItem { $0.newTableID == nil && $0.object.ref == r } }
+        let rows = refs.compactMap { r in rowOfItem { !$0.isStaged && $0.object.ref == r } }
         isRevealing = true
         defer { isRevealing = false }
         outline.selectRowIndexes(IndexSet(rows), byExtendingSelection: false)
@@ -220,6 +285,10 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     func reveal(newTable id: UUID) {
         reveal(row: rowOfItem { $0.newTableID == id })
+    }
+
+    func reveal(newDefinition id: UUID) {
+        reveal(row: rowOfItem { $0.newDefinitionID == id })
     }
 
     private func reveal(row: Int?) {
@@ -240,7 +309,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     }
 
     private var targetObject: DatabaseObject? {
-        guard let item = targetItem, item.newTableID == nil else { return nil }
+        guard let item = targetItem, !item.isStaged else { return nil }
         return item.object
     }
 
@@ -259,9 +328,12 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     private func open(_ item: Item, intent: TabPlacement.Intent) {
         if let id = item.newTableID {
             onOpenNewTable?(id)
-            return
+        } else if let id = item.newDefinitionID {
+            onOpenNewDefinition?(id)
+        } else if !item.isClone, Self.opens(item.object) {
+            // A clone opens once the commit has created it.
+            onOpen?(item.object, intent)
         }
-        if Self.opensInGrid(item.object) { onOpen?(item.object, intent) }
     }
 
     /// Redraws staged marks and the staged new tables.
@@ -270,10 +342,10 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         rebuild()
     }
 
-    /// Tables and views open in a grid; functions are listed only (their editor comes later).
-    static func opensInGrid(_ object: DatabaseObject) -> Bool {
-        [.table, .view, .materializedView].contains(object.kind)
-    }
+    /// Tables and views open in a grid, routines in a definition tab.
+    static func opensInGrid(_ object: DatabaseObject) -> Bool { object.kind.isRelation }
+
+    static func opens(_ object: DatabaseObject) -> Bool { object.kind.isRelation || object.kind.isRoutine }
 
     /// The schemas (Postgres) or databases (MySQL) the switcher offers; empty for SQLite.
     var schemaNames: [String] { schemaPopup.isHidden ? [] : schemaPopup.itemTitles }
@@ -304,43 +376,111 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     }
 
     @objc private func openInNewTab(_ sender: Any?) {
-        if let object = targetObject, Self.opensInGrid(object) { onOpen?(object, .newTab) }
+        if let object = targetObject, Self.opens(object) { onOpen?(object, .newTab) }
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
-        menu.items.first?.isEnabled = targetObject.map(Self.opensInGrid) ?? false
+        menu.items.first?.isEnabled = targetObject.map(Self.opens) ?? false
+    }
+
+    /// New ▸ Table…, View, Materialized View, Function, Procedure.
+    private func makeNewMenu() -> NSMenu {
+        let menu = NSMenu(title: "New")
+        menu.addItem(withTitle: "Table…", action: #selector(newTable(_:)), keyEquivalent: "").target = self
+        for kind in [DefinitionKind.view, .materializedView, .function, .procedure] {
+            let item = menu.addItem(withTitle: kind.title.capitalized, action: #selector(newDefinitionItem(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = kind.rawValue
+        }
+        return menu
+    }
+
+    @objc private func newDefinitionItem(_ sender: NSMenuItem) {
+        guard let kind = (sender.representedObject as? String).flatMap(DefinitionKind.init(rawValue:)) else { return }
+        onNewDefinition?(kind)
+    }
+
+    /// "Delete Table", "Delete Function", "Delete Items".
+    private func deleteTitle(_ deletion: Deletion) -> String {
+        let count = deletion.objects.count + deletion.newTables.count + deletion.newDefinitions.count + deletion.clones.count
+        if count > 1 { return "Delete Items" }
+        if let o = deletion.objects.first {
+            return "Delete " + (DefinitionKind(o.kind)?.title.capitalized ?? "Table")
+        }
+        if let id = deletion.newDefinitions.first, let d = stagedNewDefinitions().first(where: { $0.id == id }) {
+            return "Delete " + d.kind.title.capitalized
+        }
+        return "Delete Table"
     }
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         let kind = targetObject?.kind
         switch item.action {
-        case #selector(openInNewTab(_:)), #selector(openStructure(_:)):
+        case #selector(openInNewTab(_:)):
+            return targetObject.map(Self.opens) ?? false
+        case #selector(openStructure(_:)):
             return targetObject.map(Self.opensInGrid) ?? false
         case #selector(newTable(_:)):
             return onNewTable != nil
+        case #selector(newDefinitionItem(_:)):
+            guard let kind = (item.representedObject as? String).flatMap(DefinitionKind.init(rawValue:)) else { return false }
+            item.isHidden = !supportsDefinition(kind)
+            return onNewDefinition != nil && onNewTable != nil && supportsDefinition(kind)
         case #selector(deleteRows(_:)):
-            let items = targetItems.filter { $0.newTableID != nil || $0.object.kind != .function }
-            let kinds = Set(items.map { $0.object.kind == .table ? "Table" : "View" })
-            if item.menu?.title == "Edit" { item.title = items.count > 1 ? "Delete Items" : "Delete \(kinds.first ?? "Table")" }
-            return onMarkForDeletion != nil && !items.isEmpty
+            let deletion = deletionTargets
+            if item.menu?.title == "Edit" { item.title = deleteTitle(deletion) }
+            return onMarkForDeletion != nil && !deletion.isEmpty
         case #selector(truncateTable(_:)):
             return onNewTable != nil && kind == .table
         case #selector(renameItem(_:)):
-            return targetItem?.newTableID != nil || kind != nil && kind != .function
+            return targetItem?.newTableID != nil || kind?.isRelation == true
+        case #selector(cloneItem(_:)):
+            return kind == .table && onClone != nil
+        case #selector(refreshItem(_:)):
+            item.isHidden = kind != .materializedView
+            return kind == .materializedView && onRefreshMaterializedView != nil
         case #selector(deleteItem(_:)):
-            return kind != nil && kind != .function
+            return kind != nil && kind != .sequence && onMarkForDeletion != nil
         case #selector(truncateItem(_:)):
             return kind == .table
         case #selector(exportItem(_:)):
-            return kind == .table || kind == .view || kind == .materializedView
+            return kind?.isRelation == true
         case #selector(importCSVItem(_:)):
             return kind == .table && onImportCSV != nil
         case #selector(copyScript(_:)):
             guard let kind else { return false }
+            if kind.isRoutine { return item.tag <= 1 }
             return item.tag == 2 ? kind == .table : true
+        case #selector(showDiagramItem(_:)):
+            return onShowDiagram != nil
+        case #selector(searchItem(_:)):
+            return onSearchInDatabase != nil
         default:
             return true
         }
+    }
+
+    @objc private func cloneItem(_ sender: Any?) {
+        if let object = targetObject, object.kind == .table { onClone?(object) }
+    }
+
+    @objc private func refreshItem(_ sender: Any?) {
+        if let object = targetObject, object.kind == .materializedView { onRefreshMaterializedView?(object) }
+    }
+
+    @objc private func showDiagramItem(_ sender: Any?) { onShowDiagram?() }
+    @objc private func searchItem(_ sender: Any?) { onSearchInDatabase?() }
+
+    /// The selected items ⌫ applies to: existing objects to mark, staged ones to remove.
+    private var deletionTargets: Deletion {
+        var d = Deletion()
+        for item in targetItems {
+            if let id = item.newTableID { d.newTables.append(id) }
+            else if let id = item.newDefinitionID { d.newDefinitions.append(id) }
+            else if item.isClone { d.clones.append(item.object.ref.name) }
+            else if item.object.kind != .sequence { d.objects.append(item.object) }
+        }
+        return d
     }
 
     @objc private func openStructure(_ sender: Any?) {
@@ -367,14 +507,12 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         onTruncate?(object)
     }
 
-    /// ⌫ or ⌘⌫ (Edit ▸ Delete): marks the selected tables and views for deletion at once, with
-    /// no dialog, and removes selected new tables. Functions are left alone.
+    /// ⌫ or ⌘⌫ (Edit ▸ Delete): marks the selected tables, views and routines for deletion at
+    /// once, with no dialog, and removes selected new objects and clones.
     @objc func deleteRows(_ sender: Any?) {
-        let items = targetItems
-        let objects = items.filter { $0.newTableID == nil && $0.object.kind != .function }.map(\.object)
-        let newTables = items.compactMap(\.newTableID)
-        guard let onMarkForDeletion, !objects.isEmpty || !newTables.isEmpty else { return NSSound.beep() }
-        onMarkForDeletion(objects, newTables)
+        let deletion = deletionTargets
+        guard let onMarkForDeletion, !deletion.isEmpty else { return NSSound.beep() }
+        onMarkForDeletion(deletion)
     }
 
     @objc private func deleteItem(_ sender: Any?) {
@@ -434,6 +572,10 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                 self.objects = objects
                 rebuild()
                 onObjectsLoaded?(objects)
+                if let after = afterNextLoad {
+                    afterNextLoad = nil
+                    after(objects)
+                }
                 if let ref = revealAfterReload {
                     revealAfterReload = nil
                     reveal([ref])
@@ -464,17 +606,29 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     private func rebuild() {
         let selectedItems = outline.selectedRowIndexes.compactMap { outline.item(atRow: $0) as? Item }
         let query = filter.stringValue.trimmingCharacters(in: .whitespaces)
-        let matching = query.isEmpty ? objects : objects.filter { $0.ref.name.localizedCaseInsensitiveContains(query) }
-        let newTables = stagedNewTables()
-            .filter { query.isEmpty || $0.name.localizedCaseInsensitiveContains(query) }
+        func matches(_ name: String) -> Bool { query.isEmpty || name.localizedCaseInsensitiveContains(query) }
+        let matching = objects.filter { matches($0.ref.name) }
+        var staged = stagedNewTables().filter { matches($0.name) }
             .map { Item(DatabaseObject(TableRef(schema: schema, $0.name), kind: .table), newTableID: $0.id) }
+        staged += stagedClones().filter(matches).map { Item(DatabaseObject(TableRef(schema: schema, $0), kind: .table), isClone: true) }
+        staged += stagedNewDefinitions().filter { matches($0.name) }.compactMap { d in
+            d.kind.objectKind.map { Item(DatabaseObject(TableRef(schema: schema, d.name), kind: $0), newDefinitionID: d.id) }
+        }
+        // Overloads are told apart by their arguments.
+        let routineNames = matching.filter(\.kind.isRoutine).map { "\($0.kind.rawValue) \($0.ref.name)" }
+        let overloaded = Set(Dictionary(grouping: routineNames) { $0 }.filter { $0.value.count > 1 }.keys)
 
         let sections: [(ObjectKind, String)] = [
             (.table, "Tables"), (.view, "Views"), (.materializedView, "Materialized Views"), (.function, "Functions"),
+            (.procedure, "Procedures"),
         ]
         groups = sections.compactMap { kind, title in
-            var items = matching.filter { $0.kind == kind }.map { Item($0) }
-            if kind == .table { items += newTables }
+            var items = matching.filter { $0.kind == kind }.map { object in
+                let item = Item(object)
+                item.showsSignature = overloaded.contains("\(object.kind.rawValue) \(object.ref.name)")
+                return item
+            }
+            items += staged.filter { $0.object.kind == kind }
             return items.isEmpty ? nil : Group(title: title, items: items)
         }
         outline.reloadData()
@@ -483,7 +637,9 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         let rows = selectedItems.compactMap { selected in
             rowOfItem { item in
                 if let id = selected.newTableID { return item.newTableID == id }
-                return item.newTableID == nil && item.object == selected.object
+                if let id = selected.newDefinitionID { return item.newDefinitionID == id }
+                if selected.isClone { return item.isClone && item.object == selected.object }
+                return !item.isStaged && item.object == selected.object
             }
         }
         if !rows.isEmpty {
@@ -491,7 +647,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             outline.selectRowIndexes(IndexSet(rows), byExtendingSelection: false)
             isRevealing = false
         }
-        if objects.isEmpty && newTables.isEmpty {
+        if objects.isEmpty && staged.isEmpty {
             showMessage(schema.map { "“\($0)” has no tables yet." } ?? "This database has no tables yet.")
         } else if groups.isEmpty {
             showMessage("Nothing matches “\(query)”.")
@@ -596,17 +752,21 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         var (symbol, tint): (String, NSColor) = switch item.object.kind {
         case .table: ("tablecells", .systemBlue)
         case .function, .sequence: ("function", .systemOrange)
-        default: ("eye", .systemPurple)
+        case .procedure: ("curlybraces", .systemOrange)
+        case .materializedView: ("square.stack.3d.up", .systemPurple)
+        case .view: ("eye", .systemPurple)
         }
         // Staged changes: edited and truncated tables in orange, dropped ones struck out in
         // red, new ones in green, until the workspace commits or discards them.
-        let mark = item.newTableID == nil ? markFor?(item.object.ref) : nil
+        let mark = item.isStaged ? nil : markFor?(item.object)
         var attributes: [NSAttributedString.Key: Any] = [:]
         var tip: String?
-        if item.newTableID != nil {
-            (symbol, tint) = ("plus.rectangle", .systemGreen)
+        if item.isStaged {
+            if item.newTableID != nil || item.isClone { symbol = "plus.rectangle" }
+            tint = .systemGreen
             attributes[.foregroundColor] = NSColor.systemGreen
-            tip = "New table, created when you commit (⌘S)"
+            let what = item.isClone ? "Clone" : "New \(DefinitionKind(item.object.kind)?.title ?? "table")"
+            tip = "\(what), created when you commit (⌘S)"
         } else if let mark {
             switch mark {
             case .edited:
@@ -623,9 +783,11 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             }
             tint = attributes[.foregroundColor] as? NSColor ?? tint
         }
-        // A staged rename shows the new name.
-        let name = item.newTableID == nil ? stagedNameFor?(item.object.ref) ?? item.object.ref.name : item.object.ref.name
+        // A staged rename shows the new name; overloads show their arguments.
+        var name = !item.isStaged && item.object.kind.isRelation ? stagedNameFor?(item.object.ref) ?? item.object.ref.name : item.object.ref.name
         if name != item.object.ref.name { tip = "Rename staged (was \(item.object.ref.name))" }
+        if item.showsSignature { name = item.object.displayName }
+        if item.object.kind.isRoutine, !item.isStaged, tip == nil { tip = item.object.displayName }
         cell.textField?.attributedStringValue = NSAttributedString(string: name, attributes: attributes)
         cell.toolTip = tip
         cell.imageView?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: item.object.kind.rawValue)

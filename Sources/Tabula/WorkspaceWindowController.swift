@@ -48,6 +48,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     /// Quick Open's items from the last time it listed every schema.
     var quickOpenItems: [QuickOpen.Item] = []
     var picker: PickerPanel?
+    /// Show Diagram's window, while it's open.
+    private(set) var diagram: DiagramWindowController?
 
     /// `password` is the database password the workspace logged in with; safe mode's password
     /// levels ask for it.
@@ -112,7 +114,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         // A single click previews and leaves the focus in the list; a double-click keeps the tab.
         sidebar.onOpen = { [weak self] object, intent in self?.open(object, intent: intent, focus: intent != .preview) }
         sidebar.onObjectsLoaded = { [weak self] objects in self?.environment.catalog.setObjects(objects) }
-        sidebar.markFor = { [weak self] table in self?.changes.mark(for: table) }
+        sidebar.markFor = { [weak self] object in self?.changes.mark(for: object) }
         sidebar.stagedNewTables = { [weak self] in
             self?.changes.newTables.map { ($0.id, $0.editor.name) } ?? []
         }
@@ -126,6 +128,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         leftSidebar.history.onInsert = { [weak self] text in self?.insertIntoEditor(text) }
         leftSidebar.history.onOpenInNewTab = { [weak self] text in self?.newQuery(text: text) }
         environment.onSchemaChange = { [weak self] in self?.sidebar.reload() }
+        connectSearch()
         panes.onActivate = { [weak self] in self?.tabChanged() }
         // The first pane exists already (the window loaded its content); later ones come here.
         for pane in panes.panes { setUp(pane) }
@@ -145,6 +148,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     var queryController: QueryEditorViewController? { content.current as? QueryEditorViewController }
     /// Table tabs of every pane.
     var tableTabs: [TableTabViewController] { panes.allTabs.compactMap { $0 as? TableTabViewController } }
+    /// Routine and new-object tabs of every pane.
+    var definitionTabs: [DefinitionTabViewController] { panes.allTabs.compactMap { $0 as? DefinitionTabViewController } }
+    /// Every tab that shows an object.
+    var objectTabs: [any ObjectTab] { panes.allTabs.compactMap { $0 as? any ObjectTab } }
 
     private func setUp(_ pane: WorkspaceTabsController) {
         pane.onSelectionChange = { [weak self, weak pane] in
@@ -158,7 +165,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
             self.newQueryTab(nil)
         }
         pane.onDoubleClickTab = { [weak pane] i in
-            (pane?.tabs[safe: i] as? TableTabViewController)?.isPreview = false
+            (pane?.tabs[safe: i] as? any ObjectTab)?.isPreview = false
         }
     }
 
@@ -172,17 +179,17 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     func open(_ object: DatabaseObject, intent: TabPlacement.Intent = .regular, mode: TableTabViewController.Mode? = nil,
               focus: Bool = true) {
         let pane = content
-        let tabs = pane.tabs.map { TabPlacement.Tab(object: ($0 as? TableTabViewController)?.object, isPreview: $0.isPreview) }
+        let tabs = pane.tabs.map { TabPlacement.Tab(object: ($0 as? any ObjectTab)?.object, isPreview: $0.isPreview) }
         switch TabPlacement.place(object, intent: intent, in: tabs, selected: pane.selectedIndex) {
         case .select(let i):
             pane.select(i, focus: focus)
-            if let mode { tableTab?.switchTo(mode) }
+            if let mode { tableTab?.switchTo(mode, focus: focus) }
         case .promote(let i):
-            (pane.tabs[i] as? TableTabViewController)?.isPreview = false
+            (pane.tabs[i] as? any ObjectTab)?.isPreview = false
             pane.select(i, focus: focus)
-            if let mode { tableTab?.switchTo(mode) }
+            if let mode { tableTab?.switchTo(mode, focus: focus) }
         case .replacePreview(let i):
-            (pane.tabs[i] as? TableTabViewController)?.endEditing()
+            (pane.tabs[i] as? any ObjectTab)?.endEditing()
             pane.replace(at: i, with: makeTab(object, mode: mode ?? .data, preview: true), focus: focus)
         case .insert(let i, let preview):
             pane.add(makeTab(object, mode: mode ?? .data, preview: preview), at: i, focus: focus)
@@ -198,6 +205,34 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
             changes.addNewTable(id: id, schema: sidebar.schema, dialect: connection.dialect, taken: taken)
         }
         openNewTable(id)
+    }
+
+    /// Stages a new view, materialized view, function, procedure, and opens its editor; it's
+    /// created on commit.
+    func newDefinition(_ kind: DefinitionKind) {
+        let dialect = connection.dialect
+        guard !config.readOnly, dialect.supportsDefinitions(of: kind) else { return NSSound.beep() }
+        let taken = Set(environment.catalog.objects.map { $0.ref.name.lowercased() })
+        let schema = sidebar.schema
+        let id = UUID()
+        changes.perform("New \(kind.title.capitalized)", at: EditPlace(newDefinition: id, side: .definition)) {
+            changes.addNewDefinition(id: id, kind: kind, schema: schema, dialect: dialect, taken: taken) { name in
+                DefinitionTemplate.text(kind, name: name, schema: schema, dialect: dialect)
+            }
+        }
+        openNewDefinition(id)
+    }
+
+    /// Selects the tab of a staged new object, or opens one.
+    func openNewDefinition(_ id: UUID) {
+        for (n, pane) in panes.panes.enumerated() {
+            if let i = pane.tabs.firstIndex(where: { ($0 as? DefinitionTabViewController)?.newDefinitionID == id }) {
+                panes.activate(n, focus: false)
+                return pane.select(i, force: true)
+            }
+        }
+        guard let d = changes.definition(id) else { return }
+        content.add(DefinitionTabViewController(newDefinition: id, kind: d.kind, connection: connection, changes: changes))
     }
 
     /// Selects the tab of a staged new table, or opens one.
@@ -285,8 +320,17 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     func tabChanged() {
         inspector.source = tableTab?.active as? InspectorSource
         let table = tableTab?.table
-        if let id = tableTab?.newTableID { sidebar.reveal(newTable: id) } else { sidebar.reveal(table) }
-        if let table, tableTab?.newTableID == nil {
+        let definitionTab = content.current as? DefinitionTabViewController
+        if let id = tableTab?.newTableID {
+            sidebar.reveal(newTable: id)
+        } else if let definitionTab {
+            if let id = definitionTab.newDefinitionID { sidebar.reveal(newDefinition: id) } else { sidebar.reveal(definitionTab.object) }
+        } else {
+            sidebar.reveal(table)
+        }
+        if let object = definitionTab?.object {
+            window?.subtitle = "\(object.ref) — \(config.summary)"
+        } else if let table, tableTab?.newTableID == nil {
             window?.subtitle = "\(table) — \(config.summary)"
         } else if let editor = queryController {
             window?.subtitle = "\(editor.tabItem.title) — \(config.summary)"
@@ -302,9 +346,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     @objc private func stagedChangesChanged() {
         window?.isDocumentEdited = !changes.isEmpty
         sidebar.stagedChangesChanged()
-        // A new table that's no longer staged (discarded, deleted, undone) closes its tab.
+        // A new table or object that's no longer staged (discarded, deleted, undone) closes its tab.
         for tab in tableTabs {
             if let id = tab.newTableID, changes.newTable(id) == nil { closeWithoutAsking(tab) }
+        }
+        for tab in definitionTabs {
+            if let id = tab.newDefinitionID, changes.definition(id) == nil, !tab.isAwaitingCommit { closeWithoutAsking(tab) }
         }
         for pane in panes.panes { pane.refreshTabItems() }
         updateChangesItem()
@@ -319,6 +366,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
             leftSidebar.show(.items)
             if let id = place.newTable, changes.newTable(id) != nil { return openNewTable(id) }
             sidebar.reveal(place.objects.map(\.ref))
+        case .definition:
+            if let id = place.newDefinition {
+                if changes.definition(id) != nil { openNewDefinition(id) }
+            } else if let object = place.objects.first {
+                open(object, intent: .preview, mode: object.kind.isRelation ? .definition : nil)
+            }
         case .data, .structure:
             let mode: TableTabViewController.Mode = place.side == .data ? .data : .structure
             if let id = place.newTable {
@@ -330,11 +383,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
             switch mode {
             case .data: tableTab?.data?.restoreSelection(place)
             case .structure: tableTab?.structure?.restoreSelection(place)
+            case .definition: break
             }
         }
     }
 
-    func closeWithoutAsking(_ tab: TableTabViewController) {
+    func closeWithoutAsking(_ tab: any WorkspaceTab) {
         if let pane = panes.pane(of: tab), let i = pane.index(of: tab) { pane.close(i) }
     }
 
@@ -390,6 +444,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         for pane in panes.panes { pane.closeAll() }
         panes.tearDown()
         picker?.close()
+        diagram?.stop()
+        diagram?.close()
+        leftSidebar.search.stop()
         let connection = connection
         Task { await connection.close() }
         onClose?()
@@ -399,9 +456,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
 
     /// ⌘R: reads the items and open tables again. Staged changes stay.
     @objc func reloadWorkspace(_ sender: Any?) {
-        for tab in tableTabs { tab.endEditing() }
+        for tab in objectTabs { tab.endEditing() }
         sidebar.reload()
-        for tab in tableTabs { tab.reload() }
+        for tab in objectTabs { tab.reload() }
     }
 
     @objc func focusItemFilter(_ sender: Any?) {
@@ -430,9 +487,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     /// tab, on the same side) or a new query tab.
     @objc func splitPaneRight(_ sender: Any?) {
         let current = content.current
-        tableTab?.endEditing()
+        (current as? any ObjectTab)?.endEditing()
         let pane = panes.addPane()
-        if let tab = current as? TableTabViewController {
+        if let tab = current as? DefinitionTabViewController {
+            if let object = tab.object { pane.add(makeTab(object, mode: .data, preview: false)) }
+        } else if let tab = current as? TableTabViewController {
             if let id = tab.newTableID {
                 pane.add(configure(TableTabViewController(
                     connection: connection, changes: changes, newTable: id, schema: tab.table.schema, pageSize: config.pageSize)))
@@ -507,6 +566,61 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     }
 
     @objc func showQueryHistory(_ sender: Any?) { leftSidebar.show(.history) }
+
+    // MARK: - Search in Database
+
+    private func connectSearch() {
+        let search = leftSidebar.search
+        search.tables = { [weak self] in self?.environment.catalog.objects ?? [] }
+        search.openSession = { [weak self] in
+            guard let open = self?.openSession else { throw DatabaseError("No session can be opened.") }
+            return try await open()
+        }
+        search.onOpenRows = { [weak self] object, conditions, intent in
+            guard let self else { return }
+            self.open(object, intent: intent, mode: .data, focus: intent != .preview)
+            self.tableTab?.data?.showRows(matching: conditions, focus: intent != .preview)
+        }
+        sidebar.onSearchInDatabase = { [weak self] in self?.searchInDatabase(nil) }
+        sidebar.onShowDiagram = { [weak self] in self?.showDiagram(nil) }
+    }
+
+    /// Show Diagram: the listed schema's tables and foreign keys in a window of their own, read
+    /// on a session of its own where the connection can open one.
+    @objc func showDiagram(_ sender: Any?) {
+        let tables = environment.catalog.objects.filter { $0.kind == .table }.map(\.ref)
+        let schema = sidebar.schema
+        if diagram?.schema != schema {
+            diagram?.stop()
+            diagram?.close()
+            diagram = nil
+        }
+        if let diagram {
+            diagram.showWindow(nil)
+            return
+        }
+        let controller = DiagramWindowController(title: [config.displayName, schema].compactMap { $0 }.joined(separator: " — "),
+                                                 schema: schema)
+        controller.onOpen = { [weak self] object in
+            self?.window?.makeKeyAndOrderFront(nil)
+            self?.open(object, intent: .regular)
+        }
+        let connection = connection
+        if let openSession {
+            controller.load(tables, on: openSession, closeAfter: true)
+        } else {
+            controller.load(tables, on: { connection }, closeAfter: false)
+        }
+        diagram = controller
+        controller.showWindow(nil)
+    }
+
+    /// Search in Database…: the sidebar's Search pane, ready to type.
+    @objc func searchInDatabase(_ sender: Any?) {
+        if split.splitViewItems.first?.isCollapsed == true { split.splitViewItems.first?.animator().isCollapsed = false }
+        leftSidebar.show(.search)
+        leftSidebar.search.focus()
+    }
     @objc func showSavedQueries(_ sender: Any?) { leftSidebar.show(.queries) }
 
     // MARK: - Safe mode
@@ -679,7 +793,7 @@ struct NavigationPlace: Hashable, Sendable {
     @MainActor
     init(_ tab: any WorkspaceTab) {
         self.tab = tab.tabID
-        object = (tab as? TableTabViewController)?.object
+        object = (tab as? any ObjectTab)?.object
     }
 }
 

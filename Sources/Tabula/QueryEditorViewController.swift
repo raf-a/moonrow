@@ -464,7 +464,7 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
 
     func textDidChange(_ notification: Notification) {
         let length = editor.textStorage!.length
-        highlighter.highlight(editor.textStorage!, delta: length - highlightedLength)
+        highlighter.highlight(editor.textStorage!, delta: length - highlightedLength, edited: editor.takeLastEdit())
         highlightedLength = length
         ruler.textChanged()
         clearErrorHighlight()

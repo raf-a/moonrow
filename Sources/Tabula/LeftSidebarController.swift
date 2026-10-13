@@ -1,14 +1,16 @@
 import AppCore
 import AppKit
 
-/// The workspace sidebar: Items (tables and views), Queries (saved) and History.
+/// The workspace sidebar: Items (tables and views), Queries (saved), History and Search (in
+/// database).
 @MainActor
 final class LeftSidebarController: NSViewController {
-    enum Pane: Int { case items, queries, history }
+    enum Pane: Int { case items, queries, history, search }
 
     let items: SidebarViewController
     let queries: SavedQueriesViewController
     let history: HistoryViewController
+    let search = SearchInDatabaseViewController()
     private let picker = NSSegmentedControl()
     private let container = NSView()
     private(set) var pane = Pane.items
@@ -24,9 +26,10 @@ final class LeftSidebarController: NSViewController {
     required init?(coder: NSCoder) { fatalError() }
 
     override func loadView() {
-        picker.segmentCount = 3
+        picker.segmentCount = 4
         for (i, (label, tip)) in [("Items", "Tables and views"), ("Queries", "Saved queries"),
-                                  ("History", "Statements run in this connection")].enumerated() {
+                                  ("History", "Statements run in this connection"),
+                                  ("Search", "Search in Database: a text in every table")].enumerated() {
             picker.setLabel(label, forSegment: i)
             picker.setToolTip(tip, forSegment: i)
             picker.setWidth(0, forSegment: i)
@@ -52,7 +55,7 @@ final class LeftSidebarController: NSViewController {
             container.bottomAnchor.constraint(equalTo: root.bottomAnchor),
         ])
         view = root
-        for child in [items, queries, history] as [NSViewController] { addChild(child) }
+        for child in [items, queries, history, search] as [NSViewController] { addChild(child) }
         show(.items)
     }
 
@@ -64,6 +67,7 @@ final class LeftSidebarController: NSViewController {
         case .items: items
         case .queries: queries
         case .history: history
+        case .search: search
         }
         container.addSubview(child.view)
         child.view.translatesAutoresizingMaskIntoConstraints = false

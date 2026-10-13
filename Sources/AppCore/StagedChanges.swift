@@ -1,12 +1,15 @@
 import DBKit
 import Foundation
+import SQLScript
 
-/// A sidebar Truncate, Delete or view Rename, staged with the other changes and
+/// A sidebar Truncate, Delete, view Rename or Clone, staged with the other changes and
 /// committed with them. Tables are renamed through their structure editor instead.
 public struct StagedAction: Sendable, Hashable {
     public enum Kind: Sendable, Hashable {
         case truncate, drop
         case rename(to: String)
+        /// A copy of the table under a new name, with or without its rows.
+        case clone(as: String, withData: Bool)
     }
 
     public var kind: Kind
@@ -26,7 +29,64 @@ public struct StagedAction: Sendable, Hashable {
         case .truncate: "truncate \(object.ref.name)"
         case .drop: "delete \(object.ref.name)"
         case .rename(let name): "rename \(object.ref.name) to \(name)"
+        case .clone(let name, let withData): "clone \(object.ref.name) as \(name)\(withData ? " with its rows" : "")"
         }
+    }
+}
+
+/// A view, materialized view, routine or trigger whose CREATE statement is being edited, or
+/// a new one, staged until the commit runs it (see `Dialect.definitionPlan`).
+public struct StagedDefinition: Sendable, Hashable {
+    public let id: UUID
+    public var kind: DefinitionKind
+    /// The object as it is in the database; nil for a new one.
+    public var object: DefinedObject?
+    /// Where a new object goes.
+    public var schema: String?
+    /// A trigger's table.
+    public var table: TableRef?
+    /// The definition as loaded; empty for a new object.
+    public var original: String
+    public private(set) var text: String
+    /// The name the text's CREATE gives, else the object's.
+    public private(set) var name: String
+    /// A trigger staged for deletion (from the table's trigger list).
+    public var isDropped = false
+
+    public init(id: UUID = UUID(), kind: DefinitionKind, object: DefinedObject?, schema: String?, table: TableRef? = nil,
+                original: String, text: String, lexer: LexerDialect) {
+        self.id = id
+        self.kind = kind
+        self.object = object
+        self.schema = schema
+        self.table = table ?? object?.table
+        self.original = original
+        self.text = text
+        self.name = object?.ref.name ?? ""
+        setText(text, lexer: lexer)
+    }
+
+    public var isNew: Bool { object == nil }
+    /// Nothing to run: an existing object whose text is as loaded.
+    public var isUnchanged: Bool { object != nil && !isDropped && text == original }
+
+    public mutating func setText(_ text: String, lexer: LexerDialect) {
+        self.text = text
+        let head = DefinitionText.statements(text, dialect: lexer).lazy
+            .compactMap { DefinitionHead.parse($0, dialect: lexer) }.first { $0.kind == kind }
+        name = head?.name.name ?? object?.ref.name ?? name
+    }
+
+    /// "view people_view", "new function f", "delete trigger t".
+    public var title: String {
+        if isDropped { return "delete \(kind.title) \(name)" }
+        return (isNew ? "new " : "") + "\(kind.title) \(name)"
+    }
+
+    /// The DDL a commit runs for it.
+    public func plan(for dialect: any Dialect) throws -> DDLPlan {
+        if isDropped, let object { return DDLPlan(statements: [try dialect.dropStatement(object)], isAtomic: dialect.transactionalDDL) }
+        return try dialect.definitionPlan(replacing: object, kind: kind, text: text)
     }
 }
 
@@ -37,11 +97,14 @@ public struct EditPlace: Sendable, Hashable {
         case data, structure
         /// The items list: `objects` are the items that were selected.
         case sidebar
+        /// A definition editor: of `objects.first`, or of the new object `newDefinition`.
+        case definition
     }
 
     public var table: TableRef?
     public var kind: ObjectKind
     public var newTable: UUID?
+    public var newDefinition: UUID?
     public var side: Side
     /// Selected grid rows: data rows, or structure columns.
     public var rows: IndexSet
@@ -51,11 +114,12 @@ public struct EditPlace: Sendable, Hashable {
     /// Sidebar items the change was made on.
     public var objects: [DatabaseObject]
 
-    public init(table: TableRef? = nil, kind: ObjectKind = .table, newTable: UUID? = nil, side: Side,
-                rows: IndexSet = [], column: Int? = nil, indexRows: IndexSet = [], objects: [DatabaseObject] = []) {
+    public init(table: TableRef? = nil, kind: ObjectKind = .table, newTable: UUID? = nil, newDefinition: UUID? = nil,
+                side: Side, rows: IndexSet = [], column: Int? = nil, indexRows: IndexSet = [], objects: [DatabaseObject] = []) {
         self.table = table
         self.kind = kind
         self.newTable = newTable
+        self.newDefinition = newDefinition
         self.side = side
         self.rows = rows
         self.column = column
@@ -106,16 +170,21 @@ public final class StagedChanges {
     private var structureOrder: [TableRef] = []
     public private(set) var newTables: [NewTable] = []
     public private(set) var actions: [StagedAction] = []
+    /// Edited and new views, routines and triggers, in the order first staged.
+    public private(set) var definitions: [StagedDefinition] = []
 
     public init() {}
 
-    public var isEmpty: Bool { edits.isEmpty && structures.isEmpty && newTables.isEmpty && actions.isEmpty }
+    public var isEmpty: Bool {
+        edits.isEmpty && structures.isEmpty && newTables.isEmpty && actions.isEmpty && definitions.isEmpty
+    }
 
     /// "people: 2 edited · new table orders · truncate logs", for prompts.
     public var summary: String {
         var parts = editOrder.compactMap { t in edits[t].map { "\(t.name): \($0.summary)" } }
         parts += structureOrder.map { "\($0.name): structure" }
         parts += newTables.map { "new table \($0.editor.name.isEmpty ? "(unnamed)" : $0.editor.name)" }
+        parts += definitions.map(\.title)
         parts += actions.map(\.title)
         return parts.joined(separator: " · ")
     }
@@ -134,11 +203,15 @@ public final class StagedChanges {
         var structureOrder: [TableRef]
         var newTables: [NewTable]
         var actions: [StagedAction]
+        var definitions: [StagedDefinition]
+
+        static let empty = Snapshot(edits: [:], editOrder: [], structures: [:], structureOrder: [], newTables: [], actions: [],
+                                    definitions: [])
     }
 
     private var snapshot: Snapshot {
         Snapshot(edits: edits, editOrder: editOrder, structures: structures, structureOrder: structureOrder,
-                 newTables: newTables, actions: actions)
+                 newTables: newTables, actions: actions, definitions: definitions)
     }
 
     private func restore(_ s: Snapshot) {
@@ -148,6 +221,7 @@ public final class StagedChanges {
         structureOrder = s.structureOrder
         newTables = s.newTables
         actions = s.actions
+        definitions = s.definitions
         changed()
     }
 
@@ -182,24 +256,29 @@ public final class StagedChanges {
     /// After a commit: nothing is staged, and nothing before it can be undone.
     public func clearAfterCommit() {
         undoManager.removeAllActions()
-        restore(Snapshot(edits: [:], editOrder: [], structures: [:], structureOrder: [], newTables: [], actions: []))
+        restore(.empty)
     }
 
     // MARK: Counting
 
     /// How many changes are staged: each edited, new or deleted row, each structure change, each
-    /// new table, truncate, drop and rename. The toolbar shows it.
+    /// new table, edited or new definition, truncate, drop, rename and clone. The toolbar shows it.
     public var changeCount: Int {
         edits.values.reduce(0) { $0 + $1.updatedRowCount + $1.insertedRowCount + $1.deletedRowCount }
             + structures.values.reduce(0) { $0 + $1.changeCount }
-            + newTables.count + actions.count
+            + newTables.count + actions.count + definitions.count
     }
 
-    /// The name a table or view will have after the commit, when a rename is staged.
+    /// The name a table or view will have after the commit, when a rename is staged (or a view's
+    /// edited definition names another view).
     public func stagedName(for table: TableRef) -> String? {
         if let s = structures[table], s.name != table.name { return s.name }
-        for a in actions.reversed() where a.object.ref == table {
+        for a in actions.reversed() where a.object.ref == table && a.object.kind.isRelation {
             if case .rename(let name) = a.kind { return name }
+        }
+        if let d = definitions.first(where: { $0.object?.ref == table && $0.object?.object?.kind.isRelation == true }),
+           d.name != table.name {
+            return d.name
         }
         return nil
     }
@@ -212,6 +291,8 @@ public final class StagedChanges {
         let wanted = trimmed.lowercased()
         var taken = existing.filter { $0.lowercased() != renaming?.name.lowercased() }.map { $0.lowercased() }
         taken += newTables.filter { $0.id != newTable }.map { $0.editor.name.lowercased() }
+        taken += clones.map { $0.name.lowercased() }
+        taken += definitions.filter { $0.isNew && ($0.kind == .view || $0.kind == .materializedView) }.map { $0.name.lowercased() }
         for table in Set(structures.keys).union(actions.map(\.object.ref)) where table != renaming {
             if let renamed = stagedName(for: table) { taken.append(renamed.lowercased()) }
         }
@@ -290,19 +371,34 @@ public final class StagedChanges {
 
     // MARK: Truncate and drop
 
-    /// The staged drop of a table, else its staged truncate.
+    /// The staged drop of a table or view, else its staged truncate.
     public func action(for table: TableRef) -> StagedAction? {
-        actions.last { $0.object.ref == table && $0.kind == .drop } ?? actions.last { $0.object.ref == table && $0.kind == .truncate }
+        func matches(_ a: StagedAction) -> Bool { a.object.ref == table && a.object.kind.isRelation }
+        return actions.last { matches($0) && $0.kind == .drop } ?? actions.last { matches($0) && $0.kind == .truncate }
     }
 
-    /// A drop replaces everything staged for the object; a truncate replaces its row edits,
-    /// which it would wipe anyway; a rename replaces an earlier rename.
+    /// A drop replaces everything staged for the object (a table's triggers included); a
+    /// truncate replaces its row edits, which it would wipe anyway; a rename replaces an earlier
+    /// rename. Routines are told apart by kind and signature, never by name alone.
     public func stage(_ action: StagedAction) {
         let table = action.object.ref
         if case .rename = action.kind {
             actions.removeAll { $0.object.ref == table && $0.isRename }
             actions.append(action)
             return changed()
+        }
+        if case .clone = action.kind {
+            actions.append(action)
+            return changed()
+        }
+        if !action.object.kind.isRelation {
+            definitions.removeAll { $0.object?.object == action.object }
+            actions.removeAll { $0.object == action.object }
+            actions.append(action)
+            return changed()
+        }
+        if action.kind == .drop {
+            definitions.removeAll { $0.object?.object == action.object || $0.table == table }
         }
         if edits[table] != nil {
             edits[table] = nil
@@ -312,8 +408,23 @@ public final class StagedChanges {
             structures[table] = nil
             structureOrder.removeAll { $0 == table }
         }
-        actions.removeAll { $0.object.ref == table && (action.kind == .drop || !$0.isRename) }
+        actions.removeAll { $0.object.ref == table && !$0.isClone && (action.kind == .drop || !$0.isRename) }
         actions.append(action)
+        changed()
+    }
+
+    /// Staged clones: the new table's name and the table it copies.
+    public var clones: [(name: String, source: TableRef)] {
+        actions.compactMap { a in
+            if case .clone(let name, _) = a.kind { return (name, a.object.ref) }
+            return nil
+        }
+    }
+
+    /// Unstages the clone that would create `name`.
+    public func removeClone(named name: String) {
+        guard actions.contains(where: { $0.cloneName == name }) else { return }
+        actions.removeAll { $0.cloneName == name }
         changed()
     }
 
@@ -326,7 +437,70 @@ public final class StagedChanges {
 
     public func mark(for table: TableRef) -> Mark? {
         if let a = action(for: table) { return a.kind == .drop ? .dropped : .truncated }
+        if definitions.contains(where: { $0.object?.ref == table && $0.object?.object?.kind.isRelation == true }) { return .edited }
         return edits[table] != nil || structures[table] != nil || stagedName(for: table) != nil ? .edited : nil
+    }
+
+    /// What's staged for a sidebar item: tables and views by name, routines by kind and signature.
+    public func mark(for object: DatabaseObject) -> Mark? {
+        if object.kind.isRelation { return mark(for: object.ref) }
+        if actions.contains(where: { $0.object == object && $0.kind == .drop }) { return .dropped }
+        return definitions.contains { $0.object?.object == object } ? .edited : nil
+    }
+
+    // MARK: Definitions
+
+    public func definition(_ id: UUID) -> StagedDefinition? { definitions.first { $0.id == id } }
+
+    /// The staged edit of an existing view, routine or trigger.
+    public func definition(for object: DefinedObject) -> StagedDefinition? { definitions.first { $0.object == object } }
+
+    /// Staged edits and new triggers of a table.
+    public func triggerDefinitions(of table: TableRef) -> [StagedDefinition] {
+        definitions.filter { $0.kind == .trigger && $0.table == table }
+    }
+
+    /// Stores a definition. An existing object whose text is back to the loaded one is unstaged.
+    public func setDefinition(_ d: StagedDefinition) {
+        let i = definitions.firstIndex { $0.id == d.id } ?? d.object.flatMap { o in definitions.firstIndex { $0.object == o } }
+        if d.isUnchanged {
+            guard let i else { return }
+            definitions.remove(at: i)
+        } else if let i {
+            guard definitions[i] != d else { return }
+            definitions[i] = d
+        } else {
+            definitions.append(d)
+        }
+        changed()
+    }
+
+    public func removeDefinition(_ id: UUID) {
+        guard definitions.contains(where: { $0.id == id }) else { return }
+        definitions.removeAll { $0.id == id }
+        changed()
+    }
+
+    /// Stages a new object of `kind` from `template`, which gets an unused `untitled_<kind>` name.
+    /// `taken` are the names the schema has already (lowercased).
+    @discardableResult
+    public func addNewDefinition(
+        id: UUID = UUID(), kind: DefinitionKind, schema: String?, table: TableRef? = nil, dialect: any Dialect,
+        taken: Set<String>, template: (String) -> String
+    ) -> UUID {
+        let base = "untitled_" + (kind == .materializedView ? "materialized_view" : kind.rawValue)
+        var names = taken.union(definitions.map { $0.name.lowercased() })
+        names.formUnion(newTables.map { $0.editor.name.lowercased() })
+        var name = base
+        var n = 2
+        while names.contains(name.lowercased()) {
+            name = "\(base)_\(n)"
+            n += 1
+        }
+        definitions.append(StagedDefinition(
+            id: id, kind: kind, object: nil, schema: schema, table: table, original: "", text: template(name), lexer: dialect.lexer))
+        changed()
+        return id
     }
 
     // MARK: Discarding
@@ -337,21 +511,23 @@ public final class StagedChanges {
         editOrder.removeAll { $0 == table }
         structures[table] = nil
         structureOrder.removeAll { $0 == table }
-        actions.removeAll { $0.object.ref == table }
+        actions.removeAll { $0.object.ref == table && $0.object.kind.isRelation }
+        definitions.removeAll { $0.table == table || ($0.object?.ref == table && $0.object?.object?.kind.isRelation == true) }
         changed()
     }
 
     /// Unstages everything (Discard All); undo brings it back.
     public func discardAll() {
         guard !isEmpty else { return }
-        restore(Snapshot(edits: [:], editOrder: [], structures: [:], structureOrder: [], newTables: [], actions: []))
+        restore(.empty)
     }
 
     // MARK: Commit
 
     /// What a commit runs, in this order: row edits table by table (deletes, updates, inserts),
-    /// structure changes, new tables, then truncates and drops in the order they were staged.
-    /// Throws when a structure design can't be applied.
+    /// structure changes, new tables, definitions (views, routines, triggers) in the order first
+    /// staged, then truncates, drops, renames and clones in the order they were staged.
+    /// Throws when a structure design or a definition can't be applied.
     public func plan(dialect: any Dialect) throws -> CommitPlan {
         var sections: [CommitPlan.Section] = []
         for table in editOrder {
@@ -368,6 +544,13 @@ public final class StagedChanges {
         for t in newTables {
             sections.append(.init(title: "new table \(t.editor.name)", ddl: try t.editor.plan(for: dialect)))
         }
+        for d in definitions {
+            do {
+                sections.append(.init(title: d.title, ddl: try d.plan(for: dialect)))
+            } catch let e as DatabaseError {
+                throw DatabaseError("\(d.title): \(e.message)")
+            }
+        }
         for a in actions {
             sections.append(.init(title: a.title, ddl: a.plan))
         }
@@ -379,6 +562,13 @@ extension StagedAction {
     var isRename: Bool {
         if case .rename = kind { return true }
         return false
+    }
+
+    var isClone: Bool { cloneName != nil }
+
+    var cloneName: String? {
+        if case .clone(let name, _) = kind { return name }
+        return nil
     }
 }
 

@@ -262,6 +262,50 @@ extension SQLiteDialect {
         return DDLPlan(statements: s)
     }
 
+    public func supportsDefinitions(of kind: DefinitionKind) -> Bool { kind == .view || kind == .trigger }
+
+    /// No `OR REPLACE`; the drop runs in the commit's transaction.
+    public func replaceMethod(for kind: DefinitionKind) -> ReplaceMethod { .dropFirst }
+
+    public func dropStatement(_ object: DefinedObject) throws -> String {
+        switch object.kind {
+        case .view: "DROP VIEW \(qualified(object.ref))"
+        case .trigger: "DROP TRIGGER \(qualified(object.ref))"
+        default: throw DatabaseError("SQLite has no \(object.kind.title)s.")
+        }
+    }
+
+    /// The table's own CREATE TABLE under the new name (constraints and foreign keys included),
+    /// and its indexes renamed after it. Triggers aren't copied.
+    public func clone(_ structure: TableStructure, as name: String, withData: Bool) throws -> DDLPlan {
+        let source = structure.table
+        guard let definition = structure.definition,
+              let create = DefinitionText.renamingCreate(definition, dialect: lexer, to: name, quote: quoteIdentifier)
+        else { throw DatabaseError("Can't clone \(source.name): its CREATE TABLE statement couldn't be read.") }
+        let target = TableRef(schema: source.schema, name)
+        var s = [create]
+        if withData {
+            let copied = structure.columns.filter { $0.generated == nil }.map(\.name)
+            s.append("INSERT INTO \(qualified(target)) \(columnList(copied))"
+                     + " SELECT \(copied.map(quoteIdentifier).joined(separator: ", ")) FROM \(qualified(source))")
+        }
+        for index in structure.indexes where !index.isConstraint {
+            guard let sql = index.definition,
+                  let renamed = DefinitionText.renamingCreate(
+                    sql, dialect: lexer, to: Self.cloneIndexName(index.name, from: source.name, to: name), onTable: name,
+                    quote: quoteIdentifier)
+            else { continue }
+            s.append(renamed)
+        }
+        return DDLPlan(statements: s, notes: ["Triggers aren't copied."])
+    }
+
+    /// `people_email` → `people_copy_email`; a name that doesn't start with the table's gets it as a prefix.
+    static func cloneIndexName(_ index: String, from table: String, to clone: String) -> String {
+        if index.lowercased().hasPrefix(table.lowercased()) { return clone + index.dropFirst(table.count) }
+        return clone + "_" + index
+    }
+
     public func rename(_ object: DatabaseObject, to name: String) throws -> DDLPlan {
         guard object.kind == .table else { throw DatabaseError("SQLite can only rename tables.") }
         return DDLPlan(statements: ["ALTER TABLE \(qualified(object.ref)) RENAME TO \(quoteIdentifier(name))"])

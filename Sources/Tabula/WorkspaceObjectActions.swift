@@ -15,15 +15,23 @@ extension WorkspaceWindowController {
         sidebar.onRenameNewTable = { [weak self] id in self?.renameNewTable(id) }
         sidebar.onTruncate = { [weak self] object in self?.truncate(object) }
         sidebar.onDelete = { [weak self] object in self?.delete(object) }
-        sidebar.onMarkForDeletion = config.readOnly ? nil : { [weak self] objects, newTables in
-            self?.markForDeletion(objects, newTables: newTables)
-        }
+        sidebar.onMarkForDeletion = config.readOnly ? nil : { [weak self] deletion in self?.markForDeletion(deletion) }
         sidebar.onCopyScript = { [weak self] object, script in self?.copyScript(object, script) }
+        let dialect = connection.dialect
+        sidebar.supportsDefinition = { dialect.supportsDefinitions(of: $0) }
+        sidebar.onNewDefinition = config.readOnly ? nil : { [weak self] kind in self?.newDefinition(kind) }
+        sidebar.onOpenNewDefinition = { [weak self] id in self?.openNewDefinition(id) }
+        sidebar.stagedNewDefinitions = { [weak self] in
+            self?.changes.definitions.filter { $0.isNew && $0.kind != .trigger }.map { ($0.id, $0.kind, $0.name) } ?? []
+        }
+        sidebar.stagedClones = { [weak self] in self?.changes.clones.map(\.name) ?? [] }
+        sidebar.onClone = config.readOnly ? nil : { [weak self] object in self?.clone(object) }
+        sidebar.onRefreshMaterializedView = config.readOnly ? nil : { [weak self] object in self?.refresh(object) }
     }
 
     /// Tabs showing `object`.
     func tabs(showing object: DatabaseObject) -> [TableTabViewController] {
-        tableTabs.filter { $0.newTableID == nil && $0.table == object.ref }
+        tableTabs.filter { $0.newTableID == nil && $0.table == object.ref && $0.kind == object.kind }
     }
 
     /// For actions that run at once (CSV import): when `object` has staged changes, asks to
@@ -137,14 +145,17 @@ extension WorkspaceWindowController {
         }
     }
 
-    /// ⌫ / ⌘⌫ in the sidebar: a plain DROP for each table and view (no CASCADE, foreign-key
-    /// checks kept), and staged new tables removed, as one undo step. Items already marked are
-    /// left as they are.
-    func markForDeletion(_ objects: [DatabaseObject], newTables: [UUID]) {
-        let objects = objects.filter { changes.mark(for: $0.ref) != .dropped }
-        guard !objects.isEmpty || !newTables.isEmpty else { return }
-        let kinds = Set(objects.map(\.kind)).union(newTables.isEmpty ? [] : [.table])
-        let name = objects.count + newTables.count > 1 ? "Delete Items" : kinds.contains(.table) ? "Delete Table" : "Delete View"
+    /// ⌫ / ⌘⌫ in the sidebar: a plain DROP for each table, view and routine (no CASCADE,
+    /// foreign-key checks kept), and staged new objects and clones removed, as one undo step.
+    /// Items already marked are left as they are.
+    func markForDeletion(_ deletion: SidebarViewController.Deletion) {
+        let objects = deletion.objects.filter { changes.mark(for: $0) != .dropped }
+        let (newTables, newDefinitions, clones) = (deletion.newTables, deletion.newDefinitions, deletion.clones)
+        let count = objects.count + newTables.count + newDefinitions.count + clones.count
+        guard count > 0 else { return }
+        let single = objects.first.flatMap { DefinitionKind($0.kind)?.title.capitalized }
+            ?? newDefinitions.first.flatMap { changes.definition($0)?.kind.title.capitalized } ?? "Table"
+        let name = count > 1 ? "Delete Items" : "Delete \(single)"
         let place = EditPlace(newTable: newTables.first, side: .sidebar, objects: objects)
         let connection = connection
         Task {
@@ -155,6 +166,8 @@ extension WorkspaceWindowController {
                 }
                 changes.perform(name, at: place) {
                     for id in newTables { changes.removeNewTable(id) }
+                    for id in newDefinitions { changes.removeDefinition(id) }
+                    for clone in clones { changes.removeClone(named: clone) }
                     for (object, plan) in plans { changes.stage(StagedAction(.drop, object, plan: plan)) }
                 }
             } catch {
@@ -190,24 +203,102 @@ extension WorkspaceWindowController {
         let d = connection.dialect
         let options: [(title: String, set: (inout DropOptions) -> Void)] = d is PostgresDialect
             ? [("Cascade (also drop what depends on it)", { $0.cascade = true })]
-            : [("Ignore foreign key checks", { $0.ignoreForeignKeys = true })]
+            : object.kind == .table ? [("Ignore foreign key checks", { $0.ignoreForeignKeys = true })] : []
         let connection = connection
-        let what = object.kind == .table ? "table" : "view"
+        let what = DefinitionKind(object.kind)?.title ?? "table"
         confirm(
-            title: "Delete \(what) \(object.ref.name)?", button: "Delete",
+            title: "Delete \(what) \(object.displayName)?", button: "Delete",
             message: Self.stagedMessage, options: options.map(\.title)
         ) { chosen in
             var o = DropOptions()
             for (i, option) in options.enumerated() where chosen.contains(i) { option.set(&o) }
             return try await ObjectActions.dropPlan([object], options: o, on: connection)
         } then: { [weak self] plan in
-            self?.changes.perform(object.kind == .table ? "Delete Table" : "Delete View", at: EditPlace(side: .sidebar, objects: [object])) {
+            self?.changes.perform("Delete \(what.capitalized)", at: EditPlace(side: .sidebar, objects: [object])) {
                 self?.changes.stage(StagedAction(.drop, object, plan: plan))
             }
         }
     }
 
     private static let stagedMessage = "It's staged with your other changes: Commit (⌘S) runs it, Discard (⇧⌘⌫) drops it."
+
+    /// Clone…: a copy of the table under a new name, with or without its rows, staged. A table
+    /// with staged structure changes or a staged delete can't be cloned until they're settled.
+    private func clone(_ object: DatabaseObject) {
+        guard !config.readOnly, let window else { return NSSound.beep() }
+        if changes.structure(for: object.ref) != nil || changes.mark(for: object.ref) == .dropped {
+            return present(DatabaseError("Commit or discard what's staged for \(object.ref.name)'s structure first."),
+                           title: "Can't clone \(object.ref.name) yet", in: window)
+        }
+        let alert = NSAlert()
+        alert.messageText = "Clone \(object.ref.name)"
+        alert.informativeText = "A new table with the same columns, keys and indexes. " + Self.stagedMessage
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        field.stringValue = cloneName(for: object.ref.name)
+        field.placeholderString = "Table name"
+        let rows = NSButton(checkboxWithTitle: "Copy the rows too", target: nil, action: nil)
+        rows.state = .on
+        let stack = NSStackView(views: [field, rows])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+        stack.frame = NSRect(x: 0, y: 0, width: 280, height: 54)
+        alert.accessoryView = stack
+        alert.addButton(withTitle: "Clone")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard let self, response == .alertFirstButtonReturn else { return }
+            let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let withData = rows.state == .on
+            if let problem = self.changes.nameProblem(name, existing: self.existingNames) {
+                DispatchQueue.main.async { present(DatabaseError(problem), title: "Can't clone as “\(name)”", in: self.window) }
+                return
+            }
+            self.stageClone(object, as: name, withData: withData)
+        }
+    }
+
+    func stageClone(_ object: DatabaseObject, as name: String, withData: Bool) {
+        let connection = connection
+        Task {
+            do {
+                let plan = try await ObjectActions.clonePlan(object.ref, as: name, withData: withData, on: connection)
+                changes.perform("Clone Table", at: EditPlace(side: .sidebar, objects: [object])) {
+                    changes.stage(StagedAction(.clone(as: name, withData: withData), object, plan: plan))
+                }
+            } catch {
+                present(error, title: "Couldn't clone \(object.ref.name)", in: window)
+            }
+        }
+    }
+
+    /// `people_copy`, `people_copy_2`, … past the names taken.
+    private func cloneName(for name: String) -> String {
+        var candidate = name + "_copy"
+        var n = 2
+        while changes.nameProblem(candidate, existing: existingNames) != nil {
+            candidate = "\(name)_copy_\(n)"
+            n += 1
+        }
+        return candidate
+    }
+
+    /// Refresh Materialized View: runs at once (it changes rows, not the schema), through safe
+    /// mode, then reloads the view's tabs.
+    private func refresh(_ object: DatabaseObject) {
+        let sql = "REFRESH MATERIALIZED VIEW \(connection.dialect.qualified(object.ref))"
+        let connection = connection
+        Task {
+            guard await safety.approve([sql]) else { return }
+            do {
+                _ = try await connection.execute(sql)
+                for tab in tabs(showing: object) { tab.reload() }
+            } catch {
+                present(error, title: "Couldn't refresh \(object.ref.name)", in: window)
+            }
+        }
+    }
 
     private func copyScript(_ object: DatabaseObject, _ script: SidebarViewController.Script) {
         let connection = connection
@@ -230,7 +321,15 @@ extension WorkspaceWindowController {
 
     // MARK: - Helpers
 
-    func makeTab(_ object: DatabaseObject, mode: TableTabViewController.Mode, preview: Bool = false) -> TableTabViewController {
+    /// A tab for the object: routines get a definition tab, tables and views a table tab.
+    func makeTab(_ object: DatabaseObject, mode: TableTabViewController.Mode, preview: Bool = false) -> any ObjectTab {
+        if object.kind.isRoutine {
+            let tab = DefinitionTabViewController(object: object, connection: connection, changes: changes,
+                                                  readOnlyConnection: config.readOnly)
+            tab.isPreview = preview
+            return tab
+        }
+        let mode = mode == .definition && !(object.kind == .view || object.kind == .materializedView) ? .data : mode
         let tab = configure(TableTabViewController(
             connection: connection, changes: changes, object: object, readOnlyConnection: config.readOnly,
             pageSize: config.pageSize, mode: mode))

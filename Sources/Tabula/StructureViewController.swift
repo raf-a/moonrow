@@ -8,7 +8,7 @@ import DBKit
 /// commits (⌘S) or discards (⇧⌘⌫) it with everything else staged.
 @MainActor
 final class StructureViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate,
-    NSTextFieldDelegate, NSSearchFieldDelegate, NSMenuItemValidation, TabulaActions
+    NSTextFieldDelegate, NSSearchFieldDelegate, NSMenuItemValidation, NSPopoverDelegate, TabulaActions
 {
     private enum ColumnField: String, CaseIterable {
         case key, name, type, nullable, defaultValue, extra, foreignKey, comment
@@ -88,6 +88,9 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
     private let addColumnButton = NSButton(title: "Column", target: nil, action: nil)
     private let addIndexButton = NSButton(title: "Index", target: nil, action: nil)
     private let definitionButton = NSButton(title: "DDL", target: nil, action: nil)
+    private let triggersButton = NSButton(title: "Triggers", target: nil, action: nil)
+    /// The Triggers popover's controller while it's open.
+    private(set) var triggers: TriggersViewController?
     private var popover: NSPopover?
     /// The grid whose selection the right sidebar shows.
     private var inspectedGrid: DataGrid?
@@ -265,7 +268,11 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
         definitionButton.action = #selector(showDefinition(_:))
         definitionButton.toolTip = "Show the statements that create this table"
         definitionButton.isEnabled = !creating
-        for b in [addColumnButton, addIndexButton, definitionButton] {
+        triggersButton.target = self
+        triggersButton.action = #selector(showTriggers(_:))
+        triggersButton.toolTip = "The table's triggers: edit, add and delete them"
+        triggersButton.isEnabled = !creating && kind == .table
+        for b in [addColumnButton, addIndexButton, triggersButton, definitionButton] {
             b.bezelStyle = .accessoryBarAction
             b.controlSize = .small
             b.font = .systemFont(ofSize: 11)
@@ -278,7 +285,7 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
         statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         statusLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
-        var views: [NSView] = [addColumnButton, addIndexButton, statusLabel, definitionButton]
+        var views: [NSView] = [addColumnButton, addIndexButton, statusLabel, triggersButton, definitionButton]
         if let leadingAccessory { views.insert(leadingAccessory, at: 0) }
         let bar = NSStackView(views: views)
         bar.spacing = 6
@@ -306,8 +313,10 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
         loadTask?.cancel()
     }
 
-    /// Reads the structure again, unless changes to it are staged: those are kept.
+    /// Reads the structure again, unless changes to it are staged: those are kept. An open
+    /// Triggers popover reads the triggers again.
     func reload() {
+        triggers?.reload()
         if let newTableID {
             editor = changes.newTable(newTableID) ?? editor
             return refresh()
@@ -566,8 +575,9 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
         }
     }
 
-    /// Ends the inline edit, keeping what was typed.
+    /// Ends the inline edit, keeping what was typed (a trigger's statement included).
     func endInlineEdit() {
+        triggers?.endEditing()
         guard let editing else { return }
         if let cell = editing.grid.view(
             atColumn: editing.grid.column(withIdentifier: NSUserInterfaceItemIdentifier(editing.field)),
@@ -689,10 +699,28 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
         present(controller, from: grid, at: grid.frameOfCell(atColumn: max(c, 0), row: row))
     }
 
-    private func present(_ controller: NSViewController, from anchor: NSView, at rect: NSRect? = nil, size: NSSize? = nil) {
+    /// The table's triggers in a popover. What's typed there is staged when it closes.
+    @objc func showTriggers(_ sender: Any?) {
+        guard kind == .table, !creating else { return NSSound.beep() }
+        let t = TriggersViewController(table: table, connection: connection, changes: changes, readOnlyReason: readOnlyReason)
+        triggers = t
+        present(t, from: triggersButton, size: NSSize(width: 780, height: 440), behavior: .semitransient)
+    }
+
+    func popoverWillClose(_ notification: Notification) {
+        triggers?.endEditing()
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        if (notification.object as? NSPopover)?.contentViewController === triggers { triggers = nil }
+    }
+
+    private func present(_ controller: NSViewController, from anchor: NSView, at rect: NSRect? = nil, size: NSSize? = nil,
+                         behavior: NSPopover.Behavior = .transient) {
         popover?.close()
         let p = NSPopover()
-        p.behavior = .transient
+        p.behavior = behavior
+        p.delegate = self
         p.contentViewController = controller
         if let size { p.contentSize = size }
         p.show(relativeTo: rect ?? anchor.bounds, of: anchor, preferredEdge: .maxY)

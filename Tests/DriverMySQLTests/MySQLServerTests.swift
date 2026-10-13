@@ -282,7 +282,7 @@ struct MySQLServerTests {
 
         let objects = try await c.objects(schema: nil)
         #expect(objects.map(\.ref.name) == ["child", "parent", "proc_x", "v_child"])
-        #expect(objects.map(\.kind) == [.table, .table, .function, .view])
+        #expect(objects.map(\.kind) == [.table, .table, .procedure, .view])
         #expect(try await c.objects(schema: db).map(\.ref) == objects.map { TableRef(schema: db, $0.ref.name) })
 
         let parent = try await c.columns(of: TableRef("parent"))

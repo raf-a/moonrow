@@ -22,6 +22,7 @@ import Darwin
 ///     TABULA_SESSION=check TABULA_STORE=… TABULA_SNAPSHOTS=… Tabula        (after TABULA_NAVIGATE)
 ///     TABULA_CONNECT=postgres://… TABULA_OPENDB=far_away TABULA_STORE=… TABULA_SNAPSHOTS=… Tabula
 ///     TABULA_WELCOME=1 TABULA_STORE=<empty dir>/connections.json TABULA_SNAPSHOTS=… Tabula
+///     TABULA_OBJECTS=users TABULA_STORE=… TABULA_SNAPSHOTS=… Tabula /tmp/copy-of-sample.sqlite   (or TABULA_CONNECT to a scratch database)
 ///
 /// The bench opens the table in the first workspace with every row in one page, scrolls it like
 /// a fast trackpad, jumps to far-apart rows, prints timings and quits. The demo drives the grid's
@@ -153,6 +154,19 @@ enum DevHarness {
                     try await powerDemo(app, table: table, snapshots: snapshots)
                 } catch {
                     print("power demo failed: \(error)")
+                }
+                NSApp.terminate(nil)
+            }
+            return
+        }
+        // M10: views, triggers, clones, routines, Search in Database and the diagram. It commits.
+        if let table = env["TABULA_OBJECTS"] {
+            Task {
+                do {
+                    guard env["TABULA_STORE"] != nil else { throw HarnessError("TABULA_OBJECTS needs TABULA_STORE") }
+                    try await objectsDemo(app, table: table, snapshots: snapshots)
+                } catch {
+                    print("objects demo failed: \(error)")
                 }
                 NSApp.terminate(nil)
             }

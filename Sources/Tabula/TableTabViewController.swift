@@ -3,11 +3,12 @@ import AppKit
 import DBKit
 
 /// A table tab: the rows (Data) or the columns and indexes (Structure), switched with the
-/// control at the bottom left or ⌃⌘[ / ⌃⌘]. Both sides stage into the workspace's
-/// `StagedChanges`, so switching, closing the tab or opening another table never asks.
+/// control at the bottom left or ⌃⌘[ / ⌃⌘]; views and materialized views add their SQL
+/// (Definition). Every side stages into the workspace's `StagedChanges`, so switching, closing
+/// the tab or opening another table never asks.
 @MainActor
-final class TableTabViewController: NSViewController, WorkspaceTab, NSMenuItemValidation {
-    enum Mode { case data, structure }
+final class TableTabViewController: NSViewController, ObjectTab, NSMenuItemValidation {
+    enum Mode { case data, structure, definition }
 
     private(set) var table: TableRef
     private(set) var kind: ObjectKind
@@ -35,6 +36,9 @@ final class TableTabViewController: NSViewController, WorkspaceTab, NSMenuItemVa
 
     private(set) var data: TableDataViewController?
     private(set) var structure: StructureViewController?
+    /// Views and materialized views: their CREATE statement.
+    private(set) var definition: DefinitionEditorController?
+    private var hasDefinition: Bool { kind == .view || kind == .materializedView }
     private(set) var mode: Mode = .data
     /// Set while the tab shows a staged new table.
     private(set) var newTableID: UUID?
@@ -87,39 +91,50 @@ final class TableTabViewController: NSViewController, WorkspaceTab, NSMenuItemVa
     var object: DatabaseObject? { newTableID == nil ? DatabaseObject(table, kind: kind) : nil }
 
     /// The controller whose view is showing; menu commands go to it.
-    var active: NSViewController? { mode == .data ? data : structure }
+    var active: NSViewController? {
+        switch mode {
+        case .data: data
+        case .structure: structure
+        case .definition: definition
+        }
+    }
 
     // MARK: - Switching
 
+    private static let modes: [Mode] = [.data, .structure, .definition]
+
     private func makeSwitch() -> NSSegmentedControl {
-        let control = NSSegmentedControl(labels: ["Data", "Structure"], trackingMode: .selectOne, target: self, action: #selector(switchClicked(_:)))
+        let labels = hasDefinition ? ["Data", "Structure", "Definition"] : ["Data", "Structure"]
+        let control = NSSegmentedControl(labels: labels, trackingMode: .selectOne, target: self, action: #selector(switchClicked(_:)))
         control.controlSize = .small
         control.font = .systemFont(ofSize: 11)
         control.setToolTip("Rows (⌃⌘[)", forSegment: 0)
         control.setToolTip("Columns and indexes (⌃⌘])", forSegment: 1)
+        if hasDefinition { control.setToolTip("The view's SQL, editable", forSegment: 2) }
         control.setEnabled(!isNewTable, forSegment: 0)
-        control.selectedSegment = mode == .data ? 0 : 1
+        control.selectedSegment = Self.modes.firstIndex(of: mode) ?? 0
         return control
     }
 
     @objc private func switchClicked(_ sender: NSSegmentedControl) {
-        let wanted: Mode = sender.selectedSegment == 0 ? .data : .structure
-        sender.selectedSegment = mode == .data ? 0 : 1  // until the switch is allowed
+        let wanted = Self.modes[min(sender.selectedSegment, Self.modes.count - 1)]
+        sender.selectedSegment = Self.modes.firstIndex(of: mode) ?? 0  // until the switch is allowed
         switchTo(wanted)
     }
 
     @objc func showTableData(_ sender: Any?) { switchTo(.data) }
     @objc func showTableStructure(_ sender: Any?) { switchTo(.structure) }
+    @objc func showTableDefinition(_ sender: Any?) { switchTo(.definition) }
 
-    func switchTo(_ wanted: Mode) {
-        guard wanted != mode, !(wanted == .data && isNewTable) else { return }
-        data?.endInlineEdit()
-        structure?.endInlineEdit()
+    /// `focus` moves the keyboard focus into the side shown.
+    func switchTo(_ wanted: Mode, focus: Bool = true) {
+        guard wanted != mode, !(wanted == .data && isNewTable), wanted != .definition || hasDefinition else { return }
+        endEditing()
         isPreview = false
-        show(wanted)
+        show(wanted, focus: focus)
     }
 
-    private func show(_ wanted: Mode) {
+    private func show(_ wanted: Mode, focus: Bool = true) {
         active?.view.removeFromSuperview()
         mode = wanted
         let controller: NSViewController
@@ -155,14 +170,27 @@ final class TableTabViewController: NSViewController, WorkspaceTab, NSMenuItemVa
                 structure = s
             }
             controller = structure!
+        case .definition:
+            if definition == nil {
+                let defined = DefinedObject(DatabaseObject(table, kind: kind))!
+                let d = DefinitionEditorController(
+                    target: .existing(defined), kind: defined.kind, connection: connection, changes: changes,
+                    readOnlyReason: readOnlyConnection ? "The connection is read-only." : nil,
+                    place: EditPlace(side: .definition, objects: [DatabaseObject(table, kind: kind)]))
+                d.leadingAccessory = makeSwitch()
+                d.onUse = { [weak self] in self?.isPreview = false }
+                addChild(d)
+                definition = d
+            }
+            controller = definition!
         }
-        for case let control as NSSegmentedControl in [data?.leadingAccessory, structure?.leadingAccessory] {
-            control.selectedSegment = wanted == .data ? 0 : 1
+        for case let control as NSSegmentedControl in [data?.leadingAccessory, structure?.leadingAccessory, definition?.leadingAccessory] {
+            control.selectedSegment = Self.modes.firstIndex(of: wanted) ?? 0
         }
         view.addSubview(controller.view)
         controller.view.translatesAutoresizingMaskIntoConstraints = false
         controller.view.pin(to: view)
-        view.window?.makeFirstResponder(preferredResponder)
+        if focus { view.window?.makeFirstResponder(preferredResponder) }
         onTabItemChange?()
     }
 
@@ -173,14 +201,16 @@ final class TableTabViewController: NSViewController, WorkspaceTab, NSMenuItemVa
     func becomeTable(_ newTable: TableRef) {
         table = newTable
         newTableID = nil
-        for child in [data, structure] as [NSViewController?] {
+        for child in [data, structure, definition] as [NSViewController?] {
             (child as? TableDataViewController)?.stop()
             (child as? StructureViewController)?.stop()
+            (child as? DefinitionEditorController)?.stop()
             child?.view.removeFromSuperview()
             child?.removeFromParent()
         }
         data = nil
         structure = nil
+        definition = nil
         if isViewLoaded { show(mode) }
         onTabItemChange?()
     }
@@ -189,12 +219,14 @@ final class TableTabViewController: NSViewController, WorkspaceTab, NSMenuItemVa
     func endEditing() {
         data?.endInlineEdit()
         structure?.endInlineEdit()
+        definition?.stageNow()
     }
 
     /// Reads rows and structure again. Staged changes stay.
     func reload() {
         data?.reload()
         structure?.reload()
+        definition?.reload()
     }
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
@@ -205,6 +237,9 @@ final class TableTabViewController: NSViewController, WorkspaceTab, NSMenuItemVa
         case #selector(showTableStructure(_:)):
             item.state = mode == .structure ? .on : .off
             return true
+        case #selector(showTableDefinition(_:)):
+            item.state = mode == .definition ? .on : .off
+            return hasDefinition
         default:
             return true
         }
@@ -213,7 +248,7 @@ final class TableTabViewController: NSViewController, WorkspaceTab, NSMenuItemVa
     // MARK: - WorkspaceTab
 
     var tabItem: TabStrip.Item {
-        let symbol = isNewTable ? "plus.rectangle" : kind == .table ? "tablecells" : "eye"
+        let symbol = isNewTable ? "plus.rectangle" : kind == .table ? "tablecells" : DefinitionKind(kind)?.symbol ?? "eye"
         let staged = newTableID.flatMap { changes.newTable($0)?.name }
         let title = isNewTable ? staged.map { $0.isEmpty ? "New table" : $0 } ?? "New table" : table.name
         let tip = isPreview ? "\(table) — preview tab; double-click to keep it" : table.description
@@ -224,6 +259,7 @@ final class TableTabViewController: NSViewController, WorkspaceTab, NSMenuItemVa
         switch mode {
         case .data: data?.grid ?? view
         case .structure: structure?.columnsGrid ?? view
+        case .definition: definition?.editor ?? view
         }
     }
 
@@ -236,5 +272,6 @@ final class TableTabViewController: NSViewController, WorkspaceTab, NSMenuItemVa
     func tabDidClose() {
         data?.stop()
         structure?.stop()
+        definition?.stop()
     }
 }

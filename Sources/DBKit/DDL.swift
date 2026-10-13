@@ -177,9 +177,56 @@ extension PostgresDialect {
         case .view: "VIEW"
         case .materializedView: "MATERIALIZED VIEW"
         case .sequence: "SEQUENCE"
-        case .function: throw DatabaseError("Functions can't be dropped from here yet.")
+        case .function: "FUNCTION"
+        case .procedure: "PROCEDURE"
         }
-        return DDLPlan(statements: ["DROP \(what) \(qualified(object.ref))\(options.cascade ? " CASCADE" : "")"])
+        return DDLPlan(statements: ["DROP \(what) \(routineName(object))\(options.cascade ? " CASCADE" : "")"])
+    }
+
+    /// A routine with its argument types, so one overload is meant; any other object's name.
+    func routineName(_ object: DatabaseObject) -> String {
+        guard object.kind.isRoutine, let signature = object.signature else { return qualified(object.ref) }
+        return "\(qualified(object.ref))(\(signature))"
+    }
+
+    public func supportsDefinitions(of kind: DefinitionKind) -> Bool { true }
+
+    /// Views and routines keep their privileges and dependents through `CREATE OR REPLACE`;
+    /// materialized views and triggers have none (before 14 for triggers), and the drop runs in
+    /// the commit's transaction, so a failure changes nothing.
+    public func replaceMethod(for kind: DefinitionKind) -> ReplaceMethod {
+        switch kind {
+        case .view, .function, .procedure: .orReplace
+        case .materializedView, .trigger: .dropFirst
+        }
+    }
+
+    public func dropStatement(_ object: DefinedObject) throws -> String {
+        if object.kind == .trigger {
+            guard let table = object.table else { throw DatabaseError("The trigger's table isn't known.") }
+            return "DROP TRIGGER \(quoteIdentifier(object.ref.name)) ON \(qualified(table))"
+        }
+        return try drop(object.object!, options: DropOptions()).statements[0]
+    }
+
+    /// `LIKE … INCLUDING ALL` copies columns, defaults, identity, generated columns, constraints
+    /// (but not foreign keys), indexes, comments and storage. Rows are copied with the identity
+    /// values they have, and identity sequences moved past them.
+    public func clone(_ structure: TableStructure, as name: String, withData: Bool) throws -> DDLPlan {
+        let source = qualified(structure.table)
+        let target = qualified(TableRef(schema: structure.table.schema, name))
+        var s = ["CREATE TABLE \(target) (LIKE \(source) INCLUDING ALL)"]
+        if withData {
+            let copied = structure.columns.filter { !($0.generated?.hasPrefix("GENERATED ALWAYS AS (") ?? false) }.map(\.name)
+            let always = structure.columns.contains { $0.generated == "GENERATED ALWAYS AS IDENTITY" }
+            s.append("INSERT INTO \(target) \(columnList(copied))\(always ? " OVERRIDING SYSTEM VALUE" : "")"
+                     + " SELECT \(copied.map(quoteIdentifier).joined(separator: ", ")) FROM \(source)")
+            for c in structure.columns where c.generated?.hasSuffix("AS IDENTITY") == true {
+                s.append("SELECT setval(pg_get_serial_sequence(\(literal(.text(target))), \(literal(.text(c.name)))),"
+                         + " max(\(quoteIdentifier(c.name)))) FROM \(target)")
+            }
+        }
+        return DDLPlan(statements: s, notes: ["Foreign keys and triggers aren't copied."])
     }
 
     public func truncate(_ table: TableRef, options: TruncateOptions, hasAutoIncrement: Bool) -> DDLPlan {
@@ -195,7 +242,8 @@ extension PostgresDialect {
         case .view: "VIEW"
         case .materializedView: "MATERIALIZED VIEW"
         case .sequence: "SEQUENCE"
-        case .function: throw DatabaseError("Functions can't be renamed from here yet.")
+        case .function, .procedure:
+            throw DatabaseError("To rename a \(object.kind.rawValue), change its name in its definition.")
         }
         return DDLPlan(statements: ["ALTER \(what) \(qualified(object.ref)) RENAME TO \(quoteIdentifier(name))"])
     }
@@ -304,11 +352,42 @@ extension MySQLDialect {
         let what = switch object.kind {
         case .table: "TABLE"
         case .view: "VIEW"
-        default: throw DatabaseError("Only tables and views can be dropped from here.")
+        case .function: "FUNCTION"
+        case .procedure: "PROCEDURE"
+        case .materializedView, .sequence: throw DatabaseError("MySQL has no \(object.kind.rawValue)s.")
         }
         var plan = DDLPlan(statements: ["DROP \(what) \(qualified(object.ref))"])
-        plan = foreignKeyChecks(options.ignoreForeignKeys) + plan
+        if object.kind == .table { plan = foreignKeyChecks(options.ignoreForeignKeys) + plan }
         return plan
+    }
+
+    public func supportsDefinitions(of kind: DefinitionKind) -> Bool { kind != .materializedView }
+
+    /// Views take `CREATE OR REPLACE`. MySQL has no such thing for routines (MariaDB does), so
+    /// they're checked under a scratch name first; triggers are dropped and created again.
+    public func replaceMethod(for kind: DefinitionKind) -> ReplaceMethod {
+        switch kind {
+        case .view, .materializedView: .orReplace
+        case .function, .procedure: .checkThenDrop
+        case .trigger: .dropFirst
+        }
+    }
+
+    public func dropStatement(_ object: DefinedObject) throws -> String {
+        if object.kind == .trigger { return "DROP TRIGGER \(qualified(object.ref))" }
+        return try drop(object.object!, options: DropOptions()).statements[0]
+    }
+
+    /// `CREATE TABLE … LIKE` copies columns, indexes and AUTO_INCREMENT, not foreign keys.
+    public func clone(_ structure: TableStructure, as name: String, withData: Bool) throws -> DDLPlan {
+        let source = qualified(structure.table)
+        let target = qualified(TableRef(schema: structure.table.schema, name))
+        var s = ["CREATE TABLE \(target) LIKE \(source)"]
+        if withData {
+            let copied = structure.columns.filter { $0.generated == nil }.map(\.name)
+            s.append("INSERT INTO \(target) \(columnList(copied)) SELECT \(copied.map(quoteIdentifier).joined(separator: ", ")) FROM \(source)")
+        }
+        return DDLPlan(statements: s, isAtomic: false, notes: ["Foreign keys and triggers aren't copied."])
     }
 
     public func truncate(_ table: TableRef, options: TruncateOptions, hasAutoIncrement: Bool) -> DDLPlan {

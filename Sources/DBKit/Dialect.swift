@@ -58,6 +58,18 @@ public protocol Dialect: Sendable {
     /// `hasAutoIncrement`: SQLite keeps an AUTOINCREMENT counter apart from the rows.
     func truncate(_ table: TableRef, options: TruncateOptions, hasAutoIncrement: Bool) -> DDLPlan
     func rename(_ object: DatabaseObject, to name: String) throws -> DDLPlan
+
+    // MARK: Definitions (see Definitions.swift)
+
+    /// Whether the database has objects of this kind (SQLite: views and triggers only).
+    func supportsDefinitions(of kind: DefinitionKind) -> Bool
+    /// How an edited definition of `kind` replaces the object.
+    func replaceMethod(for kind: DefinitionKind) -> ReplaceMethod
+    /// `DROP VIEW …`, `DROP FUNCTION f(integer)`, `DROP TRIGGER t ON …`.
+    func dropStatement(_ object: DefinedObject) throws -> String
+    /// A new table `name` with `structure`'s columns, keys and indexes, and its rows when
+    /// `withData`. Notes say what isn't copied.
+    func clone(_ structure: TableStructure, as name: String, withData: Bool) throws -> DDLPlan
 }
 
 extension Dialect {

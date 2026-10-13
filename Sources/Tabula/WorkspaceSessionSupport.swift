@@ -26,7 +26,12 @@ extension WorkspaceWindowController {
     private func sessionTab(_ tab: any WorkspaceTab) -> WorkspaceSession.Tab? {
         if let table = tab as? TableTabViewController {
             guard let object = table.object else { return nil }  // a staged new table
-            return .table(object, structure: table.mode == .structure, isPreview: table.isPreview)
+            return .table(object, structure: table.mode == .structure, definition: table.mode == .definition,
+                          isPreview: table.isPreview)
+        }
+        if let routine = tab as? DefinitionTabViewController {
+            guard let object = routine.object else { return nil }  // a staged new object
+            return .table(object, isPreview: routine.isPreview)
         }
         if let query = tab as? QueryEditorViewController {
             return .query(text: query.editor.string, savedQuery: query.savedQuery?.path, file: query.fileURL?.path)
@@ -44,7 +49,8 @@ extension WorkspaceWindowController {
                 switch tab.kind {
                 case .table:
                     guard let object = tab.object else { continue }
-                    pane.add(makeTab(object, mode: tab.structure ? .structure : .data, preview: tab.isPreview), focus: false)
+                    let mode: TableTabViewController.Mode = tab.definition ? .definition : tab.structure ? .structure : .data
+                    pane.add(makeTab(object, mode: mode, preview: tab.isPreview), focus: false)
                 case .query:
                     if let name = tab.savedQuery, let query = environment.savedQueries.query(path: name),
                        let text = try? environment.savedQueries.text(of: query) {

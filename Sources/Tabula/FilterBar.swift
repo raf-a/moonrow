@@ -93,6 +93,20 @@ final class FilterBar: NSView {
         apply(matchAll: matchPopup.indexOfSelectedItem == 0)
     }
 
+    /// Replaces every row with `conditions`, checked, and applies them together (AND).
+    func replace(with conditions: [FilterCondition]) {
+        guard !conditions.isEmpty else { return }
+        for row in rows.dropFirst() { row.removeFromSuperview() }
+        rows = Array(rows.prefix(1))
+        for (i, condition) in conditions.enumerated() {
+            if i > 0 { addRow(after: rows.last) }
+            rows[i].set(condition)
+            rows[i].isChecked = true
+        }
+        matchPopup.selectItem(at: 0)
+        apply(matchAll: true)
+    }
+
     /// Unchecked rows and rows without a usable condition are skipped.
     var checkedConditions: [FilterCondition] {
         rows.filter(\.isChecked).compactMap(\.condition)
@@ -166,6 +180,7 @@ private final class FilterRow: NSStackView, NSTextFieldDelegate {
 
     private static let anyColumnTag = -1
     private static let rawSQLTag = -2
+    private static let separatorTag = -99
     private static let operators = FilterOperator.allCases.filter { $0 != .raw }
 
     init(columns: [String]) {
@@ -237,10 +252,16 @@ private final class FilterRow: NSStackView, NSTextFieldDelegate {
         let tag = columnPopup.selectedTag()
         self.columns = columns
         let menu = NSMenu()
+        // Separators get a tag no column has: selecting the first column (tag 0) would pick one.
+        func separator() -> NSMenuItem {
+            let s = NSMenuItem.separator()
+            s.tag = Self.separatorTag
+            return s
+        }
         menu.addItem(Self.item("Any column", tag: Self.anyColumnTag))
-        menu.addItem(.separator())
+        menu.addItem(separator())
         for (i, name) in columns.enumerated() { menu.addItem(Self.item(name, tag: i)) }
-        menu.addItem(.separator())
+        menu.addItem(separator())
         menu.addItem(Self.item("Raw SQL", tag: Self.rawSQLTag))
         columnPopup.menu = menu
         if let selected, let i = columns.firstIndex(of: selected) {

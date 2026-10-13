@@ -124,6 +124,8 @@ public enum Keymap {
         KeyCommand("toggleSidebar:", "Toggle Left Sidebar", "General", "0"),
         KeyCommand("toggleQueryLog:", "Toggle Query Log", "General", "c", [.command, .control]),
         KeyCommand("showRunningQueries:", "Running Queries", "General", ""),
+        KeyCommand("searchInDatabase:", "Search in Database", "General", ""),
+        KeyCommand("showDiagram:", "Show Diagram", "General", ""),
 
         KeyCommand("quickOpen:", "Quick Open", "Navigate", "p"),
         KeyCommand("openDatabase:", "Open Database", "Navigate", "k"),
@@ -154,6 +156,7 @@ public enum Keymap {
 
         KeyCommand("showTableData:", "Show Table Data", "Table", "[", [.command, .control]),
         KeyCommand("showTableStructure:", "Show Table Structure", "Table", "]", [.command, .control]),
+        KeyCommand("showTableDefinition:", "Show Definition", "Table", ""),
         KeyCommand("commitChanges:", "Commit Changes", "Table", "s"),
         KeyCommand("discardChanges:", "Discard Changes", "Table", "\u{8}", [.command, .shift]),
         KeyCommand("previewChanges:", "Preview Changes", "Table", "p", [.command, .shift]),

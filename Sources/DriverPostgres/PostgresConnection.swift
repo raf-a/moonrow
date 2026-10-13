@@ -81,7 +81,8 @@ public final class PostgresConnection: DatabaseConnection, @unchecked Sendable {
 
     public func objects(schema: String?) async throws -> [DatabaseObject] {
         let namespace = schema.map { DBValue.text($0) } ?? .null
-        // Relations, then routines; overloads of a function are listed once.
+        // Relations, then routines: every overload, with the argument types that tell it apart.
+        // Functions that belong to an extension are left out.
         let relations = try await rows("""
             SELECT n.nspname, c.relname, c.relkind::text
             FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
@@ -89,13 +90,13 @@ public final class PostgresConnection: DatabaseConnection, @unchecked Sendable {
             ORDER BY c.relname
             """, [namespace])
         let routines = try await rows("""
-            SELECT DISTINCT n.nspname, p.proname
+            SELECT n.nspname, p.proname, p.prokind::text, pg_catalog.pg_get_function_identity_arguments(p.oid)
             FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
             WHERE n.nspname = coalesce($1, current_schema()) AND p.prokind IN ('f', 'p')
               AND NOT EXISTS (
                 SELECT 1 FROM pg_catalog.pg_depend d
                 WHERE d.classid = 'pg_catalog.pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')
-            ORDER BY p.proname
+            ORDER BY p.proname, 4
             """, [namespace])
         let kinds: [String: ObjectKind] = ["r": .table, "p": .table, "f": .table, "v": .view, "m": .materializedView]
         return relations.compactMap { row in
@@ -104,7 +105,8 @@ public final class PostgresConnection: DatabaseConnection, @unchecked Sendable {
             return DatabaseObject(TableRef(schema: ns, name), kind: kind)
         } + routines.compactMap { row in
             guard let ns = row[0].string, let name = row[1].string else { return nil }
-            return DatabaseObject(TableRef(schema: ns, name), kind: .function)
+            return DatabaseObject(TableRef(schema: ns, name), kind: row[2].string == "p" ? .procedure : .function,
+                                  signature: row[3].string ?? "")
         }
     }
 
@@ -152,19 +154,36 @@ public final class PostgresConnection: DatabaseConnection, @unchecked Sendable {
     }
 
     public func definition(of object: DatabaseObject) async throws -> String {
+        let name = dialect.qualified(object.ref)
         switch object.kind {
-        case .view, .materializedView:
-            let body = try await rows(
-                "SELECT pg_catalog.pg_get_viewdef($1::regclass, true)", [.text(dialect.qualified(object.ref))]
-            ).first?.first?.string ?? ""
-            let what = object.kind == .view ? "VIEW" : "MATERIALIZED VIEW"
-            return "CREATE \(what) \(dialect.qualified(object.ref)) AS\n\(body)"
-        case .function:
+        case .view:
+            // check_option and security_barrier are reloptions; WITH (…) restates them.
+            let row = try await rows("""
+                SELECT pg_catalog.pg_get_viewdef(c.oid, true), array_to_string(c.reloptions, ', ')
+                FROM pg_catalog.pg_class c WHERE c.oid = $1::regclass
+                """, [.text(name)]).first
+            let options = row?[1].string.map { $0.isEmpty ? "" : " WITH (\($0))" } ?? ""
+            return "CREATE OR REPLACE VIEW \(name)\(options) AS\n" + Self.statementBody(row?[0].string ?? "") + ";"
+        case .materializedView:
+            let row = try await rows("""
+                SELECT pg_catalog.pg_get_viewdef(c.oid, true), c.relispopulated
+                FROM pg_catalog.pg_class c WHERE c.oid = $1::regclass
+                """, [.text(name)]).first
+            let data = row?[1] == .bool(false) ? "WITH NO DATA" : "WITH DATA"
+            var statements = ["CREATE MATERIALIZED VIEW \(name) AS\n" + Self.statementBody(row?[0].string ?? "") + "\n" + data]
+            statements += try await indexes(of: object.ref).compactMap(\.definition)
+            return statements.map { $0 + ";" }.joined(separator: "\n\n")
+        case .function, .procedure:
+            // One overload when the signature is known, else every routine of that name.
+            // (regprocedure won't read argument names, so the signature is matched as listed.)
             let found = try await rows("""
                 SELECT pg_catalog.pg_get_functiondef(p.oid)
                 FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
-                WHERE n.nspname = coalesce($1, current_schema()) AND p.proname = $2 ORDER BY p.oid
-                """, [object.ref.schema.map(DBValue.text) ?? .null, .text(object.ref.name)])
+                WHERE n.nspname = coalesce($1, current_schema()) AND p.proname = $2 AND p.prokind IN ('f', 'p')
+                  AND ($3::text IS NULL OR pg_catalog.pg_get_function_identity_arguments(p.oid) = $3)
+                ORDER BY p.oid
+                """, [object.ref.schema.map(DBValue.text) ?? .null, .text(object.ref.name),
+                      object.signature.map(DBValue.text) ?? .null])
             return found.compactMap { $0.first?.string?.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .map { $0.hasSuffix(";") ? $0 : $0 + ";" }.joined(separator: "\n\n")
         default:
@@ -177,6 +196,13 @@ public final class PostgresConnection: DatabaseConnection, @unchecked Sendable {
             statements += s.triggers.map(\.definition)
             return statements.map { $0 + ";" }.joined(separator: "\n\n")
         }
+    }
+
+    /// `pg_get_viewdef` text without its final `;` and surrounding blank space.
+    static func statementBody(_ text: String) -> String {
+        var body = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if body.hasSuffix(";") { body.removeLast() }
+        return body
     }
 
     public func indexes(of table: TableRef) async throws -> [IndexInfo] {

@@ -13,7 +13,11 @@ public struct WorkspaceSession: Codable, Sendable, Hashable {
         public var name: String?
         /// An `ObjectKind` raw value.
         public var objectKind: String?
+        /// A Postgres routine's arguments (`DatabaseObject.signature`).
+        public var signature: String?
         public var structure: Bool
+        /// A view's tab showing its definition.
+        public var definition: Bool
         public var isPreview: Bool
         // Query tabs.
         public var text: String?
@@ -22,9 +26,10 @@ public struct WorkspaceSession: Codable, Sendable, Hashable {
         /// The SQL file the tab was opened from; its text is `text`, as edited.
         public var file: String?
 
-        public static func table(_ object: DatabaseObject, structure: Bool = false, isPreview: Bool = false) -> Tab {
+        public static func table(_ object: DatabaseObject, structure: Bool = false, definition: Bool = false,
+                                 isPreview: Bool = false) -> Tab {
             Tab(kind: .table, schema: object.ref.schema, name: object.ref.name, objectKind: object.kind.rawValue,
-                structure: structure, isPreview: isPreview)
+                signature: object.signature, structure: structure, definition: definition, isPreview: isPreview)
         }
 
         public static func query(text: String, savedQuery: String? = nil, file: String? = nil) -> Tab {
@@ -34,19 +39,23 @@ public struct WorkspaceSession: Codable, Sendable, Hashable {
         /// The table or view, for table tabs.
         public var object: DatabaseObject? {
             guard kind == .table, let name, !name.isEmpty else { return nil }
-            return DatabaseObject(TableRef(schema: schema, name), kind: objectKind.flatMap(ObjectKind.init(rawValue:)) ?? .table)
+            return DatabaseObject(TableRef(schema: schema, name), kind: objectKind.flatMap(ObjectKind.init(rawValue:)) ?? .table,
+                                  signature: signature)
         }
 
         private enum CodingKeys: String, CodingKey {
-            case kind, schema, name, objectKind, structure, isPreview, text, savedQuery, file
+            case kind, schema, name, objectKind, signature, structure, definition, isPreview, text, savedQuery, file
         }
 
-        init(kind: Kind, schema: String? = nil, name: String? = nil, objectKind: String? = nil, structure: Bool,
-             isPreview: Bool, text: String? = nil, savedQuery: String? = nil, file: String? = nil) {
+        init(kind: Kind, schema: String? = nil, name: String? = nil, objectKind: String? = nil, signature: String? = nil,
+             structure: Bool, definition: Bool = false, isPreview: Bool, text: String? = nil, savedQuery: String? = nil,
+             file: String? = nil) {
             self.kind = kind
             self.schema = schema
             self.name = name
             self.objectKind = objectKind
+            self.signature = signature
+            self.definition = definition
             self.structure = structure
             self.isPreview = isPreview
             self.text = text
@@ -60,7 +69,9 @@ public struct WorkspaceSession: Codable, Sendable, Hashable {
             schema = try c.decodeIfPresent(String.self, forKey: .schema)
             name = try c.decodeIfPresent(String.self, forKey: .name)
             objectKind = try c.decodeIfPresent(String.self, forKey: .objectKind)
+            signature = try c.decodeIfPresent(String.self, forKey: .signature)
             structure = try c.decodeIfPresent(Bool.self, forKey: .structure) ?? false
+            definition = try c.decodeIfPresent(Bool.self, forKey: .definition) ?? false
             isPreview = try c.decodeIfPresent(Bool.self, forKey: .isPreview) ?? false
             text = try c.decodeIfPresent(String.self, forKey: .text)
             savedQuery = try c.decodeIfPresent(String.self, forKey: .savedQuery)

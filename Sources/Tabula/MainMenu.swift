@@ -33,6 +33,9 @@ import AppKit
     // Structure
     @objc optional func showTableData(_ sender: Any?)
     @objc optional func showTableStructure(_ sender: Any?)
+    @objc optional func showTableDefinition(_ sender: Any?)
+    @objc optional func searchInDatabase(_ sender: Any?)
+    @objc optional func showDiagram(_ sender: Any?)
     @objc optional func newTable(_ sender: Any?)
     @objc optional func truncateTable(_ sender: Any?)
     @objc optional func toggleRightSidebar(_ sender: Any?)
@@ -217,6 +220,9 @@ enum MainMenu {
             m.add("Stop Query", #selector(TabulaActions.cancelQuery(_:)), ".")
             m.add("Running Queries…", #selector(TabulaActions.showRunningQueries(_:)))
             m.addItem(.separator())
+            m.add("Search in Database…", #selector(TabulaActions.searchInDatabase(_:)))
+            m.add("Show Diagram", #selector(TabulaActions.showDiagram(_:)))
+            m.addItem(.separator())
             m.add("Open Connection…", #selector(TabulaActions.showConnections(_:)), "k", [.command, .shift])
         }
 
@@ -228,6 +234,7 @@ enum MainMenu {
             m.addItem(.separator())
             m.add("Show Table Data", #selector(TabulaActions.showTableData(_:)), "[", [.command, .control])
             m.add("Show Table Structure", #selector(TabulaActions.showTableStructure(_:)), "]", [.command, .control])
+            m.add("Show Definition", #selector(TabulaActions.showTableDefinition(_:)))
             m.addItem(.separator())
             m.add("Previous Page", #selector(TabulaActions.previousPage(_:)), "\u{F702}")
             m.add("Next Page", #selector(TabulaActions.nextPage(_:)), "\u{F703}")

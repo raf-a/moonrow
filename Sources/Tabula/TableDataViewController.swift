@@ -358,6 +358,9 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
         query.sort.removeAll { !names.contains($0.column) }
         if query.filter != nil, filterBar.columns != names { query.filter = nil }
         filterBar.setColumns(names)
+        if let pending = pendingConditions {
+            DispatchQueue.main.async { [weak self] in self?.showRows(matching: pending.conditions, focus: pending.focus) }
+        }
         grid.focusedColumn = focused.flatMap { grid.column(withIdentifier: $0) >= 0 ? $0 : nil } ?? grid.tableColumns.first?.identifier
         if widths.isEmpty { columnsSized = false }
         updateSortIndicators()
@@ -566,6 +569,26 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
     }
 
     // MARK: - Filtering and paging
+
+    /// Conditions waiting for the columns to load.
+    private var pendingConditions: (conditions: [FilterCondition], focus: Bool)?
+
+    /// Shows the rows matching every condition (Search in Database's results), in the filter
+    /// bar. `focus` moves the keyboard focus to the grid.
+    func showRows(matching conditions: [FilterCondition], focus: Bool = true) {
+        guard browser != nil, !filterBar.columns.isEmpty else {
+            pendingConditions = (conditions, focus)
+            return
+        }
+        pendingConditions = nil
+        if filterBar.isHidden {
+            filterBar.isHidden = false
+            stack.arrangedSubviews[1].isHidden = false
+            updateBar()
+        }
+        filterBar.replace(with: conditions)
+        if focus { view.window?.makeFirstResponder(grid) }
+    }
 
     private func applyFilter(_ filter: Filter?) {
         endInlineEdit()
