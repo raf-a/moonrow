@@ -3,8 +3,8 @@ import AppKit
 
 /// The saved connections as an outline, shared by the welcome window and Open Connection so
 /// both look and behave alike: groups (folders, by name, collapsible, the collapse kept with the
-/// group) and then the connections in no group, one `ConnectionCell` each. Searching matches
-/// names, hosts and tags; groups without a match hide and the others expand.
+/// group) and then the connections in no group, one `ConnectionCell` each.
+/// Searching matches names, hosts and tags; groups without a match hide and the others expand.
 @MainActor
 final class ConnectionList: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
     /// Outline items need stable identity: a group (with its shown connections) or a connection.
@@ -31,6 +31,10 @@ final class ConnectionList: NSObject, NSOutlineViewDataSource, NSOutlineViewDele
 
     let outline = KeyOutlineView()
     let scrollView = NSScrollView()
+    /// How far in from the list's sides AppKit draws a row's selection (the inset style; measured
+    /// on macOS 26, not exposed). A search field above the list is inset as much, so its edges
+    /// line up with the selection's.
+    static let selectionInset: CGFloat = 11
     private let emptyLabel = NSTextField(wrappingLabelWithString: "")
     private let store: ConnectionStore
     private(set) var nodes: [Node] = []
@@ -65,7 +69,10 @@ final class ConnectionList: NSObject, NSOutlineViewDataSource, NSOutlineViewDele
         outline.outlineTableColumn = column
         outline.headerView = nil
         outline.style = .inset
-        outline.indentationPerLevel = 14
+        // Groups read as headings with their own chevron. The cells indent a group's connections
+        // themselves: AppKit's indentation would move the top level off the selection's edge too.
+        outline.indentationPerLevel = 0
+        outline.hidesDisclosureTriangles = true
         outline.autosaveExpandedItems = false
         outline.backgroundColor = .clear
         outline.dataSource = self
@@ -117,6 +124,8 @@ final class ConnectionList: NSObject, NSOutlineViewDataSource, NSOutlineViewDele
         let row = selected.flatMap { id in rowOfNode { $0.id == id } } ?? rowOfNode { $0.connection != nil }
         if let row {
             outline.selectRowIndexes([row], byExtendingSelection: false)
+            // From the top, so a heading above the selection stays in sight when it fits.
+            outline.scrollRowToVisible(0)
             outline.scrollRowToVisible(row)
         } else {
             outline.deselectAll(nil)
@@ -178,19 +187,20 @@ final class ConnectionList: NSObject, NSOutlineViewDataSource, NSOutlineViewDele
     }
 
     func outlineView(_ outlineView: NSOutlineView, heightOfRowByItem item: Any) -> CGFloat {
-        (item as? Node)?.group != nil ? 26 : 44
+        (item as? Node)?.group != nil ? 28 : 44
     }
 
     func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
         guard let node = item as? Node else { return nil }
         if let group = node.group {
             let cell = outlineView.makeView(withIdentifier: GroupCell.identifier, owner: nil) as? GroupCell ?? GroupCell()
-            cell.show(group, count: node.children.count)
+            cell.show(group, count: node.children.count, expanded: outlineView.isItemExpanded(node))
+            cell.onToggle = { [weak self] in self?.toggle(node) }
             return cell
         }
         let cell = outlineView.makeView(withIdentifier: ConnectionCell.identifier, owner: nil) as? ConnectionCell
             ?? ConnectionCell()
-        if let c = node.connection { cell.show(c) }
+        if let c = node.connection { cell.show(c, inGroup: outlineView.parent(forItem: node) != nil) }
         return cell
     }
 
@@ -201,6 +211,10 @@ final class ConnectionList: NSObject, NSOutlineViewDataSource, NSOutlineViewDele
 
     /// Collapsing is remembered with the group, except while searching (which expands all).
     private func collapseChanged(_ notification: Notification, collapsed: Bool) {
+        if let node = notification.userInfo?["NSObject"] as? Node {
+            let row = outline.row(forItem: node)
+            if row >= 0 { (outline.view(atColumn: 0, row: row, makeIfNecessary: false) as? GroupCell)?.expanded = !collapsed }
+        }
         guard !isReloading, query.isEmpty, let group = (notification.userInfo?["NSObject"] as? Node)?.group else { return }
         try? store.setGroup(group.id, collapsed: collapsed)
     }
@@ -237,26 +251,99 @@ final class ConnectionList: NSObject, NSOutlineViewDataSource, NSOutlineViewDele
     }
 }
 
-/// A group row: a folder, its name and how many connections it holds.
+/// A group row: a section heading in the sidebar style, its name in small bold secondary text
+/// and a chevron at the end that opens and closes it.
 final class GroupCell: NSTableCellView {
     static let identifier = NSUserInterfaceItemIdentifier("GroupCell")
     private let title = NSTextField(labelWithString: "")
-    private let count = NSTextField(labelWithString: "")
-    private let glyph = NSImageView()
+    private let chevron = NSButton()
+    var onToggle: (() -> Void)?
+    var expanded = true {
+        didSet {
+            chevron.image = NSImage(systemSymbolName: expanded ? "chevron.down" : "chevron.right",
+                                    accessibilityDescription: expanded ? "Collapse" : "Expand")
+        }
+    }
 
     init() {
         super.init(frame: .zero)
         identifier = Self.identifier
-        title.font = .systemFont(ofSize: 12, weight: .semibold)
+        title.font = .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
+        title.textColor = .secondaryLabelColor
         title.lineBreakMode = .byTruncatingTail
-        title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        count.font = .systemFont(ofSize: 11)
-        count.textColor = .secondaryLabelColor
-        glyph.image = NSImage(systemSymbolName: "folder", accessibilityDescription: "Group")
-        glyph.symbolConfiguration = .init(pointSize: 13, weight: .regular)
-        glyph.contentTintColor = .secondaryLabelColor
-        let row = NSStackView(views: [glyph, title, NSView(), count])
-        row.spacing = 6
+        chevron.isBordered = false
+        chevron.symbolConfiguration = .init(pointSize: 10, weight: .semibold)
+        chevron.contentTintColor = .tertiaryLabelColor
+        chevron.target = self
+        chevron.action = #selector(toggle)
+        expanded = true
+        for v in [title, chevron] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(v)
+        }
+        NSLayoutConstraint.activate([
+            title.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
+            title.trailingAnchor.constraint(lessThanOrEqualTo: chevron.leadingAnchor, constant: -8),
+            title.centerYAnchor.constraint(equalTo: centerYAnchor),
+            // As far from the selection's trailing edge as a connection's icon is from the leading
+            // one (the button pads its symbol by a point).
+            chevron.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -1),
+            chevron.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+        textField = title
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    @objc private func toggle() { onToggle?() }
+
+    func show(_ group: ConnectionGroup, count n: Int, expanded: Bool) {
+        title.stringValue = group.name
+        self.expanded = expanded
+        setAccessibilityLabel("\(group.name), \(n) connection\(n == 1 ? "" : "s")")
+    }
+}
+
+/// A saved connection in a list, as System Settings draws its rows: an icon (the database's logo
+/// on its brand colour), the name with its tag after it, and under them the host or the file's
+/// name. The rest (user, port, database, SSH, read-only, safe mode) is in the tooltip.
+final class ConnectionCell: NSTableCellView {
+    static let identifier = NSUserInterfaceItemIdentifier("ConnectionCell")
+    private let icon = ConnectionIcon()
+    private let title = NSTextField(labelWithString: "")
+    private let detail = NSTextField(labelWithString: "")
+    private let tagCapsule = TagCapsule()
+    private let row = NSStackView()
+    /// How far a group's connections sit in from the heading.
+    static let groupIndent: CGFloat = 14
+
+    init() {
+        super.init(frame: .zero)
+        identifier = Self.identifier
+        title.font = .systemFont(ofSize: NSFont.systemFontSize)
+        title.lineBreakMode = .byTruncatingTail
+        detail.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        detail.textColor = .secondaryLabelColor
+        detail.lineBreakMode = .byTruncatingMiddle
+        for f in [title, detail] {
+            f.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        }
+        // The tag sits right after the name; the name gives way first.
+        let nameRow = NSStackView()
+        nameRow.setViews([title, tagCapsule], in: .leading)
+        nameRow.spacing = 6
+        let text = NSStackView(views: [nameRow, detail])
+        text.orientation = .vertical
+        text.alignment = .leading
+        text.spacing = 1
+        nameRow.widthAnchor.constraint(lessThanOrEqualTo: text.widthAnchor).isActive = true
+        // Name and host stay together in the middle of the row, with or without a tag.
+        for v in [nameRow, text] {
+            v.setHuggingPriority(.required, for: .vertical)
+        }
+        row.setViews([icon, text], in: .leading)
+        row.spacing = 8
         row.edgeInsets = NSEdgeInsets(top: 0, left: 2, bottom: 0, right: 6)
         addSubview(row)
         row.pin(to: self)
@@ -266,66 +353,72 @@ final class GroupCell: NSTableCellView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
-    func show(_ group: ConnectionGroup, count n: Int) {
-        title.stringValue = group.name
-        count.stringValue = "\(n)"
+    func show(_ c: ConnectionConfig, inGroup: Bool) {
+        row.edgeInsets.left = 2 + (inGroup ? Self.groupIndent : 0)
+        title.stringValue = c.displayName
+        detail.stringValue = c.place
+        toolTip = c.summary
+        icon.show(c)
+        tagCapsule.show(c.tag, color: c.markColor)
+    }
+
+    /// On the selected row the secondary line follows the selection's text colour.
+    override var backgroundStyle: NSView.BackgroundStyle {
+        didSet {
+            detail.textColor = backgroundStyle == .emphasized ? .alternateSelectedControlTextColor : .secondaryLabelColor
+            tagCapsule.isEmphasized = backgroundStyle == .emphasized
+            icon.isEmphasized = backgroundStyle == .emphasized
+        }
     }
 }
 
-/// A saved connection in a list: a server or file glyph in the connection's colour, the name
-/// over a one-line summary, and the tag.
-final class ConnectionCell: NSTableCellView {
-    static let identifier = NSUserInterfaceItemIdentifier("ConnectionCell")
-    private let title = NSTextField(labelWithString: "")
-    private let detail = NSTextField(labelWithString: "")
-    private let glyph = NSImageView()
-    private let tagLabel = NSTextField(labelWithString: "")
+/// A connection's icon, as System Settings draws its panes': the database's logo in white on a
+/// rounded square in its brand colour (`DriverLogos.swift`).
+final class ConnectionIcon: NSView {
+    static let size: CGFloat = 26
+    private let logo = NSImageView()
+    private var fill = NSColor.systemGray
+    /// On the selected row a thin white edge keeps the square apart from the selection's colour.
+    var isEmphasized = false {
+        didSet { if isEmphasized != oldValue { needsDisplay = true } }
+    }
 
     init() {
         super.init(frame: .zero)
-        identifier = Self.identifier
-        title.font = .systemFont(ofSize: 13, weight: .medium)
-        detail.font = .systemFont(ofSize: 11)
-        detail.textColor = .secondaryLabelColor
-        for f in [title, detail] {
-            f.lineBreakMode = .byTruncatingMiddle
-            f.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        }
-        glyph.image = NSImage(systemSymbolName: "cylinder.split.1x2", accessibilityDescription: nil)
-        glyph.symbolConfiguration = .init(pointSize: 18, weight: .regular)
-        glyph.contentTintColor = .controlAccentColor
-        // One width for every glyph, so the names line up.
-        glyph.widthAnchor.constraint(equalToConstant: 24).isActive = true
-
-        let text = NSStackView(views: [title, detail])
-        text.orientation = .vertical
-        text.alignment = .leading
-        text.spacing = 1
-        tagLabel.font = .systemFont(ofSize: 9, weight: .bold)
-        tagLabel.setContentHuggingPriority(.required, for: .horizontal)
-        tagLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
-        let row = NSStackView(views: [glyph, text, NSView(), tagLabel])
-        row.spacing = 10
-        row.edgeInsets = NSEdgeInsets(top: 0, left: 4, bottom: 0, right: 4)
-        addSubview(row)
-        row.pin(to: self)
-        textField = title
+        wantsLayer = true
+        translatesAutoresizingMaskIntoConstraints = false
+        logo.imageScaling = .scaleProportionallyUpOrDown
+        logo.contentTintColor = .white
+        addSubview(logo)
+        logo.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: Self.size),
+            heightAnchor.constraint(equalToConstant: Self.size),
+            logo.centerXAnchor.constraint(equalTo: centerXAnchor),
+            logo.centerYAnchor.constraint(equalTo: centerYAnchor),
+            logo.widthAnchor.constraint(equalToConstant: 16),
+            logo.heightAnchor.constraint(equalToConstant: 16),
+        ])
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
     func show(_ c: ConnectionConfig) {
-        title.stringValue = c.displayName
-        detail.stringValue = c.summary
-        toolTip = c.driver.isServer ? c.summary : c.expandedFilePath
-        glyph.image = NSImage(
-            systemSymbolName: c.driver.isServer ? "server.rack" : "cylinder.split.1x2", accessibilityDescription: c.driver.displayName)
-        // The connection's colour marks it; uncoloured ones keep the accent colour.
-        glyph.contentTintColor = c.markColor ?? .controlAccentColor
-        tagLabel.stringValue = c.tag?.title.uppercased() ?? ""
-        tagLabel.textColor = c.markColor ?? .secondaryLabelColor
-        tagLabel.isHidden = c.tag == nil
+        fill = c.driver.brandColor
+        logo.image = c.driver.logo
+        needsDisplay = true
+    }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        guard let layer else { return }
+        layer.cornerRadius = 6
+        layer.cornerCurve = .continuous
+        layer.backgroundColor = fill.cgColor
+        layer.borderWidth = isEmphasized ? 1 : 0
+        layer.borderColor = NSColor.white.withAlphaComponent(0.6).cgColor
     }
 }
 
@@ -333,6 +426,12 @@ final class ConnectionCell: NSTableCellView {
 final class KeyOutlineView: NSOutlineView {
     var onReturn: (() -> Void)?
     var onDelete: (() -> Void)?
+    /// For rows that draw their own chevron (`GroupCell`).
+    var hidesDisclosureTriangles = false
+
+    override func frameOfOutlineCell(atRow row: Int) -> NSRect {
+        hidesDisclosureTriangles ? .zero : super.frameOfOutlineCell(atRow: row)
+    }
 
     override func keyDown(with event: NSEvent) {
         let plain = event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty

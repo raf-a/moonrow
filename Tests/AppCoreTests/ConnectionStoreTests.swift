@@ -104,6 +104,19 @@ private func tempFile() -> URL {
         #expect(c.displayName == "app.sqlite")
         #expect(c.summary == "SQLite · /data/app.sqlite · read-only")
         #expect(c.shortSummary == "SQLite · app.sqlite · read-only")
+        #expect(c.place == "app.sqlite")
+    }
+
+    @Test func placeIsTheHostAndDatabaseOrTheFileName() {
+        var c = ConnectionConfig(name: "Shop", driver: .postgres, host: "db.local", port: 6543, user: "app", database: "shop")
+        c.overSSH = true
+        c.sshHost = "bastion"
+        c.sshUser = "deploy"
+        #expect(c.place == "db.local · shop")
+        #expect(c.summary == "PostgreSQL · app@db.local:6543/shop · via SSH deploy@bastion")
+        #expect(ConnectionConfig(driver: .mysql).place == "localhost")
+        #expect(ConnectionConfig(driver: .mysql, host: "/tmp/mysql.sock").place == "/tmp/mysql.sock")
+        #expect(ConnectionConfig(filePath: "~/data/app.sqlite").place == "app.sqlite")
     }
 
     @Test func openedFilesKeepTheirIDAcrossOpens() {

@@ -140,6 +140,9 @@ final class WelcomeWindowController: NSWindowController, NSWindowDelegate, NSSea
     private func header(search: NSSearchField, buttons: [NSButton], over scroll: NSScrollView) -> NSView {
         let header = NSStackView(views: [search] + buttons)
         header.spacing = 6
+        // In line with the list's selection, not its sides.
+        let inset = ConnectionList.selectionInset
+        header.edgeInsets = NSEdgeInsets(top: 0, left: inset, bottom: 0, right: inset)
         if #available(macOS 26.0, *) {
             // Circles as tall as the search field (they share the stack now, so they can be tied).
             for b in buttons {

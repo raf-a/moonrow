@@ -132,6 +132,7 @@ enum DevHarness {
         }
         // `MOONROW_SHOW=Sample:users,events,?;Other` opens saved connections by name and, in each,
         // the tables listed (`?` is a query tab), then leaves the app running to be looked at.
+        // With `MOONROW_SNAPSHOTS` it renders the windows instead and quits.
         if let spec = env["MOONROW_SHOW"] {
             Task {
                 do {
@@ -139,6 +140,7 @@ enum DevHarness {
                 } catch {
                     print("show failed: \(error)")
                 }
+                if let snapshots { snapshotWindowsAndQuit(to: snapshots) }
             }
             return
         }
@@ -361,6 +363,11 @@ enum DevHarness {
             for (i, window) in NSApp.windows.filter(\.isVisible).enumerated() {
                 let name = window.title.isEmpty ? "window" : window.title
                 snapshot(window, to: dir.appending(path: "\(i)-\(name).png"))
+                // On macOS 26 the glass toolbar isn't in the window's capture; its items' views are.
+                for item in window.toolbar?.items ?? [] {
+                    guard let view = item.view else { continue }
+                    snapshot(view, to: dir.appending(path: "\(i)-\(name)-\(item.itemIdentifier.rawValue).png"))
+                }
             }
             NSApp.terminate(nil)
         }
@@ -1258,8 +1265,12 @@ enum DevHarness {
 
     /// Renders the window's frame view, toolbar included.
     static func snapshot(_ window: NSWindow, to url: URL) {
-        guard let view = window.contentView?.superview ?? window.contentView,
-              let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
+        guard let view = window.contentView?.superview ?? window.contentView else { return }
+        snapshot(view, to: url)
+    }
+
+    static func snapshot(_ view: NSView, to url: URL) {
+        guard !view.bounds.isEmpty, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
         view.cacheDisplay(in: view.bounds, to: rep)
         try? rep.representation(using: .png, properties: [:])?.write(to: url)
     }

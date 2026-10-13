@@ -102,9 +102,8 @@ extension ConnectionConfig {
     var markColor: NSColor? { (color ?? tag?.suggestedColor)?.nsColor }
 }
 
-/// The connection's tag as a capsule in its colour ("Production"), or a dot in the colour when
-/// it has a colour and no tag. Shown after the connection's name in the workspace title. A solid
-/// fill rather than glass: tinted glass greys out with its window, and the colour is a warning.
+/// The connection's tag after its name in the workspace title, as the connection list shows it
+/// (`TagCapsule`), or a dot in the colour when it has a colour and no tag.
 final class ConnectionBadge: NSView {
     init?(_ config: ConnectionConfig) {
         guard let color = config.markColor else { return nil }
@@ -112,12 +111,11 @@ final class ConnectionBadge: NSView {
         translatesAutoresizingMaskIntoConstraints = false
         let mark: NSView
         if let tag = config.tag {
-            let label = NSTextField(labelWithString: tag.title)
-            label.font = .systemFont(ofSize: 11, weight: .semibold)
-            label.textColor = color.prefersDarkText ? .black : .white
-            mark = Fill(color, label: label)
+            let capsule = TagCapsule()
+            capsule.show(tag, color: color)
+            mark = capsule
         } else {
-            mark = Fill(color, label: nil)
+            mark = Dot(color)
         }
         addSubview(mark)
         mark.pin(to: self)
@@ -126,29 +124,17 @@ final class ConnectionBadge: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
-    private final class Fill: NSView {
+    private final class Dot: NSView {
         let color: NSColor
 
-        /// A capsule around `label`, or a dot without one.
-        init(_ color: NSColor, label: NSTextField?) {
+        init(_ color: NSColor) {
             self.color = color
             super.init(frame: .zero)
             wantsLayer = true
-            if let label {
-                addSubview(label)
-                label.translatesAutoresizingMaskIntoConstraints = false
-                NSLayoutConstraint.activate([
-                    label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 7),
-                    label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -7),
-                    label.centerYAnchor.constraint(equalTo: centerYAnchor),
-                    heightAnchor.constraint(equalToConstant: 17),
-                ])
-            } else {
-                NSLayoutConstraint.activate([
-                    widthAnchor.constraint(equalToConstant: 9),
-                    heightAnchor.constraint(equalToConstant: 9),
-                ])
-            }
+            NSLayoutConstraint.activate([
+                widthAnchor.constraint(equalToConstant: 9),
+                heightAnchor.constraint(equalToConstant: 9),
+            ])
         }
 
         @available(*, unavailable)
@@ -160,19 +146,92 @@ final class ConnectionBadge: NSView {
             layer?.cornerRadius = bounds.height / 2
             layer?.backgroundColor = color.cgColor
         }
+    }
+}
 
-        override func layout() {
-            super.layout()
-            needsDisplay = true
+/// A connection's tag after its name, in the connection list and the workspace title: small
+/// regular text in the tag's colour on a faint fill of the same colour, slightly rounded. The text
+/// is darkened (light mode) or lightened (dark mode) as far as it takes to read at
+/// `minimumContrast` on that fill. On a selected row it turns to the selection's text colour.
+final class TagCapsule: NSView {
+    /// WCAG's minimum for small text.
+    static let minimumContrast: CGFloat = 4.5
+    private static let fillAlpha: CGFloat = 0.15
+    private let label = NSTextField(labelWithString: "")
+    private var color = NSColor.secondaryLabelColor
+    var isEmphasized = false {
+        didSet { if isEmphasized != oldValue { restyle() } }
+    }
+
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        label.font = .systemFont(ofSize: 10, weight: .regular)
+        addSubview(label)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
+            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+            heightAnchor.constraint(equalToConstant: 16),
+        ])
+        setContentHuggingPriority(.required, for: .horizontal)
+        setContentCompressionResistancePriority(.required, for: .horizontal)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    func show(_ tag: ConnectionTag?, color: NSColor?) {
+        isHidden = tag == nil
+        label.stringValue = tag?.title ?? ""
+        self.color = color ?? .secondaryLabelColor
+        restyle()
+    }
+
+    private func restyle() {
+        needsDisplay = true
+    }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    /// Runs again when the appearance changes, so the text's contrast follows light and dark.
+    override func updateLayer() {
+        layer?.cornerRadius = 4
+        if isEmphasized {
+            layer?.backgroundColor = NSColor.white.withAlphaComponent(0.2).cgColor
+            label.textColor = .alternateSelectedControlTextColor
+            return
         }
+        layer?.backgroundColor = color.withAlphaComponent(Self.fillAlpha).cgColor
+        guard let text = color.usingColorSpace(.sRGB),
+              let page = NSColor.windowBackgroundColor.usingColorSpace(.sRGB) else {
+            label.textColor = color
+            return
+        }
+        let fill = page.blended(withFraction: Self.fillAlpha, of: text) ?? page
+        let dark = fill.luminance < 0.5
+        var readable = text
+        var step: CGFloat = 0
+        while readable.contrast(with: fill) < Self.minimumContrast, step < 1 {
+            step += 0.05
+            readable = text.blended(withFraction: step, of: dark ? .white : .black) ?? readable
+        }
+        label.textColor = readable
     }
 }
 
 extension NSColor {
-    /// Text on this colour reads better in black than in white (yellow, light greys).
-    var prefersDarkText: Bool {
-        guard let c = usingColorSpace(.sRGB) else { return false }
-        return 0.299 * c.redComponent + 0.587 * c.greenComponent + 0.114 * c.blueComponent > 0.65
+    /// Relative luminance (WCAG) of an sRGB colour.
+    var luminance: CGFloat {
+        func channel(_ c: CGFloat) -> CGFloat { c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4) }
+        return 0.2126 * channel(redComponent) + 0.7152 * channel(greenComponent) + 0.0722 * channel(blueComponent)
+    }
+
+    /// The contrast ratio (WCAG) between two sRGB colours, from 1 to 21.
+    func contrast(with other: NSColor) -> CGFloat {
+        let (a, b) = (luminance, other.luminance)
+        return (max(a, b) + 0.05) / (min(a, b) + 0.05)
     }
 }
 

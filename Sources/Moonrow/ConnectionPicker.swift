@@ -76,12 +76,16 @@ final class ConnectionPicker: NSObject, NSSearchFieldDelegate, NSMenuDelegate, N
         buttons.spacing = 8
 
         let scroll = list.scrollView
-        let stack = NSStackView(views: [heading, search, scroll, buttons])
+        // The search field lines up with the list's selection, not its sides.
+        let searchRow = NSStackView(views: [search])
+        let inset = ConnectionList.selectionInset
+        searchRow.edgeInsets = NSEdgeInsets(top: 0, left: inset, bottom: 0, right: inset)
+        let stack = NSStackView(views: [heading, searchRow, scroll, buttons])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 10
         stack.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
-        for v in [search, scroll, buttons, heading] {
+        for v in [searchRow, scroll, buttons, heading] {
             v.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32).isActive = true
         }
         scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 300).isActive = true

@@ -237,6 +237,14 @@ public struct ConnectionConfig: Codable, Hashable, Sendable, Identifiable {
     /// `summary` with only the database file's name, not its folder (the workspace's title).
     public var shortSummary: String { summary(file: (expandedFilePath as NSString).lastPathComponent) }
 
+    /// The host (or socket) and the database, e.g. `db.local · shop`, or the database file's name:
+    /// the connection list's second line.
+    public var place: String {
+        guard driver.isServer else { return (expandedFilePath as NSString).lastPathComponent }
+        let server = host.isEmpty ? "localhost" : host
+        return database.isEmpty ? server : server + " · " + database
+    }
+
     private func summary(file: String) -> String {
         var parts = [driver.displayName]
         if driver.isServer {
