@@ -27,10 +27,11 @@ final class LeftSidebarController: NSViewController {
 
     override func loadView() {
         picker.segmentCount = 4
-        for (i, (label, tip)) in [("Items", "Tables and views"), ("Queries", "Saved queries"),
-                                  ("History", "Statements run in this connection"),
-                                  ("Search", "Search in Database: a text in every table")].enumerated() {
-            picker.setLabel(label, forSegment: i)
+        for (i, (symbol, name, tip)) in [("tablecells", "Items", "Items: tables and views"),
+                                         ("doc.text", "Queries", "Queries: saved queries"),
+                                         ("clock.arrow.circlepath", "History", "History: statements run in this connection"),
+                                         ("magnifyingglass", "Search", "Search in Database: a text in every table")].enumerated() {
+            picker.setImage(NSImage(systemSymbolName: symbol, accessibilityDescription: name), forSegment: i)
             picker.setToolTip(tip, forSegment: i)
             picker.setWidth(0, forSegment: i)
         }
