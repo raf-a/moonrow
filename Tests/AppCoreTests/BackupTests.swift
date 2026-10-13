@@ -151,18 +151,51 @@ struct DumpToolTests {
         #expect(try BackupFileKind.detect(dir.appending(path: "d")) == .postgresDirectory)
     }
 
-    @Test func backupFileNames() {
+    @Test func backupFileName() {
         var config = ConnectionConfig(name: "Prod", driver: .postgres)
         config.tag = .production
         var o = BackupOptions()
         o.postgresFormat = .directory
         let when = Date(timeIntervalSince1970: 1_700_000_000)
-        let job = BackupJob(config: config, password: nil, databases: ["a", "b", "a"], options: o,
-                            tool: tool(.pgDump, [18]), serverIsMariaDB: false, pattern: FileNamePattern("{tag}-{database}"))
-        #expect(job.fileNames(date: when) == ["production-a", "production-b", "production-a 2"])
-        var custom = job
-        custom.options.postgresFormat = .custom
-        #expect(custom.fileNames(date: when) == ["production-a.dump", "production-b.dump", "production-a 2.dump"])
+        var job = BackupJob(config: config, password: nil, database: "a", options: o, tool: tool(.pgDump, [18]), serverIsMariaDB: false)
+        #expect(job.fileName(FileNamePattern("{tag}-{database}"), date: when) == "production-a")
+        job.options.postgresFormat = .custom
+        #expect(job.fileName(FileNamePattern("{tag}-{database}"), date: when) == "production-a.dump")
+        job.options.postgresFormat = .plain
+        job.options.gzip = true
+        #expect(job.fileName(FileNamePattern("{database}"), date: when) == "a.sql.gz")
+    }
+
+    @Test func optionsAsTokens() throws {
+        var o = BackupOptions()
+        #expect(o.tokens(.postgres) == [])
+        #expect(o.tokens(.mysql) == ["--single-transaction", "--routines", "--triggers", "--add-drop-table"])
+        try o.setTokens(["--clean", "--no-owner", "--exclude-table='a b'", "-n public", "--schema-only", "--format=d"], .postgres)
+        #expect(o.clean && o.noOwner && !o.noPrivileges && !o.createDatabase)
+        #expect(o.content == .schemaOnly)
+        #expect(o.postgresFormat == .directory)
+        #expect(o.otherArguments == "'--exclude-table=a b' -n public")
+        #expect(o.tokens(.postgres) == ["--no-owner", "--clean", "'--exclude-table=a b'", "-n", "public"])
+        // The same tokens read back give the same options.
+        var again = o
+        try again.setTokens(o.tokens(.postgres), .postgres)
+        #expect(again == o)
+        #expect(throws: DatabaseError.self) { try o.setTokens(["--exclude-table='a"], .postgres) }
+
+        var my = BackupOptions()
+        try my.setTokens(["--routines", "--databases", "--no-data", "--hex-blob"], .mysql)
+        #expect(my.routines && my.createDatabase && !my.triggers && !my.singleTransaction && !my.addDropTable)
+        #expect(my.content == .schemaOnly)
+        #expect(my.otherArguments == "--hex-blob")
+
+        var r = RestoreOptions()
+        #expect(r.tokens(.postgres) == ["--exit-on-error"])
+        #expect(r.tokens(.mysql) == [])
+        try r.setTokens(["--force"], .mysql)
+        #expect(!r.stopOnError)
+        try r.setTokens(["--single-transaction", "--data-only"], .postgres)
+        #expect(r.singleTransaction && !r.stopOnError && r.content == .dataOnly)
+        #expect(ToolFlags.backupMenu(.postgres).starts(with: ["--no-owner", "--no-privileges", "--clean", "--create"]))
     }
 }
 
@@ -292,16 +325,15 @@ final class Lines: @unchecked Sendable {
             #expect(try await ServerInfo.databases(s.admin).contains(source))
 
             for (i, (backup, restore)) in variants.enumerated() {
-                let job = BackupJob(config: s.config, password: s.password, databases: [source], options: backup, tool: dumpTool,
-                                    serverIsMariaDB: maria, pattern: FileNamePattern("{database}-\(i)"))
+                let job = BackupJob(config: s.config, password: s.password, database: source, options: backup, tool: dumpTool,
+                                    serverIsMariaDB: maria)
                 let log = Lines()
-                let files = try await job.run(into: dir, log: { log.add($0) })
-                #expect(files.count == 1)
+                let file = dir.appending(path: job.fileName(FileNamePattern("{database}-\(i)")))
+                try await job.run(to: file, log: { log.add($0) })
                 #expect(log.all.first?.hasPrefix("$ ") == true)
                 // The command line never carries the password (the test one, "tabula", is also in
                 // the database names, so look for the ways it could be passed).
                 #expect(!log.all[0].contains("PGPASSWORD") && !log.all[0].contains("--password") && !log.all[0].contains(" -p"))
-                let file = try #require(files.first)
                 let kind = try BackupFileKind.detect(file)
                 #expect(kind == (family == .mysql ? (backup.gzip ? .sqlGzip : .sql) : backup.postgresFormat == .plain ? (backup.gzip ? .sqlGzip : .sql)
                         : backup.postgresFormat == .custom ? .postgresArchive : backup.postgresFormat == .tar ? .postgresTar : .postgresDirectory))
@@ -359,10 +391,10 @@ final class Lines: @unchecked Sendable {
         await s.admin.close()
         let dir = try temporaryFolder()
         defer { try? FileManager.default.removeItem(at: dir) }
-        let job = BackupJob(config: s.config, password: s.password, databases: ["no_such_database_here"], options: BackupOptions(),
+        let job = BackupJob(config: s.config, password: s.password, database: "no_such_database_here", options: BackupOptions(),
                             tool: tool, serverIsMariaDB: false)
         do {
-            try await job.run(into: dir, log: { _ in })
+            try await job.run(to: dir.appending(path: "x.dump"), log: { _ in })
             Issue.record("should have failed")
         } catch let error as DatabaseError {
             #expect(error.message.contains("no_such_database_here"), "\(error.message)")

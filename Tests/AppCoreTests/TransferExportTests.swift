@@ -104,6 +104,19 @@ struct FileNamePatternTests {
         #expect(FileNamePattern("..{table}").render(c) == "users")
     }
 
+    @Test func segments() {
+        let token = { (p: String) in FileNamePattern.Segment.token(FileNamePattern.tokens.first { $0.placeholder == p }!) }
+        #expect(FileNamePattern(FileNamePattern.backup).segments == [
+            token("{database}"), .text("-"), token("{yyyy}"), .text("-"), token("{MM}"), .text("-"), token("{dd}"), .text("-"),
+            token("{HH}"), token("{mm}"), token("{ss}"),
+        ])
+        #expect(FileNamePattern("a {unknown}b{table}{tag").segments == [.text("a {unknown}b"), token("{table}"), .text("{tag")])
+        #expect(FileNamePattern("").segments == [])
+        for p in [FileNamePattern.backup, "a {unknown}b{table}{tag", "x"] {
+            #expect(FileNamePattern(segments: FileNamePattern(p).segments).pattern == p)
+        }
+    }
+
     @Test func uniqueNames() {
         var taken = Set<String>()
         #expect(FileNamePattern.unique("a", extension: "csv", taken: &taken) == "a.csv")

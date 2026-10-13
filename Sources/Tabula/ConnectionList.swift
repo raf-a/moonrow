@@ -49,6 +49,11 @@ final class ConnectionList: NSObject, NSOutlineViewDataSource, NSOutlineViewDele
         }
     }
     var onSelectionChange: (() -> Void)?
+    /// Limits the list to some connections (Backup and Restore: servers they can work with);
+    /// groups left without any then hide.
+    var include: ((ConnectionConfig) -> Bool)? {
+        didSet { reload() }
+    }
     /// Shown when no connection is saved.
     var emptyText = "No saved connections."
 
@@ -96,10 +101,10 @@ final class ConnectionList: NSObject, NSOutlineViewDataSource, NSOutlineViewDele
         let selected = id ?? selectedNode?.id
         let query = query.trimmingCharacters(in: .whitespaces)
         func shown(_ list: [ConnectionConfig]) -> [Node] {
-            list.filter { Self.matches($0, query) }.map(Node.init(connection:))
+            list.filter { Self.matches($0, query) && include?($0) != false }.map(Node.init(connection:))
         }
         let groups = store.groups.map { Node(group: $0, children: shown(store.connections(in: $0.id))) }
-            .filter { query.isEmpty || !$0.children.isEmpty }
+            .filter { (query.isEmpty && include == nil) || !$0.children.isEmpty }
         nodes = groups + shown(store.connections(in: nil))
 
         isReloading = true
@@ -116,7 +121,7 @@ final class ConnectionList: NSObject, NSOutlineViewDataSource, NSOutlineViewDele
         } else {
             outline.deselectAll(nil)
         }
-        emptyLabel.stringValue = store.connections.isEmpty && store.groups.isEmpty ? emptyText : "Nothing matches “\(query)”."
+        emptyLabel.stringValue = query.isEmpty ? emptyText : "Nothing matches “\(query)”."
         emptyLabel.isHidden = !nodes.isEmpty
         onSelectionChange?()
     }

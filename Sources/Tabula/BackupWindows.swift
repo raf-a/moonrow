@@ -5,212 +5,196 @@ import DBKit
 /// What the Backup and Restore windows need from the app.
 @MainActor
 struct ToolWindowEnvironment {
-    /// The saved connections Backup and Restore work with (servers only).
-    var connections: () -> [ConnectionConfig]
+    /// The saved connections; the windows list the ones the tools work with.
+    var store: ConnectionStore
     /// The database password and SSH login for a connection, asking if its mode says so; nil
     /// when the user cancels.
     var login: (ConnectionConfig, NSWindow?) async -> (password: String?, ssh: SSHLogin)?
     var locator: () -> ToolLocator
-    /// After a restore: workspaces of that connection reload their lists.
+    /// After a restore or a new database: workspaces of that connection reload their lists.
     var onRestored: (UUID) -> Void = { _ in }
     /// Settings ▸ Locations.
     var showLocations: () -> Void = {}
 }
 
-/// The parts Backup and Restore share: the connection list on the left, the tool in use, the
-/// command line about to run, the log, and Start / Stop.
+/// The parts Backup and Restore share: the saved connections and the selected one's databases
+/// side by side, each under a search field; a column of options on the right; the tool in use
+/// and the buttons along the bottom. A run shows its log in a sheet.
 @MainActor
-class ToolWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate {
+class ToolWindowController: NSWindowController, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate,
+    NSTokenFieldDelegate {
     let environment: ToolWindowEnvironment
-    private(set) var configs: [ConnectionConfig] = []
+    let connections: ConnectionList
     /// The selected connection's login and a session for reading its databases.
     private(set) var selected: ConnectionConfig?
     private(set) var login: (password: String?, ssh: SSHLogin)?
     private(set) var session: (any DatabaseConnection)?
-    var databases: [String] = []
+    /// Every database on the selected connection's server.
+    private(set) var databases: [String] = []
+    /// Those the search leaves.
+    private var shownDatabases: [String] = []
     private(set) var serverMajor: Int?
     private(set) var serverIsMariaDB = false
     private var loadTask: Task<Void, Never>?
+    /// The database to select when the list loads (File ▸ Backup… from a workspace).
+    var preferredDatabase: String?
+    private(set) var runSheet: ToolRunSheet?
     var runTask: Task<Void, Never>?
     /// For the dev harness: when a run ends.
     var onFinish: ((Result<Void, any Error>) -> Void)?
 
-    let connectionList = NSTableView()
-    let titleLabel = NSTextField(labelWithString: "")
+    let connectionSearch = NSSearchField()
+    let databaseSearch = NSSearchField()
+    let databaseTable = NSTableView()
+    private let databaseNote = NSTextField(wrappingLabelWithString: "")
     let toolLabel = NSTextField(wrappingLabelWithString: "")
-    let commandView = NSTextField(wrappingLabelWithString: "")
-    let logView = NSTextView()
-    let status = NSTextField(labelWithString: "")
-    let startButton = NSButton(title: "", target: nil, action: nil)
-    let stopButton = NSButton(title: "Stop", target: nil, action: nil)
-    let revealButton = NSButton(title: "Show in Finder", target: nil, action: nil)
-    var revealURLs: [URL] = []
+    private let locationsButton = NSButton(title: "Locations…", target: nil, action: nil)
 
-    init(title: String, environment: ToolWindowEnvironment) {
+    // The options column: popups above, then the tool's flags as tokens.
+    let addOptionMenu = NSPopUpButton(frame: .zero, pullsDown: true)
+    let tokenField = NSTokenField()
+    let optionsNote = NSTextField(wrappingLabelWithString: "")
+
+    init(title: String, autosave: String, environment: ToolWindowEnvironment) {
         self.environment = environment
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 640), styleMask: [.titled, .closable, .resizable, .miniaturizable],
+        connections = ConnectionList(store: environment.store)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 440), styleMask: [.titled, .closable, .resizable, .miniaturizable],
                               backing: .buffered, defer: true)
         window.title = title
-        window.minSize = NSSize(width: 780, height: 560)
+        window.minSize = NSSize(width: 700, height: 400)
         window.tabbingMode = .disallowed
         window.isReleasedWhenClosed = false
         super.init(window: window)
         window.delegate = self
+        connections.emptyText = "No saved PostgreSQL, MySQL or MariaDB connections."
+        connections.include = { [.postgres, .mysql, .mariadb].contains($0.driver) }
+        connections.onSelectionChange = { [weak self] in self?.connectionSelectionChanged() }
+        window.setFrameAutosaveName(autosave)
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
-    /// Lays out the window around `options` (the right-hand form between the tool line and the
-    /// command).
-    func build(top: [NSView], options: NSView) {
+    /// Lays the window out: `header` above the lists (Backup's file name), `options` at the top
+    /// of the right-hand column, `buttons` at the bottom right.
+    func build(header: NSView?, options: [NSView], buttons: [NSButton]) {
         guard let window else { return }
-        let column = NSTableColumn(identifier: .init("connection"))
-        column.title = "Connections"
-        connectionList.addTableColumn(column)
-        connectionList.headerView = nil
-        connectionList.style = .sourceList
-        connectionList.rowHeight = 36
-        connectionList.dataSource = self
-        connectionList.delegate = self
-        let listScroll = NSScrollView()
-        listScroll.documentView = connectionList
-        listScroll.hasVerticalScroller = true
-        listScroll.drawsBackground = false
-        let side = NSVisualEffectView()
-        side.material = .sidebar
-        side.blendingMode = .behindWindow
-        listScroll.translatesAutoresizingMaskIntoConstraints = false
-        side.addSubview(listScroll)
+        connectionSearch.placeholderString = "Search connections"
+        connectionSearch.delegate = self
+        databaseSearch.placeholderString = "Search databases"
+        databaseSearch.delegate = self
+
+        let connectionScroll = connections.scrollView
+        connectionScroll.borderType = .bezelBorder
+        connectionScroll.drawsBackground = true
+        connectionScroll.backgroundColor = .controlBackgroundColor
+        connections.outline.style = .plain
+        connections.outline.rowSizeStyle = .default
+
+        let column = NSTableColumn(identifier: .init("database"))
+        databaseTable.addTableColumn(column)
+        databaseTable.headerView = nil
+        databaseTable.rowHeight = 22
+        databaseTable.style = .plain
+        databaseTable.dataSource = self
+        databaseTable.delegate = self
+        let databaseScroll = NSScrollView()
+        databaseScroll.documentView = databaseTable
+        databaseScroll.hasVerticalScroller = true
+        databaseScroll.borderType = .bezelBorder
+        databaseNote.alignment = .center
+        databaseNote.textColor = .secondaryLabelColor
+        databaseNote.font = .systemFont(ofSize: 12)
+        databaseNote.translatesAutoresizingMaskIntoConstraints = false
+        databaseScroll.addSubview(databaseNote)
         NSLayoutConstraint.activate([
-            listScroll.topAnchor.constraint(equalTo: side.topAnchor, constant: 8),
-            listScroll.leadingAnchor.constraint(equalTo: side.leadingAnchor),
-            listScroll.trailingAnchor.constraint(equalTo: side.trailingAnchor),
-            listScroll.bottomAnchor.constraint(equalTo: side.bottomAnchor),
+            databaseNote.centerXAnchor.constraint(equalTo: databaseScroll.centerXAnchor),
+            databaseNote.centerYAnchor.constraint(equalTo: databaseScroll.centerYAnchor),
+            databaseNote.widthAnchor.constraint(lessThanOrEqualTo: databaseScroll.widthAnchor, constant: -30),
         ])
 
-        titleLabel.font = .systemFont(ofSize: 15, weight: .semibold)
+        func pane(_ search: NSSearchField, _ list: NSView) -> NSView {
+            let stack = NSStackView(views: [search, list])
+            stack.orientation = .vertical
+            stack.spacing = 8
+            for v in [search, list] { v.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true }
+            list.setContentHuggingPriority(.init(1), for: .vertical)
+            return stack
+        }
+        let split = NSSplitView()
+        split.isVertical = true
+        split.dividerStyle = .thin
+        split.addArrangedSubview(pane(connectionSearch, connectionScroll))
+        split.addArrangedSubview(pane(databaseSearch, databaseScroll))
+        split.setHoldingPriority(.init(251), forSubviewAt: 0)
+
+        addOptionMenu.addItem(withTitle: "Add Option")
+        tokenField.tokenizingCharacterSet = CharacterSet(charactersIn: ",\n")
+        tokenField.placeholderString = "Options"
+        tokenField.delegate = self
+        tokenField.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        (tokenField.cell as? NSTokenFieldCell)?.wraps = true
+        (tokenField.cell as? NSTokenFieldCell)?.isScrollable = false
+        tokenField.setContentHuggingPriority(.init(1), for: .vertical)
+        optionsNote.font = .systemFont(ofSize: 11)
+        optionsNote.textColor = .systemRed
+        optionsNote.isHidden = true
+        let side = NSStackView(views: options + [addOptionMenu, tokenField, optionsNote])
+        side.orientation = .vertical
+        side.alignment = .leading
+        side.spacing = 8
+        side.setHuggingPriority(.init(1), for: .vertical)
+        for v in side.arrangedSubviews { v.widthAnchor.constraint(equalTo: side.widthAnchor).isActive = true }
+        side.widthAnchor.constraint(equalToConstant: 200).isActive = true
+
+        let middle = NSStackView(views: [split, side])
+        middle.alignment = .top
+        middle.distribution = .fill
+        middle.spacing = 12
+        split.setContentHuggingPriority(.init(1), for: .horizontal)
+        split.widthAnchor.constraint(greaterThanOrEqualToConstant: 440).isActive = true
+        split.heightAnchor.constraint(equalTo: middle.heightAnchor).isActive = true
+        side.heightAnchor.constraint(equalTo: middle.heightAnchor).isActive = true
+        middle.setHuggingPriority(.init(1), for: .vertical)
+
         toolLabel.font = .systemFont(ofSize: 11)
         toolLabel.textColor = .secondaryLabelColor
-        toolLabel.isSelectable = true
-        let locations = NSButton(title: "Locations…", target: self, action: #selector(showLocations(_:)))
-        locations.controlSize = .small
-        let toolRow = NSStackView(views: [toolLabel, locations])
-        toolRow.alignment = .firstBaseline
+        toolLabel.maximumNumberOfLines = 2
+        toolLabel.lineBreakMode = .byTruncatingTail
+        toolLabel.cell?.truncatesLastVisibleLine = true
         toolLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        locationsButton.target = self
+        locationsButton.action = #selector(showLocations(_:))
+        locationsButton.controlSize = .small
+        locationsButton.isHidden = true
+        let bottom = NSStackView(views: [toolLabel, locationsButton, NSView()] + buttons)
+        bottom.alignment = .centerY
+        bottom.spacing = 8
 
-        commandView.font = .monospacedSystemFont(ofSize: 10.5, weight: .regular)
-        commandView.textColor = .secondaryLabelColor
-        commandView.isSelectable = true
-        commandView.maximumNumberOfLines = 4
-        commandView.lineBreakMode = .byCharWrapping
-        commandView.cell?.truncatesLastVisibleLine = true
-        commandView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let commandLabel = NSTextField(labelWithString: "Command")
-        commandLabel.font = .systemFont(ofSize: 11, weight: .medium)
-
-        logView.isEditable = false
-        logView.isRichText = false
-        logView.font = .monospacedSystemFont(ofSize: 10.5, weight: .regular)
-        logView.textContainerInset = NSSize(width: 4, height: 4)
-        logView.isVerticallyResizable = true
-        logView.autoresizingMask = [.width]
-        logView.textContainer?.widthTracksTextView = true
-        let logScroll = NSScrollView()
-        logScroll.documentView = logView
-        logScroll.hasVerticalScroller = true
-        logScroll.borderType = .bezelBorder
-        logScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 90).isActive = true
-        logScroll.setContentHuggingPriority(.init(1), for: .vertical)
-        let logLabel = NSTextField(labelWithString: "Log")
-        logLabel.font = .systemFont(ofSize: 11, weight: .medium)
-
-        status.lineBreakMode = .byTruncatingTail
-        status.font = .systemFont(ofSize: 12)
-        status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        startButton.target = self
-        startButton.action = #selector(startClicked(_:))
-        startButton.keyEquivalent = "\r"
-        stopButton.target = self
-        stopButton.action = #selector(stopClicked(_:))
-        stopButton.isHidden = true
-        revealButton.target = self
-        revealButton.action = #selector(reveal(_:))
-        revealButton.isHidden = true
-        let buttons = NSStackView(views: [status, NSView(), revealButton, stopButton, startButton])
-
-        let views: [NSView] = [titleLabel] + top + [toolRow, options, commandLabel, commandView, logLabel, logScroll, buttons]
-        let main = NSStackView(views: views)
+        let main = NSStackView(views: (header.map { [$0] } ?? []) + [middle, bottom])
         main.orientation = .vertical
         main.alignment = .leading
-        main.spacing = 10
-        main.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 18, right: 20)
-        for v in views where v !== titleLabel {
-            v.widthAnchor.constraint(equalTo: main.widthAnchor, constant: -40).isActive = true
-        }
-
-        let root = NSView()
-        for v in [side, main] {
-            v.translatesAutoresizingMaskIntoConstraints = false
-            root.addSubview(v)
-        }
-        NSLayoutConstraint.activate([
-            side.topAnchor.constraint(equalTo: root.topAnchor),
-            side.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            side.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            side.widthAnchor.constraint(equalToConstant: 220),
-            main.topAnchor.constraint(equalTo: root.topAnchor),
-            main.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            main.leadingAnchor.constraint(equalTo: side.trailingAnchor),
-            main.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-        ])
-        window.contentView = root
-        window.center()
+        main.spacing = 12
+        main.edgeInsets = NSEdgeInsets(top: 16, left: 20, bottom: 16, right: 20)
+        for v in main.arrangedSubviews { v.widthAnchor.constraint(equalTo: main.widthAnchor, constant: -40).isActive = true }
+        window.contentView = main
+        window.initialFirstResponder = connections.outline
+        if !window.setFrameUsingName(window.frameAutosaveName) { window.center() }
+        DispatchQueue.main.async { split.setPosition(split.bounds.width / 2, ofDividerAt: 0) }
     }
 
     // MARK: - Connections
 
-    /// Lists the connections and selects `id` (or keeps the selection).
+    /// Selects connection `id` (or keeps the selection).
     func reloadConnections(select id: UUID? = nil) {
-        let keep = id ?? selected?.id
-        configs = environment.connections()
-        connectionList.reloadData()
-        if let keep, let i = configs.firstIndex(where: { $0.id == keep }) {
-            connectionList.selectRowIndexes([i], byExtendingSelection: false)
-            connectionList.scrollRowToVisible(i)
-        } else if selected == nil {
-            connectionChanged()
-        }
+        connections.reload(select: id)
     }
 
-    func numberOfRows(in tableView: NSTableView) -> Int {
-        tableView === connectionList ? configs.count : 0
-    }
-
-    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        guard tableView === connectionList else { return nil }
-        let c = configs[row]
-        let name = NSTextField(labelWithString: c.displayName)
-        name.font = .systemFont(ofSize: 13)
-        name.lineBreakMode = .byTruncatingTail
-        let detail = NSTextField(labelWithString: c.summary)
-        detail.font = .systemFont(ofSize: 11)
-        detail.textColor = .secondaryLabelColor
-        detail.lineBreakMode = .byTruncatingTail
-        let stack = NSStackView(views: [name, detail])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 1
-        return stack
-    }
-
-    func tableViewSelectionDidChange(_ notification: Notification) {
-        guard (notification.object as? NSTableView) === connectionList else { return }
-        connectionChanged()
-    }
-
-    private func connectionChanged() {
+    private func connectionSelectionChanged() {
+        let config = connections.selectedConnection
+        guard config?.id != selected?.id || (config != nil && session == nil && loadTask == nil) else { return }
         loadTask?.cancel()
+        loadTask = nil
         let old = session
         session = nil
         if let old { Task { await old.close() } }
@@ -218,24 +202,26 @@ class ToolWindowController: NSWindowController, NSTableViewDataSource, NSTableVi
         login = nil
         serverMajor = nil
         serverIsMariaDB = false
-        selected = configs[safe: connectionList.selectedRow]
+        selected = config
+        reloadDatabases()
         selectionDidChange()
-        guard let config = selected else { return }
-        showStatus("Connecting to \(config.displayName)…", error: false)
+        guard let config else { return }
+        showDatabaseNote("Connecting to \(config.displayName)…")
         loadTask = Task {
+            defer { if selected?.id == config.id { loadTask = nil } }
             guard let login = await environment.login(config, window) else {
-                showStatus("Not connected.", error: false)
+                if selected?.id == config.id { showDatabaseNote("Not connected.") }
                 return
             }
             do {
                 let session = try await ConnectionFactory.open(config, password: login.password, ssh: login.ssh)
-                if Task.isCancelled {
+                guard !Task.isCancelled, selected?.id == config.id else {
                     await session.close()
                     return
                 }
                 let list = try await ServerInfo.databases(session)
                 let (major, maria) = ServerInfo.version(session)
-                guard selected?.id == config.id else {
+                guard !Task.isCancelled, selected?.id == config.id else {
                     await session.close()
                     return
                 }
@@ -244,10 +230,14 @@ class ToolWindowController: NSWindowController, NSTableViewDataSource, NSTableVi
                 databases = list
                 serverMajor = major
                 serverIsMariaDB = maria
-                showStatus("", error: false)
+                let wanted = preferredDatabase ?? (config.database.isEmpty ? nil : config.database)
+                preferredDatabase = nil
+                reloadDatabases(select: wanted)
                 databasesDidLoad()
             } catch {
-                if !Task.isCancelled { showStatus("Couldn't connect: \((error as? DatabaseError)?.message ?? error.localizedDescription)", error: true) }
+                if !Task.isCancelled, selected?.id == config.id {
+                    showDatabaseNote("Couldn't connect: \((error as? DatabaseError)?.message ?? error.localizedDescription)", error: true)
+                }
             }
         }
     }
@@ -255,6 +245,7 @@ class ToolWindowController: NSWindowController, NSTableViewDataSource, NSTableVi
     /// Subclasses refresh their forms.
     func selectionDidChange() {}
     func databasesDidLoad() {}
+    func refresh() {}
     func start() {}
 
     var family: DumpTool.Family? {
@@ -262,79 +253,181 @@ class ToolWindowController: NSWindowController, NSTableViewDataSource, NSTableVi
         return selected.driver == .postgres ? .postgres : .mysql
     }
 
+    // MARK: - Databases
+
+    var selectedDatabase: String? { shownDatabases[safe: databaseTable.selectedRow] }
+
+    /// Selects a database by name. For the dev harness too.
+    func select(database name: String) {
+        if !shownDatabases.contains(name) { databaseSearch.stringValue = "" }
+        reloadDatabases(select: name)
+    }
+
+    /// Adds a database the window just created and selects it.
+    func added(database name: String) {
+        if !databases.contains(name) {
+            databases.append(name)
+            databases.sort { $0.localizedStandardCompare($1) == .orderedAscending }
+        }
+        select(database: name)
+    }
+
+    private func reloadDatabases(select name: String? = nil) {
+        let keep = name ?? selectedDatabase
+        let query = databaseSearch.stringValue.trimmingCharacters(in: .whitespaces)
+        shownDatabases = query.isEmpty ? databases : databases.filter { $0.localizedCaseInsensitiveContains(query) }
+        databaseTable.reloadData()
+        if let keep, let row = shownDatabases.firstIndex(of: keep) {
+            databaseTable.selectRowIndexes([row], byExtendingSelection: false)
+            databaseTable.scrollRowToVisible(row)
+        } else {
+            databaseTable.deselectAll(nil)
+        }
+        if selected == nil {
+            showDatabaseNote("")
+        } else if session != nil {
+            showDatabaseNote(shownDatabases.isEmpty ? (query.isEmpty ? "No databases." : "Nothing matches “\(query)”.") : "")
+        }
+        refresh()
+    }
+
+    private func showDatabaseNote(_ text: String, error: Bool = false) {
+        databaseNote.stringValue = text
+        databaseNote.textColor = error ? .systemRed : .secondaryLabelColor
+        databaseNote.isHidden = text.isEmpty
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int { shownDatabases.count }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        let cell = tableView.makeView(withIdentifier: DatabaseCell.identifier, owner: nil) as? DatabaseCell ?? DatabaseCell()
+        cell.textField?.stringValue = shownDatabases[row]
+        return cell
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) { refresh() }
+
+    func controlTextDidChange(_ obj: Notification) {
+        if obj.object as? NSSearchField === connectionSearch {
+            connections.query = connectionSearch.stringValue
+        } else if obj.object as? NSSearchField === databaseSearch {
+            reloadDatabases()
+        } else if obj.object as? NSTokenField === tokenField {
+            tokensChanged(normalize: false)
+        }
+    }
+
+    func controlTextDidEndEditing(_ obj: Notification) {
+        if obj.object as? NSTokenField === tokenField { tokensChanged(normalize: true) }
+    }
+
+    // MARK: - Options as tokens
+
+    /// The flags Add Option offers.
+    func fillOptionMenu(_ flags: [String]) {
+        while addOptionMenu.numberOfItems > 1 { addOptionMenu.removeItem(at: 1) }
+        for flag in flags {
+            let item = addOptionMenu.menu!.addItem(withTitle: flag, action: #selector(addOption(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = flag
+        }
+        addOptionMenu.isEnabled = !flags.isEmpty
+    }
+
+    @objc private func addOption(_ sender: NSMenuItem) {
+        guard let flag = sender.representedObject as? String else { return }
+        var tokens = currentTokens
+        if !tokens.contains(flag) { tokens.append(flag) }
+        tokenField.objectValue = tokens
+        tokensChanged(normalize: true)
+    }
+
+    var currentTokens: [String] {
+        ((tokenField.objectValue as? [Any]) ?? []).map { "\($0)".trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+    }
+
+    /// The tokens changed: subclasses read them into their options (throwing on a bad quote),
+    /// and `normalize` shows them again as the options give them.
+    func tokensChanged(normalize: Bool) {
+        do {
+            try apply(tokens: currentTokens)
+            optionsNote.isHidden = true
+            if normalize { tokenField.objectValue = tokens() }
+        } catch {
+            optionsNote.stringValue = (error as? DatabaseError)?.message ?? error.localizedDescription
+            optionsNote.isHidden = false
+        }
+        refresh()
+    }
+
+    var tokensAreValid: Bool { optionsNote.isHidden }
+
+    func apply(tokens: [String]) throws {}
+    func tokens() -> [String] { [] }
+
+    // MARK: - Tool
+
     /// Shows which tool runs, or why none can.
     func show(tool: ToolInfo?, warning: String?, missing: String) {
         if let tool {
-            toolLabel.stringValue = "\(tool.tool.rawValue) \(tool.versionString)\(tool.isMariaDB ? " (MariaDB)" : "") — \(tool.path)"
-                + (warning.map { "\n" + $0 } ?? "")
+            toolLabel.stringValue = "\(tool.tool.rawValue) \(tool.versionString)\(tool.isMariaDB ? " (MariaDB)" : "")" + (warning.map { " — " + $0 } ?? "")
+            toolLabel.toolTip = tool.path + (warning.map { "\n" + $0 } ?? "")
             toolLabel.textColor = warning == nil ? .secondaryLabelColor : .systemOrange
         } else {
             toolLabel.stringValue = missing
+            toolLabel.toolTip = missing
             toolLabel.textColor = .systemRed
         }
+        offerLocations(tool == nil || warning != nil)
+    }
+
+    /// Settings ▸ Locations is offered when a tool is missing or not the right one.
+    func offerLocations(_ shown: Bool) { locationsButton.isHidden = !shown }
+
+    func clearTool() {
+        toolLabel.stringValue = ""
+        toolLabel.toolTip = nil
+        locationsButton.isHidden = true
     }
 
     // MARK: - Running
 
     var isRunning: Bool { runTask != nil }
 
-    func appendLog(_ line: String) {
-        let storage = logView.textStorage!
-        let atEnd = logView.visibleRect.maxY >= logView.bounds.maxY - 4
-        storage.append(NSAttributedString(string: line + "\n", attributes: [
-            .font: logView.font ?? .monospacedSystemFont(ofSize: 10.5, weight: .regular),
-            .foregroundColor: line.hasPrefix("$ ") ? NSColor.labelColor : NSColor.secondaryLabelColor,
-        ]))
-        // Keep the log from growing without bound on chatty tools.
-        if storage.length > 400_000 { storage.deleteCharacters(in: NSRange(location: 0, length: storage.length - 300_000)) }
-        if atEnd { logView.scrollToEndOfDocument(nil) }
-    }
-
-    func began() {
-        startButton.isEnabled = false
-        stopButton.isHidden = false
-        revealButton.isHidden = true
-        connectionList.isEnabled = false
-        logView.string = ""
-    }
-
-    func ended(_ result: Result<Void, any Error>, success: String) {
-        runTask = nil
-        stopButton.isHidden = true
-        connectionList.isEnabled = true
-        switch result {
-        case .success:
-            showStatus(success, error: false)
-            revealButton.isHidden = revealURLs.isEmpty
-        case .failure(let error):
-            if error is CancellationError {
-                showStatus("Stopped.", error: false)
-            } else {
-                showStatus((error as? DatabaseError)?.message.split(separator: "\n").first.map(String.init) ?? error.localizedDescription, error: true)
-                appendLog((error as? DatabaseError)?.message ?? error.localizedDescription)
-            }
+    /// Shows the log sheet and runs `body` with a way to log to it; `success` is the sheet's last
+    /// line when it works, `reveal` a file to offer in the Finder.
+    func run(title: String, success: @escaping () -> String, reveal: URL? = nil,
+             _ body: @escaping (@escaping @Sendable (String) -> Void) async throws -> Void) {
+        guard let window, !isRunning else { return }
+        let sheet = ToolRunSheet(title: title)
+        runSheet = sheet
+        sheet.onStop = { [weak self] in self?.runTask?.cancel() }
+        sheet.onDone = { [weak self, weak window] in
+            if let s = self?.runSheet?.sheet { window?.endSheet(s) }
+            self?.runSheet = nil
         }
+        window.beginSheet(sheet.sheet)
         refresh()
-        onFinish?(result)
-    }
-
-    func refresh() {}
-
-    func showStatus(_ text: String, error: Bool) {
-        status.stringValue = text
-        status.toolTip = text
-        status.textColor = error ? .systemRed : .secondaryLabelColor
-    }
-
-    @objc private func startClicked(_ sender: Any?) { start() }
-
-    @objc private func stopClicked(_ sender: Any?) { runTask?.cancel() }
-
-    @objc private func reveal(_ sender: Any?) {
-        if !revealURLs.isEmpty { NSWorkspace.shared.activateFileViewerSelecting(revealURLs) }
+        runTask = Task {
+            let result: Result<Void, any Error>
+            do {
+                try await body { line in Task { @MainActor in sheet.append(line) } }
+                result = .success(())
+            } catch {
+                result = .failure(error)
+            }
+            // Lines the tool printed last are still on their way to the main actor.
+            await Task.yield()
+            runTask = nil
+            sheet.finish(result, success: success(), reveal: reveal)
+            refresh()
+            onFinish?(result)
+        }
     }
 
     @objc private func showLocations(_ sender: Any?) { environment.showLocations() }
+
+    @objc func startClicked(_ sender: Any?) { start() }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         guard isRunning else { return true }
@@ -343,9 +436,10 @@ class ToolWindowController: NSWindowController, NSTableViewDataSource, NSTableVi
         alert.informativeText = "The tool is still running; closing stops it."
         alert.addButton(withTitle: "Stop and Close")
         alert.addButton(withTitle: "Cancel")
-        alert.beginSheetModal(for: sender) { [weak self] response in
+        alert.beginSheetModal(for: runSheet?.sheet ?? sender) { [weak self] response in
             guard response == .alertFirstButtonReturn else { return }
             self?.runTask?.cancel()
+            self?.runSheet?.onDone()
             sender.close()
         }
         return false
@@ -353,159 +447,189 @@ class ToolWindowController: NSWindowController, NSTableViewDataSource, NSTableVi
 
     func windowWillClose(_ notification: Notification) {
         loadTask?.cancel()
+        loadTask = nil
         if let session { Task { await session.close() } }
         session = nil
         selected = nil
-        connectionList.deselectAll(nil)
+        databases = []
+        connections.outline.deselectAll(nil)
     }
 
-    // MARK: - Form helpers
+    static func popup(_ titles: [String], _ target: AnyObject, _ action: Selector) -> NSPopUpButton {
+        let p = NSPopUpButton()
+        p.addItems(withTitles: titles)
+        p.target = target
+        p.action = action
+        return p
+    }
+}
 
-    static func checkbox(_ title: String, _ target: AnyObject, _ action: Selector) -> NSButton {
-        NSButton(checkboxWithTitle: title, target: target, action: action)
+/// A database in the list: a cylinder and its name.
+private final class DatabaseCell: NSTableCellView {
+    static let identifier = NSUserInterfaceItemIdentifier("ToolDatabaseCell")
+
+    init() {
+        super.init(frame: .zero)
+        identifier = Self.identifier
+        let glyph = NSImageView(image: NSImage(systemSymbolName: "cylinder", accessibilityDescription: nil)!)
+        glyph.symbolConfiguration = .init(pointSize: 12, weight: .regular)
+        glyph.contentTintColor = .controlAccentColor
+        let name = NSTextField(labelWithString: "")
+        name.lineBreakMode = .byTruncatingTail
+        name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let row = NSStackView(views: [glyph, name])
+        row.spacing = 6
+        row.edgeInsets = NSEdgeInsets(top: 0, left: 6, bottom: 0, right: 4)
+        addSubview(row)
+        row.pin(to: self)
+        textField = name
+        imageView = glyph
     }
 
-    static func grid(_ rows: [(String, NSView)]) -> NSGridView {
-        let grid = NSGridView(views: rows.map { [$0.0.isEmpty ? NSGridCell.emptyContentView : NSTextField(labelWithString: $0.0), $0.1] })
-        grid.rowSpacing = 7
-        grid.columnSpacing = 8
-        grid.column(at: 0).xPlacement = .trailing
-        grid.column(at: 0).width = 110
-        grid.rowAlignment = .firstBaseline
-        return grid
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+}
+
+/// The sheet a run shows: what's running, the command and every line the tool prints, and Stop;
+/// then how it ended, with Done (and Show in Finder after a backup).
+@MainActor
+final class ToolRunSheet: NSObject {
+    let sheet: NSWindow
+    private let titleLabel = NSTextField(labelWithString: "")
+    private let spinner = NSProgressIndicator()
+    let logView = NSTextView()
+    private let stopButton = NSButton(title: "Stop", target: nil, action: nil)
+    private let revealButton = NSButton(title: "Show in Finder", target: nil, action: nil)
+    private let doneButton = NSButton(title: "Done", target: nil, action: nil)
+    private var reveal: URL?
+    var onStop: () -> Void = {}
+    var onDone: () -> Void = {}
+    private(set) var finished = false
+
+    init(title: String) {
+        sheet = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 340), styleMask: [.titled, .resizable], backing: .buffered, defer: true)
+        sheet.minSize = NSSize(width: 460, height: 260)
+        super.init()
+        titleLabel.stringValue = title
+        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        titleLabel.lineBreakMode = .byTruncatingMiddle
+        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        spinner.startAnimation(nil)
+
+        logView.isEditable = false
+        logView.isRichText = false
+        logView.font = .monospacedSystemFont(ofSize: 10.5, weight: .regular)
+        logView.textContainerInset = NSSize(width: 4, height: 4)
+        logView.isVerticallyResizable = true
+        logView.autoresizingMask = [.width]
+        logView.textContainer?.widthTracksTextView = true
+        let scroll = NSScrollView()
+        scroll.documentView = logView
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+        scroll.setContentHuggingPriority(.init(1), for: .vertical)
+
+        stopButton.target = self
+        stopButton.action = #selector(stop(_:))
+        revealButton.target = self
+        revealButton.action = #selector(showInFinder(_:))
+        revealButton.isHidden = true
+        doneButton.target = self
+        doneButton.action = #selector(done(_:))
+        doneButton.isHidden = true
+
+        let top = NSStackView(views: [titleLabel, spinner])
+        top.spacing = 8
+        let buttons = NSStackView(views: [NSView(), revealButton, stopButton, doneButton])
+        let main = NSStackView(views: [top, scroll, buttons])
+        main.orientation = .vertical
+        main.alignment = .leading
+        main.spacing = 10
+        main.edgeInsets = NSEdgeInsets(top: 16, left: 18, bottom: 16, right: 18)
+        for v in [scroll, buttons] { v.widthAnchor.constraint(equalTo: main.widthAnchor, constant: -36).isActive = true }
+        sheet.contentView = main
     }
+
+    func append(_ line: String, color: NSColor? = nil) {
+        let storage = logView.textStorage!
+        let atEnd = logView.visibleRect.maxY >= logView.bounds.maxY - 4
+        storage.append(NSAttributedString(string: line + "\n", attributes: [
+            .font: logView.font ?? .monospacedSystemFont(ofSize: 10.5, weight: .regular),
+            .foregroundColor: color ?? (line.hasPrefix("$ ") ? NSColor.labelColor : NSColor.secondaryLabelColor),
+        ]))
+        // Keep the log from growing without bound on chatty tools.
+        if storage.length > 400_000 { storage.deleteCharacters(in: NSRange(location: 0, length: storage.length - 300_000)) }
+        if atEnd { logView.scrollToEndOfDocument(nil) }
+    }
+
+    func finish(_ result: Result<Void, any Error>, success: String, reveal: URL?) {
+        finished = true
+        spinner.stopAnimation(nil)
+        spinner.isHidden = true
+        stopButton.isHidden = true
+        doneButton.isHidden = false
+        doneButton.keyEquivalent = "\r"
+        switch result {
+        case .success:
+            append(success, color: .labelColor)
+            self.reveal = reveal
+            revealButton.isHidden = reveal == nil
+        case .failure(let error) where error is CancellationError:
+            append("Stopped.", color: .labelColor)
+        case .failure(let error):
+            append((error as? DatabaseError)?.message ?? error.localizedDescription, color: .systemRed)
+        }
+        logView.scrollToEndOfDocument(nil)
+    }
+
+    @objc private func stop(_ sender: Any?) {
+        stopButton.isEnabled = false
+        onStop()
+    }
+
+    @objc private func showInFinder(_ sender: Any?) {
+        if let reveal { NSWorkspace.shared.activateFileViewerSelecting([reveal]) }
+    }
+
+    @objc private func done(_ sender: Any?) { onDone() }
 }
 
 // MARK: - Backup
 
-/// File ▸ Backup… (and the welcome window): one or more databases of a saved connection, each
-/// to its own file, with pg_dump or mysqldump.
+/// File ▸ Backup… (and the welcome window): one database of a saved connection to a file, with
+/// pg_dump or mysqldump.
 @MainActor
 final class BackupWindowController: ToolWindowController {
-    private var chosen = Set<String>()
     private var options = BackupOptions()
-    private var pattern = FileNamePattern.backup
     private var tool: ToolInfo?
-    /// The database to tick when the list loads (File ▸ Backup… from a workspace).
-    var preferredDatabase: String?
 
-    private let databaseTable = NSTableView()
-    private let formatPopup = NSPopUpButton()
-    private let contentPopup = NSPopUpButton()
+    let fileName = FileNamePatternRow(pattern: UserDefaults.standard.string(forKey: "Backup.pattern") ?? FileNamePattern.backup,
+                                      defaultPattern: FileNamePattern.backup,
+                                      tokens: FileNamePattern.tokens.filter { $0.placeholder != "{table}" })
+    private var formatPopup: NSPopUpButton!
+    private var contentPopup: NSPopUpButton!
     private let gzipBox = NSButton(checkboxWithTitle: "Compress with gzip", target: nil, action: nil)
-    private let noOwnerBox = NSButton(checkboxWithTitle: "No owner", target: nil, action: nil)
-    private let noPrivilegesBox = NSButton(checkboxWithTitle: "No privileges", target: nil, action: nil)
-    private let cleanBox = NSButton(checkboxWithTitle: "DROP before CREATE", target: nil, action: nil)
-    private let createBox = NSButton(checkboxWithTitle: "CREATE DATABASE", target: nil, action: nil)
-    private let singleTransactionBox = NSButton(checkboxWithTitle: "Single transaction", target: nil, action: nil)
-    private let routinesBox = NSButton(checkboxWithTitle: "Routines", target: nil, action: nil)
-    private let triggersBox = NSButton(checkboxWithTitle: "Triggers", target: nil, action: nil)
-    private let eventsBox = NSButton(checkboxWithTitle: "Events", target: nil, action: nil)
-    private let dropTableBox = NSButton(checkboxWithTitle: "DROP TABLE", target: nil, action: nil)
-    private let otherField = NSTextField()
-    private let patternField = NSTextField()
-    private let patternMenu = NSPopUpButton(frame: .zero, pullsDown: true)
-    private let namesLabel = NSTextField(labelWithString: "")
-    private var postgresRow: NSView!
-    private var mysqlRow: NSView!
+    private let startButton = NSButton(title: "Back Up…", target: nil, action: nil)
 
     init(environment: ToolWindowEnvironment) {
-        super.init(title: "Backup", environment: environment)
-        startButton.title = "Back Up…"
-        pattern = UserDefaults.standard.string(forKey: "Backup.pattern") ?? FileNamePattern.backup
+        super.init(title: "Back Up Database", autosave: "BackupWindow", environment: environment)
+        fileName.preview = { [weak self] in self?.fileName(for: $0) ?? $0 }
+        fileName.onChange = { [weak self] in if let p = self?.fileName.pattern { UserDefaults.standard.set(p, forKey: "Backup.pattern") } }
+        let header = NSStackView(views: [NSTextField(labelWithString: "File name:"), fileName])
+        header.alignment = .firstBaseline
+        header.spacing = 8
 
-        let column = NSTableColumn(identifier: .init("db"))
-        databaseTable.addTableColumn(column)
-        databaseTable.headerView = nil
-        databaseTable.rowSizeStyle = .small
-        databaseTable.usesAlternatingRowBackgroundColors = true
-        databaseTable.dataSource = self
-        databaseTable.delegate = self
-        let dbScroll = NSScrollView()
-        dbScroll.documentView = databaseTable
-        dbScroll.hasVerticalScroller = true
-        dbScroll.borderType = .bezelBorder
-        dbScroll.heightAnchor.constraint(equalToConstant: 120).isActive = true
-        let dbLabel = NSTextField(labelWithString: "Databases")
-        dbLabel.font = .systemFont(ofSize: 11, weight: .medium)
-
-        formatPopup.addItems(withTitles: BackupOptions.PostgresFormat.allCases.map(\.title))
-        contentPopup.addItems(withTitles: BackupOptions.Content.allCases.map(\.title))
-        for c in [formatPopup, contentPopup] as [NSControl] + [gzipBox, noOwnerBox, noPrivilegesBox, cleanBox, createBox, singleTransactionBox,
-                                                           routinesBox, triggersBox, eventsBox, dropTableBox] {
-            c.target = self
-            c.action = #selector(optionChanged(_:))
-        }
-        otherField.placeholderString = "More options for the tool, e.g. --exclude-table=logs"
-        otherField.target = self
-        otherField.action = #selector(optionChanged(_:))
-        otherField.delegate = self
-        patternField.delegate = self
-        patternField.widthAnchor.constraint(equalToConstant: 260).isActive = true
-        patternMenu.addItem(withTitle: "Insert")
-        patternMenu.controlSize = .small
-        for token in FileNamePattern.tokens where token.placeholder != "{table}" {
-            let item = patternMenu.menu!.addItem(withTitle: "\(token.title)  \(token.placeholder)", action: #selector(insertToken(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = token.placeholder
-        }
-        namesLabel.font = .systemFont(ofSize: 11)
-        namesLabel.textColor = .secondaryLabelColor
-        namesLabel.lineBreakMode = .byTruncatingTail
-
-        func row(_ views: NSView...) -> NSStackView {
-            let s = NSStackView(views: views)
-            s.spacing = 12
-            return s
-        }
-        postgresRow = row(noOwnerBox, noPrivilegesBox, cleanBox, createBox)
-        mysqlRow = row(singleTransactionBox, routinesBox, triggersBox, eventsBox, dropTableBox, createBox)
-        let optionsStack = NSStackView(views: [postgresRow, mysqlRow])
-        optionsStack.orientation = .vertical
-        optionsStack.alignment = .leading
-        let form = Self.grid([
-            ("Format", formatPopup),
-            ("Content", row(contentPopup, gzipBox)),
-            ("Include", optionsStack),
-            ("Other options", otherField),
-            ("File name", row(patternField, patternMenu)),
-            ("", namesLabel),
-        ])
-        build(top: [dbLabel, dbScroll], options: form)
+        formatPopup = Self.popup(BackupOptions.PostgresFormat.allCases.map(\.title), self, #selector(optionChanged(_:)))
+        contentPopup = Self.popup(BackupOptions.Content.allCases.map(\.title), self, #selector(optionChanged(_:)))
+        gzipBox.target = self
+        gzipBox.action = #selector(optionChanged(_:))
+        startButton.target = self
+        startButton.action = #selector(startClicked(_:))
+        startButton.keyEquivalent = "\r"
+        build(header: header, options: [formatPopup, contentPopup, gzipBox], buttons: [startButton])
         loadOptions()
-    }
-
-    // MARK: Lists
-
-    override func numberOfRows(in tableView: NSTableView) -> Int {
-        tableView === databaseTable ? databases.count : super.numberOfRows(in: tableView)
-    }
-
-    override func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        guard tableView === databaseTable else { return super.tableView(tableView, viewFor: tableColumn, row: row) }
-        let name = databases[row]
-        let box = NSButton(checkboxWithTitle: name, target: self, action: #selector(databaseToggled(_:)))
-        box.state = chosen.contains(name) ? .on : .off
-        box.tag = row
-        return box
-    }
-
-    override func tableViewSelectionDidChange(_ notification: Notification) {
-        if (notification.object as? NSTableView) === databaseTable { return }
-        super.tableViewSelectionDidChange(notification)
-    }
-
-    @objc private func databaseToggled(_ sender: NSButton) {
-        guard databases.indices.contains(sender.tag) else { return }
-        if sender.state == .on { chosen.insert(databases[sender.tag]) } else { chosen.remove(databases[sender.tag]) }
-        refresh()
-    }
-
-    /// Ticks exactly these databases. For the dev harness.
-    func choose(_ names: Set<String>) {
-        chosen = names.intersection(databases)
-        databaseTable.reloadData()
-        refresh()
     }
 
     // MARK: Options
@@ -519,232 +643,140 @@ final class BackupWindowController: ToolWindowController {
         } else {
             options = BackupOptions()
         }
+        fillOptionMenu(family.map(ToolFlags.backupMenu) ?? [])
+        showOptions()
+    }
+
+    /// Puts the options into the controls.
+    private func showOptions() {
         formatPopup.selectItem(at: BackupOptions.PostgresFormat.allCases.firstIndex(of: options.postgresFormat) ?? 0)
         contentPopup.selectItem(at: BackupOptions.Content.allCases.firstIndex(of: options.content) ?? 0)
         gzipBox.state = options.gzip ? .on : .off
-        noOwnerBox.state = options.noOwner ? .on : .off
-        noPrivilegesBox.state = options.noPrivileges ? .on : .off
-        cleanBox.state = options.clean ? .on : .off
-        createBox.state = options.createDatabase ? .on : .off
-        singleTransactionBox.state = options.singleTransaction ? .on : .off
-        routinesBox.state = options.routines ? .on : .off
-        triggersBox.state = options.triggers ? .on : .off
-        eventsBox.state = options.events ? .on : .off
-        dropTableBox.state = options.addDropTable ? .on : .off
-        otherField.stringValue = options.otherArguments
-        patternField.stringValue = pattern
+        tokenField.objectValue = tokens()
+        optionsNote.isHidden = true
         refresh()
     }
 
-    private func readOptions() {
-        options.postgresFormat = BackupOptions.PostgresFormat.allCases[max(0, formatPopup.indexOfSelectedItem)]
-        options.content = BackupOptions.Content.allCases[max(0, contentPopup.indexOfSelectedItem)]
-        options.gzip = gzipBox.state == .on
-        options.noOwner = noOwnerBox.state == .on
-        options.noPrivileges = noPrivilegesBox.state == .on
-        options.clean = cleanBox.state == .on
-        options.createDatabase = createBox.state == .on
-        options.singleTransaction = singleTransactionBox.state == .on
-        options.routines = routinesBox.state == .on
-        options.triggers = triggersBox.state == .on
-        options.events = eventsBox.state == .on
-        options.addDropTable = dropTableBox.state == .on
-        options.otherArguments = otherField.stringValue
-        let typed = patternField.stringValue.trimmingCharacters(in: .whitespaces)
-        pattern = typed.isEmpty ? FileNamePattern.backup : typed
+    override func tokens() -> [String] { family.map(options.tokens) ?? [] }
+
+    override func apply(tokens: [String]) throws {
+        guard let family else { return }
+        let before = (options.postgresFormat, options.content)
+        try options.setTokens(tokens, family)
+        // A format or content typed as a token moves to its popup.
+        if before != (options.postgresFormat, options.content) { showOptions() }
     }
 
     private func saveOptions() {
         if let key = optionsKey, let data = try? JSONEncoder().encode(options) { UserDefaults.standard.set(data, forKey: key) }
-        UserDefaults.standard.set(pattern, forKey: "Backup.pattern")
     }
 
     @objc private func optionChanged(_ sender: Any?) {
-        readOptions()
+        options.postgresFormat = BackupOptions.PostgresFormat.allCases[max(0, formatPopup.indexOfSelectedItem)]
+        options.content = BackupOptions.Content.allCases[max(0, contentPopup.indexOfSelectedItem)]
+        options.gzip = gzipBox.state == .on
         refresh()
     }
 
-    @objc private func insertToken(_ sender: NSMenuItem) {
-        guard let token = sender.representedObject as? String else { return }
-        if let editor = patternField.currentEditor() { editor.insertText(token) } else { patternField.stringValue += token }
-        optionChanged(nil)
+    /// The name a pattern gives the selected database (placeholder names before one is chosen).
+    private func fileName(for pattern: String) -> String {
+        let database = selectedDatabase ?? "database"
+        let name = FileNamePattern(pattern).render(.init(database: database, connection: selected?.displayName ?? "connection",
+                                                         tag: selected?.tag?.rawValue ?? ""), fallback: database)
+        let ext = options.fileExtension(family ?? .postgres)
+        return ext.isEmpty ? name : "\(name).\(ext)"
     }
 
-    override func selectionDidChange() {
-        chosen = []
-        databaseTable.reloadData()
-        loadOptions()
-    }
+    override func selectionDidChange() { loadOptions() }
 
-    override func databasesDidLoad() {
-        if let wanted = preferredDatabase, databases.contains(wanted) {
-            chosen = [wanted]
-            preferredDatabase = nil
-        } else if let db = selected?.database, databases.contains(db) {
-            chosen = [db]
-        }
-        databaseTable.reloadData()
-        refresh()
-    }
+    override func databasesDidLoad() { refresh() }
 
     private var job: BackupJob? {
-        guard let selected, let tool, let login else { return nil }
-        let names = databases.filter(chosen.contains)
-        return BackupJob(config: selected, password: login.password, ssh: login.ssh, databases: names, options: options,
-                         tool: tool, serverIsMariaDB: serverIsMariaDB, pattern: FileNamePattern(pattern))
+        guard let selected, let tool, let login, let database = selectedDatabase else { return nil }
+        return BackupJob(config: selected, password: login.password, ssh: login.ssh, database: database, options: options,
+                         tool: tool, serverIsMariaDB: serverIsMariaDB)
     }
 
     override func refresh() {
-        guard let selected, let family else {
-            titleLabel.stringValue = "Back Up"
-            toolLabel.stringValue = ""
-            commandView.stringValue = ""
-            namesLabel.stringValue = ""
+        fileName.refresh()
+        guard let family else {
+            clearTool()
             startButton.isEnabled = false
             return
         }
-        titleLabel.stringValue = "Back Up \(selected.displayName)"
         let isPostgres = family == .postgres
-        formatPopup.isEnabled = isPostgres
-        postgresRow.isHidden = !isPostgres
-        mysqlRow.isHidden = isPostgres
+        formatPopup.isHidden = !isPostgres
+        // pg_dump compresses its archives itself; gzip is for scripts.
         gzipBox.isEnabled = !isPostgres || options.postgresFormat == .plain
-        cleanBox.isEnabled = options.content != .dataOnly
-        let role: ToolLocator.Role = isPostgres ? .backupPostgres : .backupMySQL
-        let (found, warning) = environment.locator().choose(role, serverMajor: serverMajor, mariaDBServer: serverIsMariaDB)
-        tool = found
-        show(tool: found, warning: warning, missing: isPostgres
-            ? "pg_dump wasn't found on PATH, in the usual install folders (Homebrew, Postgres.app) or in the folder set in Settings ▸ Locations."
-            : "mysqldump wasn't found on PATH, in the usual install folders (Homebrew, MySQL's installer) or in the folder set in Settings ▸ Locations.")
-        if let job, !job.databases.isEmpty {
-            let names = job.fileNames()
-            namesLabel.stringValue = names.prefix(3).joined(separator: ", ") + (names.count > 3 ? ", …" : "")
-            commandView.stringValue = (try? job.previewCommand(folder: URL(filePath: "…"))) ?? ""
+        if login != nil {
+            let (found, warning) = environment.locator().choose(isPostgres ? .backupPostgres : .backupMySQL, serverMajor: serverMajor,
+                                                                mariaDBServer: serverIsMariaDB)
+            tool = found
+            show(tool: found, warning: warning, missing: isPostgres
+                ? "pg_dump wasn't found on PATH, in the usual install folders or in the folder set in Settings ▸ Locations."
+                : "mysqldump wasn't found on PATH, in the usual install folders or in the folder set in Settings ▸ Locations.")
         } else {
-            namesLabel.stringValue = ""
-            commandView.stringValue = login == nil ? "" : "No database is ticked."
+            tool = nil
+            clearTool()
         }
-        startButton.isEnabled = !isRunning && job.map { !$0.databases.isEmpty } == true
+        startButton.isEnabled = !isRunning && job != nil && tokensAreValid
     }
 
     // MARK: Running
 
     override func start() {
-        guard let window, let job, !job.databases.isEmpty else { return }
-        readOptions()
+        guard let window, let job, tokensAreValid else { return }
         saveOptions()
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = job.fileName(FileNamePattern(fileName.pattern))
         panel.canCreateDirectories = true
-        panel.prompt = "Back Up Here"
-        panel.message = "Choose the folder for the backup\(job.databases.count == 1 ? "" : "s")."
+        panel.isExtensionHidden = false
+        panel.prompt = "Back Up"
+        panel.message = "Back up \(job.database) on \(job.config.displayName)."
         panel.beginSheetModal(for: window) { [weak self] response in
             guard response == .OK, let url = panel.url else { return }
-            self?.run(into: url)
+            // The panel's sheet is still closing; the log sheet goes up after it.
+            DispatchQueue.main.async { self?.run(to: url) }
         }
     }
 
-    /// Backs up the ticked databases into `folder`. The dev harness calls this directly.
-    func run(into folder: URL) {
-        readOptions()
-        guard let job, !job.databases.isEmpty, !isRunning else { return }
+    /// Backs up the selected database to `file`. The dev harness calls this directly.
+    func run(to file: URL) {
+        guard let job, tokensAreValid, !isRunning else { return }
         saveOptions()
-        began()
-        revealURLs = []
-        showStatus("Backing up…", error: false)
-        let names = job.databases
-        runTask = Task {
-            let result: Result<Void, any Error>
-            do {
-                let files = try await job.run(into: folder, log: { line in
-                    Task { @MainActor in self.appendLog(line) }
-                }, started: { i in
-                    Task { @MainActor in self.showStatus("Backing up \(names[i]) (\(i + 1) of \(names.count))…", error: false) }
-                })
-                revealURLs = files
-                result = .success(())
-            } catch {
-                result = .failure(error)
-            }
-            let count = revealURLs.count
-            ended(result, success: "Backed up \(count) database\(count == 1 ? "" : "s") to \(folder.lastPathComponent).")
+        run(title: "Backing up \(job.database) on \(job.config.displayName)",
+            success: { "Backed up \(job.database) to \(file.lastPathComponent)." }, reveal: file) { log in
+            try await job.run(to: file, log: log)
         }
     }
-}
-
-extension BackupWindowController: NSTextFieldDelegate {
-    func controlTextDidChange(_ obj: Notification) { optionChanged(nil) }
 }
 
 // MARK: - Restore
 
 /// File ▸ Restore… (and the welcome window): a backup file into a database of a saved
-/// connection, existing or created first, with pg_restore, psql or mysql.
+/// connection, with pg_restore, psql or mysql. The database is chosen (or created) first, the
+/// file when it starts.
 @MainActor
 final class RestoreWindowController: ToolWindowController {
     private var options = RestoreOptions()
-    private(set) var file: URL?
-    private var kind: BackupFileKind?
-    private var tool: ToolInfo?
-    var preferredDatabase: String?
-
-    private let fileLabel = NSTextField(labelWithString: "No file chosen")
-    private let kindLabel = NSTextField(labelWithString: "")
-    private let existingRadio = NSButton(radioButtonWithTitle: "Existing database", target: nil, action: nil)
-    private let newRadio = NSButton(radioButtonWithTitle: "New database", target: nil, action: nil)
-    private let databasePopup = NSPopUpButton()
-    private let newNameField = NSTextField()
-    private let contentPopup = NSPopUpButton()
-    private let cleanBox = NSButton(checkboxWithTitle: "Drop objects first", target: nil, action: nil)
-    private let noOwnerBox = NSButton(checkboxWithTitle: "No owner", target: nil, action: nil)
-    private let noPrivilegesBox = NSButton(checkboxWithTitle: "No privileges", target: nil, action: nil)
-    private let singleTransactionBox = NSButton(checkboxWithTitle: "Single transaction", target: nil, action: nil)
-    private let stopBox = NSButton(checkboxWithTitle: "Stop at the first error", target: nil, action: nil)
-    private let otherField = NSTextField()
-    private var postgresRow: NSView!
+    private var contentPopup: NSPopUpButton!
+    private let contentNote = NSTextField(wrappingLabelWithString: "For pg_dump archives.")
+    private let newButton = NSButton(title: "New Database…", target: nil, action: nil)
+    private let startButton = NSButton(title: "Restore…", target: nil, action: nil)
+    /// The sheet asking for a new database's name, for the dev harness.
+    private(set) var newDatabaseSheet: NewDatabaseSheet?
 
     init(environment: ToolWindowEnvironment) {
-        super.init(title: "Restore", environment: environment)
-        startButton.title = "Restore…"
-        let choose = NSButton(title: "Choose File…", target: self, action: #selector(chooseFile(_:)))
-        fileLabel.lineBreakMode = .byTruncatingMiddle
-        fileLabel.textColor = .secondaryLabelColor
-        fileLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        kindLabel.textColor = .secondaryLabelColor
-        kindLabel.font = .systemFont(ofSize: 11)
-        for c in [existingRadio, newRadio] {
-            c.target = self
-            c.action = #selector(targetChanged(_:))
-        }
-        existingRadio.state = .on
-        newNameField.placeholderString = "new_database"
-        newNameField.delegate = self
-        newNameField.widthAnchor.constraint(equalToConstant: 180).isActive = true
-        databasePopup.target = self
-        databasePopup.action = #selector(optionChanged(_:))
-        contentPopup.addItems(withTitles: BackupOptions.Content.allCases.map(\.title))
-        for c in [contentPopup] as [NSControl] + [cleanBox, noOwnerBox, noPrivilegesBox, singleTransactionBox, stopBox] {
-            c.target = self
-            c.action = #selector(optionChanged(_:))
-        }
-        otherField.placeholderString = "More options for the tool"
-        otherField.delegate = self
-
-        func row(_ views: NSView...) -> NSStackView {
-            let s = NSStackView(views: views)
-            s.spacing = 12
-            return s
-        }
-        postgresRow = row(cleanBox, noOwnerBox, noPrivilegesBox)
-        let fileRow = row(choose, fileLabel)
-        let form = Self.grid([
-            ("Into", row(existingRadio, databasePopup, newRadio, newNameField)),
-            ("Content", contentPopup),
-            ("Options", NSStackView(views: [postgresRow, row(singleTransactionBox, stopBox)]).vertical()),
-            ("Other options", otherField),
-        ])
-        build(top: [fileRow, kindLabel], options: form)
+        super.init(title: "Restore Database", autosave: "RestoreWindow", environment: environment)
+        contentPopup = Self.popup(BackupOptions.Content.allCases.map(\.title), self, #selector(optionChanged(_:)))
+        contentNote.font = .systemFont(ofSize: 11)
+        contentNote.textColor = .secondaryLabelColor
+        newButton.target = self
+        newButton.action = #selector(newDatabase(_:))
+        startButton.target = self
+        startButton.action = #selector(startClicked(_:))
+        startButton.keyEquivalent = "\r"
+        build(header: nil, options: [contentPopup, contentNote], buttons: [newButton, startButton])
         loadOptions()
     }
 
@@ -757,207 +789,244 @@ final class RestoreWindowController: ToolWindowController {
         } else {
             options = RestoreOptions()
         }
+        fillOptionMenu(family.map(ToolFlags.restoreMenu) ?? [])
+        showOptions()
+    }
+
+    private func showOptions() {
         contentPopup.selectItem(at: BackupOptions.Content.allCases.firstIndex(of: options.content) ?? 0)
-        cleanBox.state = options.clean ? .on : .off
-        noOwnerBox.state = options.noOwner ? .on : .off
-        noPrivilegesBox.state = options.noPrivileges ? .on : .off
-        singleTransactionBox.state = options.singleTransaction ? .on : .off
-        stopBox.state = options.stopOnError ? .on : .off
-        otherField.stringValue = options.otherArguments
+        tokenField.objectValue = tokens()
+        optionsNote.isHidden = true
         refresh()
     }
 
-    private func readOptions() {
-        options.content = BackupOptions.Content.allCases[max(0, contentPopup.indexOfSelectedItem)]
-        options.clean = cleanBox.state == .on
-        options.noOwner = noOwnerBox.state == .on
-        options.noPrivileges = noPrivilegesBox.state == .on
-        options.singleTransaction = singleTransactionBox.state == .on
-        options.stopOnError = stopBox.state == .on
-        options.otherArguments = otherField.stringValue
+    override func tokens() -> [String] { family.map(options.tokens) ?? [] }
+
+    override func apply(tokens: [String]) throws {
+        guard let family else { return }
+        let before = options.content
+        try options.setTokens(tokens, family)
+        if before != options.content { showOptions() }
     }
 
     @objc private func optionChanged(_ sender: Any?) {
-        readOptions()
+        options.content = BackupOptions.Content.allCases[max(0, contentPopup.indexOfSelectedItem)]
         refresh()
     }
 
-    @objc private func targetChanged(_ sender: NSButton) {
-        existingRadio.state = sender === existingRadio ? .on : .off
-        newRadio.state = sender === newRadio ? .on : .off
-        refresh()
-    }
+    override func selectionDidChange() { loadOptions() }
 
-    @objc private func chooseFile(_ sender: Any?) {
-        guard let window else { return }
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.message = "Choose a backup: a pg_dump archive or directory, or a SQL file (plain or .gz)."
-        panel.beginSheetModal(for: window) { [weak self] response in
-            guard response == .OK, let url = panel.url else { return }
-            self?.load(url)
-        }
-    }
-
-    /// For the dev harness too.
-    func load(_ url: URL) {
-        file = url
-        fileLabel.stringValue = (url.path as NSString).abbreviatingWithTildeInPath
-        fileLabel.textColor = .labelColor
-        do {
-            kind = try BackupFileKind.detect(url)
-        } catch {
-            kind = nil
-            showStatus((error as? DatabaseError)?.message ?? error.localizedDescription, error: true)
-        }
-        if newNameField.stringValue.isEmpty {
-            newNameField.stringValue = String(url.deletingPathExtension().deletingPathExtension().lastPathComponent
-                .map { $0.isLetter || $0.isNumber ? $0 : "_" })
-        }
-        refresh()
-    }
-
-    /// Restores into a new database named `name`. For the dev harness.
-    func chooseNewDatabase(_ name: String) {
-        newRadio.state = .on
-        existingRadio.state = .off
-        newNameField.stringValue = name
-        refresh()
-    }
-
-    override func selectionDidChange() {
-        databasePopup.removeAllItems()
-        loadOptions()
-    }
-
-    override func databasesDidLoad() {
-        databasePopup.removeAllItems()
-        databasePopup.addItems(withTitles: databases)
-        if let wanted = preferredDatabase ?? selected?.database, databases.contains(wanted) {
-            databasePopup.selectItem(withTitle: wanted)
-            preferredDatabase = nil
-        }
-        refresh()
-    }
-
-    private var targetDatabase: String {
-        newRadio.state == .on ? newNameField.stringValue.trimmingCharacters(in: .whitespaces) : (databasePopup.titleOfSelectedItem ?? "")
-    }
-
-    private var job: RestoreJob? {
-        guard let selected, let login, let file, let kind, let tool, !targetDatabase.isEmpty else { return nil }
-        return RestoreJob(config: selected, password: login.password, ssh: login.ssh, database: targetDatabase, file: file,
-                          kind: kind, options: options, tool: tool)
-    }
+    override func databasesDidLoad() { refresh() }
 
     override func refresh() {
         guard let selected, let family else {
-            titleLabel.stringValue = "Restore"
-            toolLabel.stringValue = ""
-            commandView.stringValue = ""
+            clearTool()
+            newButton.isEnabled = false
             startButton.isEnabled = false
             return
         }
-        titleLabel.stringValue = "Restore into \(selected.displayName)"
-        databasePopup.isEnabled = existingRadio.state == .on
-        newNameField.isEnabled = newRadio.state == .on
-        kindLabel.stringValue = kind?.title ?? ""
-        tool = nil
-        let isArchive = kind?.isPostgresArchive == true
-        postgresRow.isHidden = !isArchive
-        contentPopup.isEnabled = isArchive
-        singleTransactionBox.isEnabled = family == .postgres
-        if let kind {
-            if let role = RestoreJob.role(for: kind, driver: selected.driver) {
-                let (found, warning) = environment.locator().choose(role, serverMajor: serverMajor, mariaDBServer: serverIsMariaDB)
-                tool = found
-                let name = role == .restorePostgresArchive ? "pg_restore" : role == .restorePostgresScript ? "psql" : "mysql"
-                show(tool: found, warning: warning, missing: "\(name) wasn't found on PATH, in the usual install folders or in the folder set in Settings ▸ Locations.")
-            } else {
-                show(tool: nil, warning: nil, missing: "A \(kind.title) can't be restored into \(selected.driver.displayName).")
-            }
+        // Content picks parts of an archive; scripts run whole.
+        contentPopup.isHidden = family != .postgres
+        contentNote.isHidden = family != .postgres
+        if selected.readOnly {
+            show(tool: nil, warning: nil, missing: "\(selected.displayName) is read-only; nothing can be restored into it.")
+        } else if login != nil {
+            // pg_restore takes archives, psql scripts; either may be missing.
+            let roles: [(ToolLocator.Role, String)] = family == .postgres
+                ? [(.restorePostgresArchive, "pg_restore"), (.restorePostgresScript, "psql")] : [(.restoreMySQL, "mysql")]
+            let found = roles.map { role, name in (name, environment.locator().choose(role, serverMajor: serverMajor, mariaDBServer: serverIsMariaDB)) }
+            let tools = found.compactMap(\.1.0)
+            let missing = found.filter { $0.1.0 == nil }.map(\.0)
+            let warnings = found.compactMap(\.1.1) + missing.map { "\($0) wasn't found on PATH, in the usual install folders or in the folder set in Settings ▸ Locations." }
+            toolLabel.stringValue = (tools.map { "\($0.tool.rawValue) \($0.versionString)" } + warnings).joined(separator: " — ")
+            toolLabel.toolTip = (tools.map(\.path) + warnings).joined(separator: "\n")
+            toolLabel.textColor = tools.isEmpty ? .systemRed : warnings.isEmpty ? .secondaryLabelColor : .systemOrange
+            offerLocations(!warnings.isEmpty)
         } else {
-            toolLabel.stringValue = ""
+            clearTool()
         }
-        if newRadio.state == .on, databases.contains(where: { $0.caseInsensitiveCompare(targetDatabase) == .orderedSame }) {
-            commandView.stringValue = "A database named \(targetDatabase) exists already."
-            startButton.isEnabled = false
-            return
-        }
-        commandView.stringValue = (try? job?.previewCommand()) ?? (file == nil ? "No file chosen." : "")
-        startButton.isEnabled = !isRunning && job != nil && !selected.readOnly
-        if selected.readOnly { commandView.stringValue = "\(selected.displayName) is read-only; nothing can be restored into it." }
+        let ready = !isRunning && session != nil && !selected.readOnly
+        newButton.isEnabled = ready
+        startButton.isEnabled = ready && selectedDatabase != nil && tokensAreValid
     }
 
+    // MARK: New database
+
+    @objc private func newDatabase(_ sender: Any?) {
+        guard let window, session != nil else { return }
+        let sheet = NewDatabaseSheet(existing: databases) { [weak self] name in
+            guard let self else { return false }
+            return await self.createDatabase(name)
+        }
+        newDatabaseSheet = sheet
+        window.beginSheet(sheet.sheet) { [weak self] _ in self?.newDatabaseSheet = nil }
+    }
+
+    /// Creates a database on the selected connection, as safe mode allows, and selects it.
+    /// False when it wasn't created (the sheet stays open). For the dev harness too.
+    @discardableResult
+    func createDatabase(_ name: String) async -> Bool {
+        guard let window, let selected, let session, !selected.readOnly else { return false }
+        let sql = ServerInfo.createDatabase(name, dialect: session.dialect)
+        let level = selected.safeMode
+        if level.requirement(for: [sql], dialect: session.dialect.lexer) != .none {
+            let prompt = SafetyPrompt(
+                title: "Create the database \(name) on \(selected.displayName)?", message: level.detail, sql: sql + ";",
+                credential: level.requiresPassword ? SafetyCredential(password: login?.password, connectionName: selected.displayName) : nil,
+                connectionName: selected.displayName, confirm: "Create")
+            guard await prompt.run(on: newDatabaseSheet?.sheet ?? window) else { return false }
+        }
+        do {
+            _ = try await session.execute(SQLStatement(sql))
+        } catch {
+            newDatabaseSheet?.show(error: (error as? DatabaseError)?.message ?? error.localizedDescription)
+            return false
+        }
+        added(database: name)
+        environment.onRestored(selected.id)
+        return true
+    }
+
+    // MARK: Running
+
     override func start() {
-        guard let window, let selected, let job else { return }
-        readOptions()
+        guard let window, selectedDatabase != nil, tokensAreValid else { return }
         if let key = optionsKey, let data = try? JSONEncoder().encode(options) { UserDefaults.standard.set(data, forKey: key) }
-        let creating = newRadio.state == .on
-        let what = creating ? "a new database, \(job.database)," : job.database
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = true
+        panel.prompt = "Restore"
+        panel.message = "Choose a backup: a pg_dump archive or directory, or a SQL script (plain or .gz)."
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            DispatchQueue.main.async { self?.confirm(url) }
+        }
+    }
+
+    /// The job for `file` into the selected database, or why there's none.
+    func job(for file: URL) -> Result<RestoreJob, DatabaseError> {
+        guard let selected, let login, let database = selectedDatabase else { return .failure(DatabaseError("No database is selected.")) }
+        let kind: BackupFileKind
+        do {
+            kind = try BackupFileKind.detect(file)
+        } catch {
+            return .failure(error as? DatabaseError ?? DatabaseError(error.localizedDescription))
+        }
+        guard let role = RestoreJob.role(for: kind, driver: selected.driver) else {
+            return .failure(DatabaseError("A \(kind.title) can't be restored into \(selected.driver.displayName)."))
+        }
+        let name = role == .restorePostgresArchive ? "pg_restore" : role == .restorePostgresScript ? "psql" : "mysql"
+        guard let tool = environment.locator().choose(role, serverMajor: serverMajor, mariaDBServer: serverIsMariaDB).0 else {
+            return .failure(DatabaseError("\(name) wasn't found on PATH, in the usual install folders or in the folder set in Settings ▸ Locations."))
+        }
+        return .success(RestoreJob(config: selected, password: login.password, ssh: login.ssh, database: database, file: file, kind: kind,
+                                   options: options, tool: tool))
+    }
+
+    /// Asks before restoring `file`, showing the command.
+    private func confirm(_ file: URL) {
+        guard let window, let selected else { return }
+        let job: RestoreJob
+        switch self.job(for: file) {
+        case .success(let j): job = j
+        case .failure(let error):
+            let alert = NSAlert()
+            alert.messageText = "\(file.lastPathComponent) can't be restored"
+            alert.informativeText = error.message
+            alert.beginSheetModal(for: window)
+            return
+        }
         let level = selected.safeMode
         let prompt = SafetyPrompt(
-            title: "Restore \(job.file.lastPathComponent) into \(what) on \(selected.displayName)?",
-            message: "Everything in the backup runs against the database\(options.clean ? ", dropping its objects first" : "")."
+            title: "Restore \(file.lastPathComponent) into \(job.database) on \(selected.displayName)?",
+            message: "Everything in the backup (\(job.kind.title)) runs against the database\(options.clean ? ", dropping its objects first" : "")."
                 + (level.requiresPassword ? " Safe mode asks for the password." : ""),
-            sql: (creating ? ServerInfo.createDatabase(job.database, dialect: session?.dialect ?? PostgresDialect()) + ";\n" : "")
-                + ((try? job.previewCommand()) ?? ""),
+            sql: (try? job.previewCommand()) ?? "",
             credential: level.requiresPassword ? SafetyCredential(password: login?.password, connectionName: selected.displayName) : nil,
             connectionName: selected.displayName, confirm: "Restore")
         Task {
             guard await prompt.run(on: window) else { return }
-            run(creatingDatabase: creating)
+            run(job)
         }
     }
 
-    /// Restores with the options shown. The dev harness calls this directly (no confirmation).
-    func run(creatingDatabase: Bool? = nil) {
-        readOptions()
-        guard let job, !isRunning else { return }
-        let creating = creatingDatabase ?? (newRadio.state == .on)
-        let session = session
-        began()
-        revealURLs = []
-        showStatus("Restoring…", error: false)
-        let id = selected?.id
-        runTask = Task {
-            let result: Result<Void, any Error>
-            do {
-                if creating, let session {
-                    let create = ServerInfo.createDatabase(job.database, dialect: session.dialect)
-                    appendLog(create + ";")
-                    _ = try await session.execute(SQLStatement(create))
-                }
-                try await job.run { line in Task { @MainActor in self.appendLog(line) } }
-                result = .success(())
-            } catch {
-                result = .failure(error)
-            }
-            if creating, case .success = result, !databases.contains(job.database) {
-                databases.append(job.database)
-                databases.sort()
-                databasePopup.removeAllItems()
-                databasePopup.addItems(withTitles: databases)
-                databasePopup.selectItem(withTitle: job.database)
-                existingRadio.state = .on
-                newRadio.state = .off
-            }
-            if let id { environment.onRestored(id) }
-            ended(result, success: "Restored \(job.file.lastPathComponent) into \(job.database).")
+    /// Restores without asking. The dev harness calls this directly.
+    func run(_ job: RestoreJob) {
+        let id = job.config.id
+        run(title: "Restoring \(job.file.lastPathComponent) into \(job.database) on \(job.config.displayName)",
+            success: { "Restored \(job.file.lastPathComponent) into \(job.database)." }) { [weak self] log in
+            defer { Task { @MainActor in self?.environment.onRestored(id) } }
+            try await job.run(log: log)
         }
     }
 }
 
-extension RestoreWindowController: NSTextFieldDelegate {
-    func controlTextDidChange(_ obj: Notification) { optionChanged(nil) }
-}
+/// Asks for a new database's name. `create` makes it; the sheet closes when that works.
+@MainActor
+final class NewDatabaseSheet: NSObject, NSTextFieldDelegate {
+    let sheet: NSWindow
+    let nameField = NSTextField()
+    private let errorLabel = NSTextField(wrappingLabelWithString: "")
+    private let createButton = NSButton(title: "Create", target: nil, action: nil)
+    private let existing: [String]
+    private let create: (String) async -> Bool
 
-extension NSStackView {
-    /// The stack, laid out top to bottom.
-    func vertical() -> NSStackView {
-        orientation = .vertical
-        alignment = .leading
-        spacing = 6
-        return self
+    init(existing: [String], create: @escaping (String) async -> Bool) {
+        self.existing = existing
+        self.create = create
+        sheet = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 380, height: 120), styleMask: [.titled], backing: .buffered, defer: true)
+        super.init()
+        let title = NSTextField(labelWithString: "New Database")
+        title.font = .systemFont(ofSize: 13, weight: .semibold)
+        nameField.placeholderString = "Name"
+        nameField.delegate = self
+        errorLabel.font = .systemFont(ofSize: 11)
+        errorLabel.textColor = .systemRed
+        errorLabel.isHidden = true
+        let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancel(_:)))
+        cancel.keyEquivalent = "\u{1b}"
+        createButton.target = self
+        createButton.action = #selector(createClicked(_:))
+        createButton.keyEquivalent = "\r"
+        createButton.isEnabled = false
+        let row = NSStackView(views: [NSTextField(labelWithString: "Name:"), nameField])
+        row.alignment = .firstBaseline
+        let buttons = NSStackView(views: [NSView(), cancel, createButton])
+        let main = NSStackView(views: [title, row, errorLabel, buttons])
+        main.orientation = .vertical
+        main.alignment = .leading
+        main.spacing = 10
+        main.edgeInsets = NSEdgeInsets(top: 16, left: 18, bottom: 16, right: 18)
+        for v in [row, errorLabel, buttons] { v.widthAnchor.constraint(equalTo: main.widthAnchor, constant: -36).isActive = true }
+        sheet.contentView = main
+        sheet.initialFirstResponder = nameField
     }
+
+    func show(error: String) {
+        errorLabel.stringValue = error
+        errorLabel.isHidden = false
+    }
+
+    private var name: String { nameField.stringValue.trimmingCharacters(in: .whitespaces) }
+
+    func controlTextDidChange(_ obj: Notification) {
+        let taken = existing.contains { $0.caseInsensitiveCompare(name) == .orderedSame }
+        errorLabel.stringValue = taken ? "A database named \(name) exists already." : ""
+        errorLabel.isHidden = !taken
+        createButton.isEnabled = !name.isEmpty && !taken
+    }
+
+    @objc private func createClicked(_ sender: Any?) {
+        let name = name
+        createButton.isEnabled = false
+        Task {
+            if await create(name) {
+                sheet.sheetParent?.endSheet(sheet)
+            } else {
+                createButton.isEnabled = true
+            }
+        }
+    }
+
+    @objc private func cancel(_ sender: Any?) { sheet.sheetParent?.endSheet(sheet) }
 }

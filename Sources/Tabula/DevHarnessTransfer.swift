@@ -210,34 +210,49 @@ extension DevHarness {
         app.backupDatabases(nil)
         let backup = try require(app.backupWindow, "backup window")
         _ = try await waitFor("databases listed") { backup.databases.contains(database) ? true : nil }
-        backup.choose([database])
+        backup.select(database: database)
+        try check(backup.selectedDatabase == database, "the workspace's database is selected")
         try await Task.sleep(for: .milliseconds(200))
         snap("transfer-11-backup.png", backup.window)
+        // The file name editor: the pattern as tokens, a separator and a placeholder added.
+        backup.fileName.openEditor()
+        let editor = try await waitFor("file name editor") { backup.fileName.editor }
+        try check(editor.pattern == backup.fileName.pattern, "the editor starts at the pattern")
+        editor.append("_")
+        editor.append("{connection}")
+        try check(editor.previewLabel.stringValue.hasPrefix("\(database)-") && editor.previewLabel.stringValue.contains("_\(workspace.config.displayName)"),
+                  "the preview follows the pattern: \(editor.previewLabel.stringValue)")
+        try await Task.sleep(for: .milliseconds(200))
+        snap("transfer-11b-file-name.png", editor.sheet)
+        backup.window?.endSheet(editor.sheet)
         var backedUp: Result<Void, any Error>?
         backup.onFinish = { backedUp = $0 }
         let backupFolder = dir.appending(path: "m11-backup")
         try? FileManager.default.removeItem(at: backupFolder)
         try FileManager.default.createDirectory(at: backupFolder, withIntermediateDirectories: true)
-        backup.run(into: backupFolder)
+        let file = backupFolder.appending(path: workspace.config.driver == .postgres ? "\(database).dump" : "\(database).sql")
+        backup.run(to: file)
         try await waitFor("backup", timeout: 120) { backedUp }.get()
-        let file = try require(backup.revealURLs.first, "the backup file")
+        try check(FileManager.default.fileExists(atPath: file.path), "the backup file exists")
         print("backup: \(file.lastPathComponent), \((try? FileManager.default.attributesOfItem(atPath: file.path)[.size] as? Int) ?? 0) bytes")
-        snap("transfer-12-backup-done.png", backup.window)
+        snap("transfer-12-backup-done.png", backup.runSheet?.sheet)
+        backup.runSheet?.onDone()
         backup.close()
 
         app.restoreDatabase(nil)
         let restore = try require(app.restoreWindow, "restore window")
         _ = try await waitFor("databases listed for restore") { restore.databases.isEmpty ? nil : true }
-        restore.load(file)
         let restored = "m11_restored_\(Int.random(in: 1000...9999))"
-        restore.chooseNewDatabase(restored)
+        try check(await restore.createDatabase(restored), "New Database… creates \(restored)")
+        try check(restore.selectedDatabase == restored, "the new database is selected")
         try await Task.sleep(for: .milliseconds(200))
         snap("transfer-13-restore.png", restore.window)
         var restoreResult: Result<Void, any Error>?
         restore.onFinish = { restoreResult = $0 }
-        restore.run(creatingDatabase: true)
+        restore.run(try restore.job(for: file).get())
         let restoreOutcome = try await waitFor("restore", timeout: 120) { restoreResult }
-        snap("transfer-14-restore-done.png", restore.window)
+        snap("transfer-14-restore-done.png", restore.runSheet?.sheet)
+        restore.runSheet?.onDone()
         restore.close()
         try restoreOutcome.get()
         let listed = try await ServerInfo.databases(connection)

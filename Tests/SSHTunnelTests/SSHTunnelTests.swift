@@ -485,11 +485,11 @@ struct SSHTunnelServerTests {
             guard let tool = locator.choose(role, serverMajor: nil, mariaDBServer: false).0 else { continue }
             var options = BackupOptions()
             options.content = .schemaOnly
-            let job = BackupJob(config: config, password: password, ssh: login, databases: [config.database], options: options,
-                                tool: tool, serverIsMariaDB: false, pattern: FileNamePattern("{database}"))
+            let job = BackupJob(config: config, password: password, ssh: login, database: config.database, options: options,
+                                tool: tool, serverIsMariaDB: false)
             let lines = LockedLines()
-            let files = try await job.run(into: directory, log: { lines.add($0) })
-            let file = try #require(files.first)
+            let file = directory.appending(path: job.fileName(FileNamePattern("{database}")))
+            try await job.run(to: file, log: { lines.add($0) })
             let head = try FileHandle(forReadingFrom: file).read(upToCount: 64) ?? Data()
             if role == .backupPostgres {
                 #expect(head.starts(with: Data("PGDMP".utf8)))

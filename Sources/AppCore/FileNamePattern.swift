@@ -84,6 +84,48 @@ public struct FileNamePattern: Sendable, Hashable {
         String(s.map { "/:".contains($0) ? "-" : $0 }.filter { !($0.asciiValue.map { $0 < 0x20 } ?? false) })
     }
 
+    /// A piece of a pattern: a placeholder, or text kept as typed.
+    public enum Segment: Sendable, Hashable {
+        case token(Token)
+        case text(String)
+    }
+
+    /// The pattern as placeholders and text, for the file name editor. Braces that aren't a
+    /// known placeholder stay text; neighbouring text is one segment.
+    public var segments: [Segment] {
+        var out: [Segment] = []
+        func text(_ s: Substring) {
+            guard !s.isEmpty else { return }
+            if case .text(let before) = out.last { out[out.count - 1] = .text(before + s) } else { out.append(.text(String(s))) }
+        }
+        var rest = pattern[...]
+        while let open = rest.firstIndex(of: "{") {
+            text(rest[..<open])
+            guard let close = rest[open...].firstIndex(of: "}") else {
+                rest = rest[open...]
+                break
+            }
+            let placeholder = String(rest[open...close])
+            if let token = Self.tokens.first(where: { $0.placeholder == placeholder }) {
+                out.append(.token(token))
+            } else {
+                text(rest[open...close])
+            }
+            rest = rest[rest.index(after: close)...]
+        }
+        text(rest)
+        return out
+    }
+
+    public init(segments: [Segment]) {
+        pattern = segments.map {
+            switch $0 {
+            case .token(let t): t.placeholder
+            case .text(let s): s
+            }
+        }.joined()
+    }
+
     /// `name.ext`, or `name 2.ext`, `name 3.ext`, … when `taken` (lowercased file names) has it.
     public static func unique(_ name: String, extension ext: String, taken: inout Set<String>) -> String {
         var candidate = name + "." + ext

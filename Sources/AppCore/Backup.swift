@@ -137,6 +137,148 @@ public struct RestoreOptions: Codable, Hashable, Sendable {
 }
 
 /// What a backup file holds, from its first bytes (or, for a folder, its table of contents).
+// MARK: - Options as flags
+
+/// The Backup and Restore windows show the tool's flags as tokens. Options that are a flag of
+/// their own become that flag (on when it's there); `--format=`, `--schema-only` and the like
+/// typed as tokens move to the window's popups; anything else is passed on as typed.
+public enum ToolFlags {
+    /// A flag an option stands for, and how to read and set it.
+    struct Flag<Options> {
+        let flag: String
+        let get: (Options) -> Bool
+        let set: (inout Options, Bool) -> Void
+    }
+
+    static func backupFlags(_ family: DumpTool.Family) -> [Flag<BackupOptions>] {
+        switch family {
+        case .postgres: [
+            Flag(flag: "--no-owner", get: \.noOwner, set: { $0.noOwner = $1 }),
+            Flag(flag: "--no-privileges", get: \.noPrivileges, set: { $0.noPrivileges = $1 }),
+            Flag(flag: "--clean", get: \.clean, set: { $0.clean = $1 }),
+            Flag(flag: "--create", get: \.createDatabase, set: { $0.createDatabase = $1 }),
+        ]
+        case .mysql: [
+            Flag(flag: "--single-transaction", get: \.singleTransaction, set: { $0.singleTransaction = $1 }),
+            Flag(flag: "--routines", get: \.routines, set: { $0.routines = $1 }),
+            Flag(flag: "--triggers", get: \.triggers, set: { $0.triggers = $1 }),
+            Flag(flag: "--events", get: \.events, set: { $0.events = $1 }),
+            Flag(flag: "--add-drop-table", get: \.addDropTable, set: { $0.addDropTable = $1 }),
+            Flag(flag: "--databases", get: \.createDatabase, set: { $0.createDatabase = $1 }),
+        ]
+        }
+    }
+
+    static func restoreFlags(_ family: DumpTool.Family) -> [Flag<RestoreOptions>] {
+        switch family {
+        case .postgres: [
+            Flag(flag: "--clean", get: \.clean, set: { $0.clean = $1 }),
+            Flag(flag: "--no-owner", get: \.noOwner, set: { $0.noOwner = $1 }),
+            Flag(flag: "--no-privileges", get: \.noPrivileges, set: { $0.noPrivileges = $1 }),
+            Flag(flag: "--single-transaction", get: \.singleTransaction, set: { $0.singleTransaction = $1 }),
+            Flag(flag: "--exit-on-error", get: \.stopOnError, set: { $0.stopOnError = $1 }),
+        ]
+        case .mysql: [
+            Flag(flag: "--force", get: { !$0.stopOnError }, set: { $0.stopOnError = !$1 }),
+        ]
+        }
+    }
+
+    /// What Add Option… offers for a backup: the options' flags, then a few the tool takes as is.
+    public static func backupMenu(_ family: DumpTool.Family) -> [String] {
+        backupFlags(family).map(\.flag) + (family == .postgres
+            ? ["--no-comments", "--no-publications", "--no-subscriptions", "--quote-all-identifiers"]
+            : ["--hex-blob", "--complete-insert", "--skip-extended-insert", "--compress"])
+    }
+
+    public static func restoreMenu(_ family: DumpTool.Family) -> [String] {
+        restoreFlags(family).map(\.flag) + (family == .postgres
+            ? ["--disable-triggers", "--no-comments", "--no-data-for-failed-tables"]
+            : ["--binary-mode", "--compress"])
+    }
+
+    /// The tokens for the options: their flags in the menu's order, then the other arguments.
+    static func tokens<O>(_ o: O, _ flags: [Flag<O>], other: String) -> [String] {
+        let rest = (try? ToolCommand.splitArguments(other)) ?? [other]
+        return flags.filter { $0.get(o) }.map(\.flag) + rest.map(ToolCommand.shellQuoted)
+    }
+
+    /// Reads tokens back: each is split as a shell would; known flags set their options, the
+    /// rest becomes the other arguments. `special` takes the flags that move to a popup.
+    static func apply<O>(_ tokens: [String], to o: inout O, _ flags: [Flag<O>], other: inout String,
+                         special: (String, inout O) -> Bool) throws {
+        var arguments: [String] = []
+        for token in tokens { arguments += try ToolCommand.splitArguments(token) }
+        var on = Set<String>()
+        var rest: [String] = []
+        for a in arguments {
+            if flags.contains(where: { $0.flag == a }) {
+                on.insert(a)
+            } else if !special(a, &o) {
+                rest.append(a)
+            }
+        }
+        for f in flags { f.set(&o, on.contains(f.flag)) }
+        other = rest.map(ToolCommand.shellQuoted).joined(separator: " ")
+    }
+}
+
+extension BackupOptions {
+    public func tokens(_ family: DumpTool.Family) -> [String] {
+        ToolFlags.tokens(self, ToolFlags.backupFlags(family), other: otherArguments)
+    }
+
+    /// Sets the options from the window's tokens. Throws on an unclosed quote.
+    public mutating func setTokens(_ tokens: [String], _ family: DumpTool.Family) throws {
+        var other = ""
+        try ToolFlags.apply(tokens, to: &self, ToolFlags.backupFlags(family), other: &other) { a, o in
+            switch (family, a) {
+            case (.postgres, "--schema-only"), (.mysql, "--no-data"): o.content = .schemaOnly
+            case (.postgres, "--data-only"), (.mysql, "--no-create-info"): o.content = .dataOnly
+            case (.postgres, _) where a.hasPrefix("--format="):
+                guard let f = PostgresFormat(flag: String(a.dropFirst("--format=".count))) else { return false }
+                o.postgresFormat = f
+            default: return false
+            }
+            return true
+        }
+        otherArguments = other
+    }
+}
+
+extension BackupOptions.PostgresFormat {
+    /// pg_dump's names and letters for its formats.
+    init?(flag: String) {
+        switch flag.lowercased() {
+        case "c", "custom": self = .custom
+        case "p", "plain": self = .plain
+        case "t", "tar": self = .tar
+        case "d", "directory": self = .directory
+        default: return nil
+        }
+    }
+}
+
+extension RestoreOptions {
+    public func tokens(_ family: DumpTool.Family) -> [String] {
+        ToolFlags.tokens(self, ToolFlags.restoreFlags(family), other: otherArguments)
+    }
+
+    public mutating func setTokens(_ tokens: [String], _ family: DumpTool.Family) throws {
+        var other = ""
+        try ToolFlags.apply(tokens, to: &self, ToolFlags.restoreFlags(family), other: &other) { a, o in
+            guard family == .postgres else { return false }
+            switch a {
+            case "--schema-only": o.content = .schemaOnly
+            case "--data-only": o.content = .dataOnly
+            default: return false
+            }
+            return true
+        }
+        otherArguments = other
+    }
+}
+
 public enum BackupFileKind: Sendable, Equatable {
     case postgresArchive
     case postgresTar
@@ -767,14 +909,11 @@ final class ExitWaiter: @unchecked Sendable {
 
 /// What backup and restore read from a server: its databases and what kind of server it is.
 public enum ServerInfo {
-    /// Databases a backup can choose from, without templates (Postgres) or system ones (MySQL).
+    /// Every database on the server, templates and system ones included, by name.
     public static func databases(_ connection: any DatabaseConnection) async throws -> [String] {
-        if connection.dialect is PostgresDialect {
-            return try await connection.execute(
-                "SELECT datname FROM pg_catalog.pg_database WHERE datallowconn AND NOT datistemplate ORDER BY datname"
-            ).rows.compactMap { $0.first?.string }
-        }
-        return try await connection.schemas()
+        let sql = connection.dialect is PostgresDialect ? "SELECT datname FROM pg_catalog.pg_database ORDER BY datname" : "SHOW DATABASES"
+        return try await connection.execute(SQLStatement(sql)).rows.compactMap { $0.first?.string }
+            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
     }
 
     /// The server's major version and whether it's MariaDB.
@@ -827,50 +966,40 @@ public final class ToolAccess: @unchecked Sendable {
     }
 }
 
-/// Backs up databases, one file (or pg_dump directory) each, into a folder, named by a pattern.
-/// Each file is written under a temporary name and moved into place when its tool succeeds.
+/// Backs up one database to a file (or a pg_dump directory). The file is written under a
+/// temporary name and moved into place when the tool succeeds.
 public struct BackupJob: Sendable {
     public var config: ConnectionConfig
     public var password: String?
     public var ssh: SSHLogin
-    public var databases: [String]
+    public var database: String
     public var options: BackupOptions
     public var tool: ToolInfo
     public var serverIsMariaDB: Bool
-    public var pattern: FileNamePattern
 
-    public init(config: ConnectionConfig, password: String?, ssh: SSHLogin = SSHLogin(), databases: [String], options: BackupOptions,
-                tool: ToolInfo, serverIsMariaDB: Bool, pattern: FileNamePattern = FileNamePattern(FileNamePattern.backup)) {
+    public init(config: ConnectionConfig, password: String?, ssh: SSHLogin = SSHLogin(), database: String, options: BackupOptions,
+                tool: ToolInfo, serverIsMariaDB: Bool) {
         self.config = config
         self.password = password
         self.ssh = ssh
-        self.databases = databases
+        self.database = database
         self.options = options
         self.tool = tool
         self.serverIsMariaDB = serverIsMariaDB
-        self.pattern = pattern
     }
 
     var family: DumpTool.Family { config.driver == .postgres ? .postgres : .mysql }
 
-    /// The file name each database gets.
-    public func fileNames(date: Date = Date()) -> [String] {
-        var taken = Set<String>()
-        return databases.map { db in
-            let name = pattern.render(.init(database: db, connection: config.displayName, tag: config.tag?.rawValue ?? "", date: date), fallback: db)
-            let ext = options.fileExtension(family)
-            if ext.isEmpty {
-                var candidate = name
-                var n = 1
-                while !taken.insert(candidate.lowercased()).inserted { n += 1; candidate = "\(name) \(n)" }
-                return candidate
-            }
-            return FileNamePattern.unique(name, extension: ext, taken: &taken)
-        }
+    /// The file name the pattern gives, with the format's extension.
+    public func fileName(_ pattern: FileNamePattern, date: Date = Date()) -> String {
+        let name = pattern.render(.init(database: database, connection: config.displayName, tag: config.tag?.rawValue ?? "", date: date),
+                                  fallback: database)
+        let ext = options.fileExtension(family)
+        return ext.isEmpty ? name : "\(name).\(ext)"
     }
 
-    /// The command for one database, for the sheet's preview (written to `destination`).
-    public func command(for database: String, endpoint: ToolEndpoint, destination: URL, folder: URL, write: Bool = true) throws -> ToolCommand {
+    /// The command, written to `destination`.
+    public func command(endpoint: ToolEndpoint, destination: URL, folder: URL, write: Bool = true) throws -> ToolCommand {
         let login = BackupCommands.Login(config: config, password: password, endpoint: endpoint, database: database)
         switch family {
         case .postgres: return try BackupCommands.pgDump(tool, login, options, destination: destination)
@@ -879,43 +1008,29 @@ public struct BackupJob: Sendable {
         }
     }
 
-    /// The command line for the first database, written nowhere: for the window's preview.
-    public func previewCommand(folder: URL) throws -> String {
-        guard let first = databases.first else { return "" }
+    /// The command line, written nowhere: for the log sheet's first line.
+    public func previewCommand(destination: URL) throws -> String {
         let endpoint = config.usesSSH ? ToolEndpoint(host: ConnectionFactory.tunnelTarget(config).host, port: 0, hostAddress: "127.0.0.1")
             : ToolEndpoint.direct(config)
-        let name = fileNames().first ?? first
-        let command = try command(for: first, endpoint: endpoint, destination: folder.appending(path: name), folder: URL(filePath: "/tmp/…"), write: false)
+        let command = try command(endpoint: endpoint, destination: destination, folder: URL(filePath: "/tmp/…"), write: false)
         return command.display.replacingOccurrences(of: "--port=0", with: "--port=<tunnel>")
     }
 
-    /// Runs the backups in order; returns the files written. `started` gets each database's
-    /// index as it begins. The first failure stops the rest; files already written stay.
-    @discardableResult
-    public func run(into folder: URL, date: Date = Date(), log: @escaping @Sendable (String) -> Void,
-                    started: @escaping @Sendable (Int) -> Void = { _ in }) async throws -> [URL] {
-        let names = fileNames(date: date)
+    /// Writes the backup to `destination`, replacing what's there only once the tool succeeds;
+    /// a failure or a stop leaves nothing behind.
+    public func run(to destination: URL, log: @escaping @Sendable (String) -> Void) async throws {
         let access = try await ToolAccess.open(config, ssh: ssh)
         let secrets = try BackupCommands.privateFolder()
-        var written: [URL] = []
+        defer { try? FileManager.default.removeItem(at: secrets) }
         do {
-            for (i, database) in databases.enumerated() {
-                try Task.checkCancellation()
-                started(i)
-                let pending = PendingFile(folder.appending(path: names[i]))
-                let command = try command(for: database, endpoint: access.endpoint, destination: pending.temporary, folder: secrets)
-                try await pending.write { _ in try await ToolRunner.run(command, log: log) }
-                written.append(pending.destination)
-                log("Wrote \(pending.destination.lastPathComponent).")
-            }
+            let pending = PendingFile(destination)
+            let command = try command(endpoint: access.endpoint, destination: pending.temporary, folder: secrets)
+            try await pending.write { _ in try await ToolRunner.run(command, log: log) }
         } catch {
-            try? FileManager.default.removeItem(at: secrets)
             await access.close()
             throw error
         }
-        try? FileManager.default.removeItem(at: secrets)
         await access.close()
-        return written
     }
 }
 

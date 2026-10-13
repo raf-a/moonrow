@@ -93,8 +93,8 @@ final class ExportOptionsView: NSStackView, NSTextFieldDelegate {
     private let perInsertField = NSTextField()
     let tableNameField = NSTextField()
     private let xlsxHeaderBox = NSButton(checkboxWithTitle: "Column names in a bold first row", target: nil, action: nil)
-    let patternField = NSTextField()
-    private let patternMenu = NSPopUpButton(frame: .zero, pullsDown: true)
+    /// The file name the pattern gives, and Customize… to edit the pattern.
+    let fileName: FileNamePatternRow
 
     private let sqlMode: SQLMode
     private var settings: ExportSettings
@@ -106,6 +106,7 @@ final class ExportOptionsView: NSStackView, NSTextFieldDelegate {
     init(settings: ExportSettings, sqlMode: SQLMode, extraRows: [(String, NSView)] = [], patternTitle: String = "File name") {
         self.settings = settings
         self.sqlMode = sqlMode
+        fileName = FileNamePatternRow(pattern: settings.pattern, defaultPattern: FileNamePattern.export, tokens: FileNamePattern.tokens)
         super.init(frame: .zero)
         orientation = .vertical
         alignment = .leading
@@ -117,17 +118,11 @@ final class ExportOptionsView: NSStackView, NSTextFieldDelegate {
         formatControl.action = #selector(changed(_:))
         top.addRow(with: [Self.label("Format"), formatControl])
 
-        patternField.placeholderString = FileNamePattern.export
-        patternField.delegate = self
-        patternField.widthAnchor.constraint(equalToConstant: 220).isActive = true
-        patternMenu.addItem(withTitle: "Insert")
-        patternMenu.controlSize = .small
-        for token in FileNamePattern.tokens {
-            let item = patternMenu.menu!.addItem(withTitle: "\(token.title)  \(token.placeholder)", action: #selector(insertToken(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = token.placeholder
-        }
-        top.addRow(with: [Self.label(patternTitle), Self.row(patternField, patternMenu)])
+        fileName.onChange = { [weak self] in self?.onChange?() }
+        // Customize… right after the name; long names truncate in the middle.
+        fileName.nameLabel.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        fileName.widthAnchor.constraint(lessThanOrEqualToConstant: 300).isActive = true
+        top.addRow(with: [Self.label(patternTitle), fileName])
 
         for (title, _) in Self.delimiters { delimiterPopup.addItem(withTitle: title) }
         delimiterPopup.addItem(withTitle: "Other:")
@@ -232,7 +227,7 @@ final class ExportOptionsView: NSStackView, NSTextFieldDelegate {
         gzipBox.state = s.sql.gzip ? .on : .off
         perInsertField.stringValue = String(s.sql.rowsPerInsert)
         xlsxHeaderBox.state = s.xlsx.includeHeader ? .on : .off
-        patternField.stringValue = s.pattern
+        fileName.set(pattern: s.pattern, notify: false)
         updatePanes()
     }
 
@@ -255,7 +250,7 @@ final class ExportOptionsView: NSStackView, NSTextFieldDelegate {
         s.sql.gzip = gzipBox.state == .on
         s.sql.rowsPerInsert = max(1, Int(perInsertField.stringValue.filter(\.isNumber)) ?? 100)
         s.xlsx.includeHeader = xlsxHeaderBox.state == .on
-        s.pattern = patternField.stringValue.trimmingCharacters(in: .whitespaces)
+        s.pattern = fileName.pattern
         return s
     }
 
@@ -283,16 +278,7 @@ final class ExportOptionsView: NSStackView, NSTextFieldDelegate {
 
     @objc private func changed(_ sender: Any?) {
         updatePanes()
-        onChange?()
-    }
-
-    @objc private func insertToken(_ sender: NSMenuItem) {
-        guard let token = sender.representedObject as? String else { return }
-        if let editor = patternField.currentEditor() {
-            editor.insertText(token)
-        } else {
-            patternField.stringValue += token
-        }
+        fileName.refresh()
         onChange?()
     }
 
@@ -308,7 +294,10 @@ final class ExportOptionsView: NSStackView, NSTextFieldDelegate {
         changed(nil)
     }
 
-    func controlTextDidChange(_ obj: Notification) { onChange?() }
+    func controlTextDidChange(_ obj: Notification) {
+        fileName.refresh()
+        onChange?()
+    }
 }
 
 /// A sheet with the format and its options, then a save panel, progress and Stop.
@@ -373,6 +362,8 @@ final class ExportSheetController: NSWindowController {
         options = ExportOptionsView(settings: settings, sqlMode: subject.isTable ? .table : .result, extraRows: extra)
         options.tableNameField.stringValue = subject.isTable ? "" : subject.name.lowercased().replacingOccurrences(of: " ", with: "_")
         options.onChange = { [weak self] in self?.optionsChanged() }
+        options.fileName.preview = { [weak self] in self?.fileName(for: $0) ?? $0 }
+        options.fileName.refresh()
 
         progress.style = .bar
         progress.isIndeterminate = false
@@ -436,10 +427,13 @@ final class ExportSheetController: NSWindowController {
 
     // MARK: - Exporting
 
-    var defaultFileName: String {
+    var defaultFileName: String { fileName(for: options.edited.pattern) }
+
+    /// The name a pattern gives this export, with the format's extension.
+    private func fileName(for pattern: String) -> String {
         var c = context
         c.table = subject.name
-        let name = FileNamePattern(options.edited.pattern.isEmpty ? FileNamePattern.export : options.edited.pattern)
+        let name = FileNamePattern(pattern.isEmpty ? FileNamePattern.export : pattern)
             .render(c, fallback: subject.name.isEmpty ? "export" : subject.name)
         return name + "." + options.format.fileExtension
     }

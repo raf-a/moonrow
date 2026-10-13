@@ -101,6 +101,7 @@ final class ExportTablesSheetController: NSWindowController, NSTableViewDataSour
 
         options = ExportOptionsView(settings: settings, sqlMode: .perTable)
         options.onChange = { [weak self] in self?.update() }
+        options.fileName.preview = { [weak self] in self?.fileName(for: $0) ?? $0 }
         namesLabel.textColor = .secondaryLabelColor
         namesLabel.font = .systemFont(ofSize: 11)
         namesLabel.lineBreakMode = .byTruncatingTail
@@ -208,7 +209,16 @@ final class ExportTablesSheetController: NSWindowController, NSTableViewDataSour
                                pattern: FileNamePattern(pattern.isEmpty ? FileNamePattern.export : pattern), context: context)
     }
 
+    /// The name a pattern gives the first ticked table's file (or the one file).
+    private func fileName(for pattern: String) -> String {
+        var j = job()
+        j.pattern = FileNamePattern(pattern.isEmpty ? FileNamePattern.export : pattern)
+        var taken = Set<String>()
+        return j.fileName(for: j.isSingleFile ? nil : j.items.first?.object.ref.name ?? "table", taken: &taken)
+    }
+
     private func update() {
+        options.fileName.refresh()
         let isSQL = options.formatControl.selectedSegment == 2
         for id in ["structure", "drop", "data"] { table.tableColumn(withIdentifier: .init(id))?.isHidden = !isSQL }
         let selected = rows.filter(\.selected).count
@@ -222,7 +232,8 @@ final class ExportTablesSheetController: NSWindowController, NSTableViewDataSour
         let j = job()
         var taken = Set<String>()
         if j.isSingleFile {
-            namesLabel.stringValue = "One file: " + j.fileName(for: nil, taken: &taken)
+            // The file name row shows it.
+            namesLabel.stringValue = ""
         } else {
             let names = j.items.prefix(3).map { j.fileName(for: $0.object.ref.name, taken: &taken) }
             namesLabel.stringValue = names.isEmpty ? "" : "In a folder: " + names.joined(separator: ", ") + (j.items.count > 3 ? ", …" : "")

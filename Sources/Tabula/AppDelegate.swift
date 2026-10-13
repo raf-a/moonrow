@@ -237,10 +237,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TabulaActions {
 
     private var toolEnvironment: ToolWindowEnvironment {
         ToolWindowEnvironment(
-            connections: { [weak self] in
-                guard let self else { return [] }
-                return self.store.connections.filter { $0.driver.isServer }.sorted { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }
-            },
+            store: store,
             login: { [weak self] config, window in await self?.toolLogin(config, in: window) },
             locator: { [weak self] in self?.settings.settings.toolLocator ?? ToolLocator() },
             onRestored: { [weak self] id in
