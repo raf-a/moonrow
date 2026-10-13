@@ -54,31 +54,41 @@ private func tempDir() -> URL {
         let (c, _) = try #require(ConnectionConfig.parse(
             url: "postgres://u@db/shop?name=Shop%20live&statusColor=Red&env=production&safeModeLevel=2"))
         #expect(c.name == "Shop live")
-        #expect(c.color == .red)
-        #expect(c.tag == .production)
+        #expect(c.tagID == ConnectionTag.production.id)
         #expect(c.safeMode == .alertWrites)
         let (d, _) = try #require(ConnectionConfig.parse(url: "mysql://u@db/x?tag=staging&safeMode=password"))
-        #expect(d.tag == .staging)
+        #expect(d.tagID == ConnectionTag.staging.id)
         #expect(d.safeMode == .password)
-        #expect(d.color == nil)
+        // Tags are matched by name, ignoring case, among the ones given.
+        let qa = ConnectionTag(name: "QA", color: .green)
+        #expect(ConnectionConfig.parse(url: "mysql://u@db/x?tag=qa", tags: [qa])?.0.tagID == qa.id)
+        #expect(ConnectionConfig.parse(url: "mysql://u@db/x?tag=qa")?.0.tagID == nil)
     }
 
     @Test func olderAndNewerFilesDecode() throws {
         let id = UUID()
         let old = #"{"id":"\#(id)","driver":"sqlite","filePath":"/tmp/a.db"}"#
         let c = try JSONDecoder().decode(ConnectionConfig.self, from: Data(old.utf8))
-        #expect(c.safeMode == .silent && c.color == nil && c.tag == nil)
-        // Values from a newer version: an unknown colour or tag is dropped, an unknown safe
-        // mode asks before every statement.
-        let newer = #"{"id":"\#(id)","driver":"sqlite","safeMode":"biometric","color":"teal","tag":"qa"}"#
+        #expect(c.safeMode == .silent && c.tagID == nil)
+        // Tags saved by name before they could be edited become the default tag of that name;
+        // the connection's own colour is dropped.
+        let named = #"{"id":"\#(id)","driver":"sqlite","color":"blue","tag":"production"}"#
+        #expect(try JSONDecoder().decode(ConnectionConfig.self, from: Data(named.utf8)).tagID == ConnectionTag.production.id)
+        // Values from a newer version: an unknown tag is dropped, an unknown safe mode asks
+        // before every statement.
+        let newer = #"{"id":"\#(id)","driver":"sqlite","safeMode":"biometric","tag":"qa"}"#
         let n = try JSONDecoder().decode(ConnectionConfig.self, from: Data(newer.utf8))
-        #expect(n.safeMode == .alert && n.color == nil && n.tag == nil)
+        #expect(n.safeMode == .alert && n.tagID == nil)
     }
 
     @Test func roundTrip() throws {
-        let c = ConnectionConfig(name: "x", filePath: "/tmp/x.db", safeMode: .passwordWrites, color: .green, tag: .local)
+        let c = ConnectionConfig(name: "x", filePath: "/tmp/x.db", safeMode: .passwordWrites, tagID: ConnectionTag.local.id)
         let back = try JSONDecoder().decode(ConnectionConfig.self, from: JSONEncoder().encode(c))
         #expect(back == c)
+        let tag = ConnectionTag(name: "QA", color: .green)
+        #expect(try JSONDecoder().decode(ConnectionTag.self, from: JSONEncoder().encode(tag)) == tag)
+        let unknown = #"{"id":"\#(tag.id)","name":"QA","color":"teal"}"#
+        #expect(try JSONDecoder().decode(ConnectionTag.self, from: Data(unknown.utf8)).color == .gray)
     }
 }
 

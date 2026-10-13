@@ -64,27 +64,48 @@ public enum PasswordMode: String, Codable, Sendable, CaseIterable {
     case none
 }
 
-/// A colour that marks a connection in the list and on its workspace window.
+/// A tag's colour, which marks its connections in the list and on their workspace windows.
 public enum ConnectionColor: String, Codable, Sendable, CaseIterable {
     case red, orange, yellow, green, blue, purple, gray
 
     public var title: String { rawValue.capitalized }
 }
 
-/// What a connection is for. Each tag suggests a colour.
-public enum ConnectionTag: String, Codable, Sendable, CaseIterable {
-    case local, testing, development, staging, production
+/// What a connection is for, with the colour that marks it. The store keeps the list
+/// (`ConnectionStore.tags`); connections name theirs with `tagID`.
+public struct ConnectionTag: Codable, Hashable, Sendable, Identifiable {
+    public var id: UUID
+    public var name: String
+    public var color: ConnectionColor
 
-    public var title: String { rawValue.capitalized }
+    public init(id: UUID = UUID(), name: String, color: ConnectionColor) {
+        self.id = id
+        self.name = name
+        self.color = color
+    }
 
-    public var suggestedColor: ConnectionColor {
-        switch self {
-        case .local: .gray
-        case .testing: .purple
-        case .development: .blue
-        case .staging: .orange
-        case .production: .red
-        }
+    public static let local = builtIn("local", .gray)
+    public static let testing = builtIn("testing", .purple)
+    public static let development = builtIn("development", .blue)
+    public static let staging = builtIn("staging", .orange)
+    public static let production = builtIn("production", .red)
+
+    /// The tags a store starts with. Their ids come from the names earlier versions saved in
+    /// connections, so those connections keep their tag.
+    public static let defaults: [ConnectionTag] = [.local, .testing, .development, .staging, .production]
+
+    private static func builtIn(_ name: String, _ color: ConnectionColor) -> ConnectionTag {
+        ConnectionTag(id: ConnectionConfig.stableID(for: "tag:" + name), name: name.capitalized, color: color)
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, name, color }
+
+    /// A colour a newer version may add falls back to gray.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decodeIfPresent(String.self, forKey: .name) ?? "Tag"
+        color = (try? c.decodeIfPresent(ConnectionColor.self, forKey: .color)) ?? .gray
     }
 }
 
@@ -127,8 +148,8 @@ public struct ConnectionConfig: Codable, Hashable, Sendable, Identifiable {
     public var sshKeyPath: String
     /// What the workspace asks before sending statements.
     public var safeMode: SafeMode
-    public var color: ConnectionColor?
-    public var tag: ConnectionTag?
+    /// The tag (`ConnectionStore.tags`); one the store no longer has counts as none.
+    public var tagID: UUID?
     /// The welcome window's group (`ConnectionStore.groups`); nil when ungrouped.
     public var groupID: UUID?
 
@@ -140,7 +161,7 @@ public struct ConnectionConfig: Codable, Hashable, Sendable, Identifiable {
         readOnly: Bool = false, rowsPerPage: Int = Paging.defaultPageSize,
         overSSH: Bool = false, sshHost: String = "", sshPort: Int? = nil, sshUser: String = "",
         sshPasswordMode: PasswordMode = .keychain, sshKeyPath: String = "",
-        safeMode: SafeMode = .silent, color: ConnectionColor? = nil, tag: ConnectionTag? = nil, groupID: UUID? = nil
+        safeMode: SafeMode = .silent, tagID: UUID? = nil, groupID: UUID? = nil
     ) {
         self.id = id
         self.name = name
@@ -164,8 +185,7 @@ public struct ConnectionConfig: Codable, Hashable, Sendable, Identifiable {
         self.sshPasswordMode = sshPasswordMode
         self.sshKeyPath = sshKeyPath
         self.safeMode = safeMode
-        self.color = color
-        self.tag = tag
+        self.tagID = tagID
         self.groupID = groupID
     }
 
@@ -173,7 +193,8 @@ public struct ConnectionConfig: Codable, Hashable, Sendable, Identifiable {
         case id, name, driver, filePath, host, port, user, database, passwordMode
         case tlsMode, tlsCAPath, tlsCertPath, tlsKeyPath, readOnly, rowsPerPage
         case overSSH, sshHost, sshPort, sshUser, sshPasswordMode, sshKeyPath
-        case safeMode, color, tag, groupID
+        case safeMode, groupID
+        case tagID = "tag"
     }
 
     // Fields added in later versions get defaults, so older files keep loading.
@@ -203,8 +224,14 @@ public struct ConnectionConfig: Codable, Hashable, Sendable, Identifiable {
         // Values a newer version may add don't fail the file. An unknown safe mode errs on the
         // side of asking.
         safeMode = c.contains(.safeMode) ? (try? c.decode(SafeMode.self, forKey: .safeMode)) ?? .alert : .silent
-        color = try? c.decodeIfPresent(ConnectionColor.self, forKey: .color)
-        tag = try? c.decodeIfPresent(ConnectionTag.self, forKey: .tag)
+        // Earlier versions saved a tag's name (and a colour of the connection's own, now dropped:
+        // the tag carries the colour).
+        if let id = try? c.decodeIfPresent(UUID.self, forKey: .tagID) {
+            tagID = id
+        } else {
+            let name = (try? c.decodeIfPresent(String.self, forKey: .tagID)) ?? nil
+            tagID = name.flatMap { n in ConnectionTag.defaults.first { $0.name.lowercased() == n.lowercased() }?.id }
+        }
         groupID = try? c.decodeIfPresent(UUID.self, forKey: .groupID)
     }
 
@@ -282,10 +309,10 @@ public struct ConnectionConfig: Codable, Hashable, Sendable, Identifiable {
 
 extension ConnectionConfig {
     /// `postgres://user:password@host:port/database?sslmode=require`, `mysql://…`, `mariadb://…`.
-    /// Also reads `name`, `color` (or `statusColor`), `tag` (or `env`) and `safeMode` (a level
-    /// name, or `safeModeLevel` 0–4). Returns the connection (not saved) and the password in the
-    /// URL, if any.
-    public static func parse(url text: String) -> (ConnectionConfig, password: String?)? {
+    /// Also reads `name`, `tag` (or `env`: one of `tags`, by name) and `safeMode` (a level name, or
+    /// `safeModeLevel` 0–4). Returns the connection (not saved) and the password in the URL, if any.
+    public static func parse(url text: String, tags: [ConnectionTag] = ConnectionTag.defaults)
+        -> (ConnectionConfig, password: String?)? {
         guard let u = URLComponents(string: text), let scheme = u.scheme?.lowercased() else { return nil }
         let driver: DriverKind
         switch scheme {
@@ -312,8 +339,9 @@ extension ConnectionConfig {
             u.queryItems?.first { names.contains($0.name.lowercased()) }?.value
         }
         if let name = item("name") { c.name = name }
-        if let color = item("color", "statuscolor") { c.color = ConnectionColor(rawValue: color.lowercased()) }
-        if let tag = item("tag", "env", "environment") { c.tag = ConnectionTag(rawValue: tag.lowercased()) }
+        if let tag = item("tag", "env", "environment") {
+            c.tagID = tags.first { $0.name.localizedCaseInsensitiveCompare(tag) == .orderedSame }?.id
+        }
         if let level = item("safemode", "safemodelevel") {
             c.safeMode = Int(level).flatMap(SafeMode.init(level:)) ?? SafeMode(rawValue: level) ?? c.safeMode
         }

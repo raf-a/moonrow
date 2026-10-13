@@ -33,7 +33,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MoonrowActions {
     private(set) var welcome: WelcomeWindowController?
     /// The open connection picker, if any.
     private(set) var picker: ConnectionPicker?
-    private var forms: [ConnectionFormWindowController] = []
+    private(set) var forms: [ConnectionFormWindowController] = []
     private(set) var workspaces: [WorkspaceWindowController] = []
 
     func applicationWillFinishLaunching(_ notification: Notification) {
@@ -43,6 +43,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MoonrowActions {
         AppStyle.apply()
         NSApp.mainMenu = MainMenu.build(keyBindings: settings.settings.keyBindings)
         NotificationCenter.default.addObserver(self, selector: #selector(settingsChanged), name: SettingsStore.didChange, object: settings)
+        NotificationCenter.default.addObserver(self, selector: #selector(storeChanged), name: ConnectionStore.didChange, object: store)
         if let settingsError {
             present(settingsError, title: "Your preferences couldn't be read, so the defaults are used. The old file was kept as settings.json.bak.", in: nil)
         }
@@ -67,6 +68,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MoonrowActions {
         if old.keyBindings != settings.settings.keyBindings {
             NSApp.mainMenu = MainMenu.build(keyBindings: settings.settings.keyBindings)
         }
+    }
+
+    /// Workspace titles follow edits to a connection's tag and to the tags themselves.
+    @objc private func storeChanged() {
+        for w in workspaces { w.tag = tag(of: w.config) }
+    }
+
+    /// The saved connection's tag (its config as opened when it isn't saved).
+    private func tag(of config: ConnectionConfig) -> ConnectionTag? {
+        store.tag(of: store.connection(id: config.id) ?? config)
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -446,7 +457,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MoonrowActions {
         let layouts = columnLayouts[config.id] ?? ColumnLayouts(fileURL: ColumnLayouts.fileURL(root: dataRoot, connection: config.id))
         columnLayouts[config.id] = layouts
         let workspace = WorkspaceWindowController(
-            config: config, connection: connection, history: history, savedQueries: saved, password: password)
+            config: config, tag: tag(of: config), connection: connection, history: history, savedQueries: saved,
+            password: password)
         workspace.environment.columnLayouts = layouts
         // A level picked in the toolbar is kept with the saved connection.
         workspace.safety.onLevelChange = { [weak self] level in

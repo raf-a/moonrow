@@ -152,15 +152,14 @@ struct DumpToolTests {
     }
 
     @Test func backupFileName() {
-        var config = ConnectionConfig(name: "Prod", driver: .postgres)
-        config.tag = .production
+        let config = ConnectionConfig(name: "Prod", driver: .postgres)
         var o = BackupOptions()
         o.postgresFormat = .directory
         let when = Date(timeIntervalSince1970: 1_700_000_000)
         var job = BackupJob(config: config, password: nil, database: "a", options: o, tool: tool(.pgDump, [18]), serverIsMariaDB: false)
-        #expect(job.fileName(FileNamePattern("{tag}-{database}"), date: when) == "production-a")
+        #expect(job.fileName(FileNamePattern("{tag}-{database}"), tag: "production", date: when) == "production-a")
         job.options.postgresFormat = .custom
-        #expect(job.fileName(FileNamePattern("{tag}-{database}"), date: when) == "production-a.dump")
+        #expect(job.fileName(FileNamePattern("{tag}-{database}"), tag: "production", date: when) == "production-a.dump")
         job.options.postgresFormat = .plain
         job.options.gzip = true
         #expect(job.fileName(FileNamePattern("{database}"), date: when) == "a.sql.gz")

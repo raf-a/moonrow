@@ -7,6 +7,10 @@ import DBKit
 @MainActor
 final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate, MoonrowActions {
     let config: ConnectionConfig
+    /// The connection's tag, shown after its name in the title. Follows edits to the tags.
+    var tag: ConnectionTag? {
+        didSet { if tag != oldValue { titleView.connectionTag = tag } }
+    }
     /// The database password the workspace logged in with (Backup and Restore reuse it).
     let loginPassword: String?
     let connection: any DatabaseConnection
@@ -55,9 +59,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
 
     /// `password` is the database password the workspace logged in with; safe mode's password
     /// levels ask for it.
-    init(config: ConnectionConfig, connection: any DatabaseConnection, history: QueryHistory, savedQueries: SavedQueries,
-         password: String?) {
+    init(config: ConnectionConfig, tag: ConnectionTag?, connection: any DatabaseConnection, history: QueryHistory,
+         savedQueries: SavedQueries, password: String?) {
         self.config = config
+        self.tag = tag
         self.loginPassword = password
         self.connection = connection
         let safety = SafetyGate(
@@ -360,7 +365,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         }
     }
 
-    private lazy var titleView = WorkspaceTitleView(config)
+    private lazy var titleView = WorkspaceTitleView(config, tag: tag)
 
     // MARK: - Staged changes
 
@@ -860,18 +865,23 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     }
 }
 
-/// The workspace's title in the toolbar: the connection's name with its tag as a badge after it,
-/// and the subtitle under them.
+/// The workspace's title in the toolbar: the connection's name with its tag after it, as the
+/// connection list shows it (`TagCapsule`), and the subtitle under them.
 final class WorkspaceTitleView: NSView {
     private let name: NSTextField
     private let detail = NSTextField(labelWithString: "")
+    private let tagCapsule = TagCapsule()
+
+    var connectionTag: ConnectionTag? {
+        didSet { tagCapsule.show(connectionTag) }
+    }
 
     var subtitle: String {
         get { detail.stringValue }
         set { detail.stringValue = newValue }
     }
 
-    init(_ config: ConnectionConfig) {
+    init(_ config: ConnectionConfig, tag: ConnectionTag?) {
         name = NSTextField(labelWithString: config.displayName)
         super.init(frame: .zero)
         name.font = .boldSystemFont(ofSize: 13)
@@ -883,9 +893,9 @@ final class WorkspaceTitleView: NSView {
         detail.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         detail.stringValue = config.shortSummary
 
-        let top = NSStackView(views: [name])
+        let top = NSStackView(views: [name, tagCapsule])
         top.spacing = 6
-        if let badge = ConnectionBadge(config) { top.addArrangedSubview(badge) }
+        tagCapsule.show(tag)
         let stack = NSStackView(views: [top, detail])
         stack.orientation = .vertical
         stack.alignment = .leading

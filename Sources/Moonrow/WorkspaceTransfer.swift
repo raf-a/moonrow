@@ -15,7 +15,7 @@ extension WorkspaceWindowController {
     /// What file-name patterns fill in.
     var fileNameContext: FileNamePattern.Context {
         let database = sidebar.schema ?? (config.database.isEmpty ? (config.driver == .sqlite ? URL(filePath: config.filePath).deletingPathExtension().lastPathComponent : "") : config.database)
-        return FileNamePattern.Context(database: database, connection: config.displayName, tag: config.tag?.rawValue ?? "")
+        return FileNamePattern.Context(database: database, connection: config.displayName, tag: tag?.name ?? "")
     }
 
     /// The selected table tab as its grid shows it, or the selected query tab's shown result.

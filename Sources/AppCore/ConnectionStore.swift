@@ -27,6 +27,8 @@ public final class ConnectionStore {
     public private(set) var connections: [ConnectionConfig] = []
     /// The welcome window's folders, by name. Connections name theirs with `groupID`.
     public private(set) var groups: [ConnectionGroup] = []
+    /// The tags connections can have, in the order they're offered.
+    public private(set) var tags: [ConnectionTag] = ConnectionTag.defaults
 
     public init(fileURL: URL) {
         self.fileURL = fileURL
@@ -54,6 +56,7 @@ public final class ConnectionStore {
     public func load() throws {
         connections = []
         groups = []
+        tags = ConnectionTag.defaults
         let data: Data
         do {
             data = try Data(contentsOf: fileURL)
@@ -73,6 +76,7 @@ public final class ConnectionStore {
         }
         connections = Self.sorted(file.connections)
         groups = Self.sorted(file.groups ?? [])
+        tags = file.tags ?? ConnectionTag.defaults
     }
 
     /// Renames an unreadable file to `connections.json.bak` (replacing an older backup)
@@ -85,6 +89,7 @@ public final class ConnectionStore {
         try fm.moveItem(at: fileURL, to: backup)
         connections = []
         groups = []
+        tags = ConnectionTag.defaults
         return backup
     }
 
@@ -111,6 +116,35 @@ public final class ConnectionStore {
         copy.name = copy.displayName + " copy"
         try save(copy)
         return copy
+    }
+
+    // MARK: - Tags
+
+    public func tag(id: UUID?) -> ConnectionTag? {
+        id.flatMap { id in tags.first { $0.id == id } }
+    }
+
+    /// The connection's tag, nil when it has none or the store no longer has it.
+    public func tag(of connection: ConnectionConfig) -> ConnectionTag? { tag(id: connection.tagID) }
+
+    /// Replaces the tags, in this order. Names are trimmed; a tag without a name, or named like
+    /// one before it (ignoring case), is left out. Connections whose tag is gone lose it.
+    public func setTags(_ list: [ConnectionTag]) throws {
+        var kept: [ConnectionTag] = []
+        for var t in list {
+            t.name = t.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !t.name.isEmpty, !kept.contains(where: { $0.id == t.id || $0.name.lowercased() == t.name.lowercased() })
+            else { continue }
+            kept.append(t)
+        }
+        let ids = Set(kept.map(\.id))
+        let untagged = connections.map { c -> ConnectionConfig in
+            var c = c
+            if let id = c.tagID, !ids.contains(id) { c.tagID = nil }
+            return c
+        }
+        guard kept != tags || untagged != connections else { return }
+        try write(untagged, tags: kept)
     }
 
     // MARK: - Groups
@@ -174,18 +208,22 @@ public final class ConnectionStore {
         try write(moved, groups: groups)
     }
 
-    private func write(_ list: [ConnectionConfig], groups newGroups: [ConnectionGroup]? = nil) throws {
+    private func write(_ list: [ConnectionConfig], groups newGroups: [ConnectionGroup]? = nil,
+                       tags newTags: [ConnectionTag]? = nil) throws {
         let sorted = Self.sorted(list)
         let sortedGroups = Self.sorted(newGroups ?? groups)
+        let tagList = newTags ?? tags
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(StoreFile(
-            version: Self.formatVersion, connections: sorted, groups: sortedGroups.isEmpty ? nil : sortedGroups))
+            version: Self.formatVersion, connections: sorted, groups: sortedGroups.isEmpty ? nil : sortedGroups,
+            tags: tagList == ConnectionTag.defaults ? nil : tagList))
         try FileManager.default.createDirectory(
             at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try data.write(to: fileURL, options: .atomic)
         connections = sorted
         groups = sortedGroups
+        tags = tagList
         NotificationCenter.default.post(name: Self.didChange, object: self)
     }
 
@@ -209,6 +247,8 @@ private struct StoreFile: Codable {
     var connections: [ConnectionConfig]
     /// Left out while there are none, so files without groups stay as they were.
     var groups: [ConnectionGroup]?
+    /// Left out while they're the defaults; an empty list means every tag was removed.
+    var tags: [ConnectionTag]?
 }
 
 /// A folder of connections in the welcome window.

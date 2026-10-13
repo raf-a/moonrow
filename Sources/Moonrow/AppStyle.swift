@@ -95,57 +95,17 @@ extension ConnectionColor {
         case .gray: .systemGray
         }
     }
-}
 
-extension ConnectionConfig {
-    /// The colour to mark the connection with: its own, else its tag's.
-    var markColor: NSColor? { (color ?? tag?.suggestedColor)?.nsColor }
-}
-
-/// The connection's tag after its name in the workspace title, as the connection list shows it
-/// (`TagCapsule`), or a dot in the colour when it has a colour and no tag.
-final class ConnectionBadge: NSView {
-    init?(_ config: ConnectionConfig) {
-        guard let color = config.markColor else { return nil }
-        super.init(frame: .zero)
-        translatesAutoresizingMaskIntoConstraints = false
-        let mark: NSView
-        if let tag = config.tag {
-            let capsule = TagCapsule()
-            capsule.show(tag, color: color)
-            mark = capsule
-        } else {
-            mark = Dot(color)
+    /// A dot in the colour, for menus. It's drawn when shown, so it follows light and dark.
+    func dot(diameter: CGFloat = 10) -> NSImage {
+        let color = nsColor
+        let image = NSImage(size: NSSize(width: diameter, height: diameter), flipped: false) { rect in
+            color.setFill()
+            NSBezierPath(ovalIn: rect.insetBy(dx: 0.5, dy: 0.5)).fill()
+            return true
         }
-        addSubview(mark)
-        mark.pin(to: self)
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError() }
-
-    private final class Dot: NSView {
-        let color: NSColor
-
-        init(_ color: NSColor) {
-            self.color = color
-            super.init(frame: .zero)
-            wantsLayer = true
-            NSLayoutConstraint.activate([
-                widthAnchor.constraint(equalToConstant: 9),
-                heightAnchor.constraint(equalToConstant: 9),
-            ])
-        }
-
-        @available(*, unavailable)
-        required init?(coder: NSCoder) { fatalError() }
-
-        override var wantsUpdateLayer: Bool { true }
-
-        override func updateLayer() {
-            layer?.cornerRadius = bounds.height / 2
-            layer?.backgroundColor = color.cgColor
-        }
+        image.accessibilityDescription = title
+        return image
     }
 }
 
@@ -182,10 +142,10 @@ final class TagCapsule: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
-    func show(_ tag: ConnectionTag?, color: NSColor?) {
+    func show(_ tag: ConnectionTag?) {
         isHidden = tag == nil
-        label.stringValue = tag?.title ?? ""
-        self.color = color ?? .secondaryLabelColor
+        label.stringValue = tag?.name ?? ""
+        color = tag?.color.nsColor ?? .secondaryLabelColor
         restyle()
     }
 

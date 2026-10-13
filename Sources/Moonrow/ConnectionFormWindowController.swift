@@ -29,8 +29,11 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
     private let caField = NSTextField()
     private let certField = NSTextField()
     private let keyField = NSTextField()
-    private let colorPicker = ColorSwatchPicker()
-    private let tagPopup = NSPopUpButton()
+    let tagPopup = NSPopUpButton()
+    /// The tag picked in `tagPopup`; kept apart so Edit Tags… doesn't change it.
+    private var tagID: UUID?
+    /// Edit Tags…, while it's open.
+    private(set) var tagsSheet: TagsSheet?
     private let safeModePopup = NSPopUpButton()
     private let safeModeHint = NSTextField(wrappingLabelWithString: "")
     private let readOnlyBox = NSButton(checkboxWithTitle: "Read-only", target: nil, action: nil)
@@ -69,6 +72,7 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         window.contentView = makeContent()
         show(config)
         window.center()
+        NotificationCenter.default.addObserver(self, selector: #selector(storeChanged), name: ConnectionStore.didChange, object: store)
     }
 
     @available(*, unavailable)
@@ -124,8 +128,6 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         sshHint.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         sshHint.preferredMaxLayoutWidth = 360
 
-        tagPopup.addItem(withTitle: "None")
-        tagPopup.addItems(withTitles: ConnectionTag.allCases.map(\.title))
         tagPopup.target = self
         tagPopup.action = #selector(tagChanged(_:))
         safeModePopup.addItems(withTitles: SafeMode.allCases.map(\.title))
@@ -142,7 +144,7 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         let rows: [(String, NSView, Kind)] = [
             ("Type", driverPopup, .both),
             ("Name", nameField, .both),
-            ("Colour", row(colorPicker, NSTextField(labelWithString: "Tag"), tagPopup), .both),
+            ("Tag", tagPopup, .both),
             ("Database file", row(pathField, button("Choose…", #selector(chooseFile(_:)))), .file),
             ("Host", hostRow, .server),
             ("User", userField, .server),
@@ -278,8 +280,8 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         caField.stringValue = c.tlsCAPath
         certField.stringValue = c.tlsCertPath
         keyField.stringValue = c.tlsKeyPath
-        colorPicker.color = c.color
-        tagPopup.selectItem(at: c.tag.flatMap { ConnectionTag.allCases.firstIndex(of: $0) }.map { $0 + 1 } ?? 0)
+        tagID = store.tag(id: c.tagID)?.id
+        rebuildTagMenu()
         safeModePopup.selectItem(at: SafeMode.allCases.firstIndex(of: c.safeMode) ?? 0)
         safeModeHint.stringValue = c.safeMode.detail
         readOnlyBox.state = c.readOnly ? .on : .off
@@ -315,8 +317,7 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         c.tlsCAPath = text(caField)
         c.tlsCertPath = text(certField)
         c.tlsKeyPath = text(keyField)
-        c.color = colorPicker.color
-        c.tag = tagPopup.indexOfSelectedItem > 0 ? ConnectionTag.allCases[tagPopup.indexOfSelectedItem - 1] : nil
+        c.tagID = tagID
         c.safeMode = SafeMode.allCases[max(0, safeModePopup.indexOfSelectedItem)]
         c.readOnly = readOnlyBox.state == .on
         c.rowsPerPage = Int(pageSizeField.stringValue.filter(\.isNumber)) ?? 0
@@ -377,11 +378,45 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         layoutForDriver()
     }
 
-    /// A tag picked while no colour is chosen brings its colour along.
-    @objc private func tagChanged(_ sender: Any?) {
-        guard colorPicker.color == nil, tagPopup.indexOfSelectedItem > 0 else { return }
-        colorPicker.color = ConnectionTag.allCases[tagPopup.indexOfSelectedItem - 1].suggestedColor
+    // MARK: Tags
+
+    /// None, the store's tags with their colours, then Edit Tags…; `tagID` selected (None when
+    /// that tag is gone).
+    private func rebuildTagMenu() {
+        if store.tag(id: tagID) == nil { tagID = nil }
+        let menu = NSMenu()
+        menu.addItem(withTitle: "None", action: nil, keyEquivalent: "")
+        for tag in store.tags {
+            let item = menu.addItem(withTitle: tag.name, action: nil, keyEquivalent: "")
+            item.image = tag.color.dot()
+            item.representedObject = tag.id
+        }
+        menu.addItem(.separator())
+        let edit = menu.addItem(withTitle: "Edit Tags…", action: #selector(editTags(_:)), keyEquivalent: "")
+        edit.target = self
+        tagPopup.menu = menu
+        selectTag()
     }
+
+    private func selectTag() {
+        let index = tagPopup.itemArray.firstIndex { ($0.representedObject as? UUID) == tagID && tagID != nil } ?? 0
+        tagPopup.selectItem(at: index)
+    }
+
+    @objc private func tagChanged(_ sender: Any?) {
+        tagID = tagPopup.selectedItem?.representedObject as? UUID
+    }
+
+    @objc func editTags(_ sender: Any?) {
+        selectTag()
+        guard let window, tagsSheet == nil else { return }
+        let sheet = TagsSheet(store: store)
+        tagsSheet = sheet
+        sheet.begin(on: window) { [weak self] in self?.tagsSheet = nil }
+    }
+
+    /// The tags (or this connection's tag) changed elsewhere: the menu follows.
+    @objc private func storeChanged() { rebuildTagMenu() }
 
     @objc private func safeModeChanged(_ sender: Any?) {
         safeModeHint.stringValue = SafeMode.allCases[max(0, safeModePopup.indexOfSelectedItem)].detail
@@ -466,76 +501,4 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
 
 extension Array {
     subscript(safe i: Int) -> Element? { indices.contains(i) ? self[i] : nil }
-}
-
-/// Round colour buttons, "none" first; one is selected at a time.
-@MainActor
-final class ColorSwatchPicker: NSStackView {
-    var color: ConnectionColor? {
-        didSet { for (i, b) in swatches.enumerated() { b.isSelected = i == 0 ? color == nil : ConnectionColor.allCases[i - 1] == color } }
-    }
-    private var swatches: [Swatch] = []
-
-    init() {
-        super.init(frame: .zero)
-        spacing = 5
-        let choices: [ConnectionColor?] = [nil] + ConnectionColor.allCases
-        for (i, c) in choices.enumerated() {
-            let swatch = Swatch(color: c?.nsColor)
-            swatch.toolTip = c?.title ?? "No colour"
-            swatch.tag = i
-            swatch.target = self
-            swatch.action = #selector(picked(_:))
-            swatches.append(swatch)
-            addArrangedSubview(swatch)
-        }
-        color = nil
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError() }
-
-    @objc private func picked(_ sender: NSButton) {
-        color = sender.tag == 0 ? nil : ConnectionColor.allCases[sender.tag - 1]
-    }
-
-    final class Swatch: NSButton {
-        let fill: NSColor?
-        var isSelected = false { didSet { needsDisplay = true } }
-
-        init(color: NSColor?) {
-            fill = color
-            super.init(frame: NSRect(x: 0, y: 0, width: 18, height: 18))
-            isBordered = false
-            title = ""
-            widthAnchor.constraint(equalToConstant: 18).isActive = true
-            heightAnchor.constraint(equalToConstant: 18).isActive = true
-            setAccessibilityLabel(color == nil ? "No colour" : "Colour")
-        }
-
-        @available(*, unavailable)
-        required init?(coder: NSCoder) { fatalError() }
-
-        override func draw(_ dirtyRect: NSRect) {
-            let circle = NSBezierPath(ovalIn: bounds.insetBy(dx: 3, dy: 3))
-            if let fill {
-                fill.setFill()
-                circle.fill()
-            } else {
-                NSColor.tertiaryLabelColor.setStroke()
-                circle.lineWidth = 1
-                circle.stroke()
-                let slash = NSBezierPath()
-                slash.move(to: NSPoint(x: bounds.minX + 5, y: bounds.minY + 5))
-                slash.line(to: NSPoint(x: bounds.maxX - 5, y: bounds.maxY - 5))
-                slash.stroke()
-            }
-            if isSelected {
-                let ring = NSBezierPath(ovalIn: bounds.insetBy(dx: 0.75, dy: 0.75))
-                ring.lineWidth = 1.5
-                NSColor.labelColor.setStroke()
-                ring.stroke()
-            }
-        }
-    }
 }

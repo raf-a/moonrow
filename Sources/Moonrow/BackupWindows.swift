@@ -682,7 +682,8 @@ final class BackupWindowController: ToolWindowController {
     private func fileName(for pattern: String) -> String {
         let database = selectedDatabase ?? "database"
         let name = FileNamePattern(pattern).render(.init(database: database, connection: selected?.displayName ?? "connection",
-                                                         tag: selected?.tag?.rawValue ?? ""), fallback: database)
+                                                         tag: selected.flatMap(environment.store.tag(of:))?.name ?? ""),
+                                         fallback: database)
         let ext = options.fileExtension(family ?? .postgres)
         return ext.isEmpty ? name : "\(name).\(ext)"
     }
@@ -728,7 +729,8 @@ final class BackupWindowController: ToolWindowController {
         guard let window, let job, tokensAreValid else { return }
         saveOptions()
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = job.fileName(FileNamePattern(fileName.pattern))
+        panel.nameFieldStringValue = job.fileName(FileNamePattern(fileName.pattern),
+                                                  tag: environment.store.tag(of: job.config)?.name ?? "")
         panel.canCreateDirectories = true
         panel.isExtensionHidden = false
         panel.prompt = "Back Up"

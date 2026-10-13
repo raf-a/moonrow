@@ -990,9 +990,10 @@ public struct BackupJob: Sendable {
 
     var family: DumpTool.Family { config.driver == .postgres ? .postgres : .mysql }
 
-    /// The file name the pattern gives, with the format's extension.
-    public func fileName(_ pattern: FileNamePattern, date: Date = Date()) -> String {
-        let name = pattern.render(.init(database: database, connection: config.displayName, tag: config.tag?.rawValue ?? "", date: date),
+    /// The file name the pattern gives, with the format's extension. `tag` is the connection's
+    /// tag's name.
+    public func fileName(_ pattern: FileNamePattern, tag: String = "", date: Date = Date()) -> String {
+        let name = pattern.render(.init(database: database, connection: config.displayName, tag: tag, date: date),
                                   fallback: database)
         let ext = options.fileExtension(family)
         return ext.isEmpty ? name : "\(name).\(ext)"

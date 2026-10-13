@@ -95,10 +95,10 @@ final class ConnectionList: NSObject, NSOutlineViewDataSource, NSOutlineViewDele
     }
 
     /// Whether a connection matches the search: its name, host (or file) and tag.
-    static func matches(_ c: ConnectionConfig, _ query: String) -> Bool {
+    static func matches(_ c: ConnectionConfig, tag: ConnectionTag?, _ query: String) -> Bool {
         query.isEmpty || c.displayName.localizedCaseInsensitiveContains(query)
             || c.summary.localizedCaseInsensitiveContains(query)
-            || (c.tag?.title.localizedCaseInsensitiveContains(query) ?? false)
+            || (tag?.name.localizedCaseInsensitiveContains(query) ?? false)
     }
 
     @objc private func storeChanged() { reload() }
@@ -108,7 +108,7 @@ final class ConnectionList: NSObject, NSOutlineViewDataSource, NSOutlineViewDele
         let selected = id ?? selectedNode?.id
         let query = query.trimmingCharacters(in: .whitespaces)
         func shown(_ list: [ConnectionConfig]) -> [Node] {
-            list.filter { Self.matches($0, query) && include?($0) != false }.map(Node.init(connection:))
+            list.filter { Self.matches($0, tag: store.tag(of: $0), query) && include?($0) != false }.map(Node.init(connection:))
         }
         let groups = store.groups.map { Node(group: $0, children: shown(store.connections(in: $0.id))) }
             .filter { (query.isEmpty && include == nil) || !$0.children.isEmpty }
@@ -200,7 +200,7 @@ final class ConnectionList: NSObject, NSOutlineViewDataSource, NSOutlineViewDele
         }
         let cell = outlineView.makeView(withIdentifier: ConnectionCell.identifier, owner: nil) as? ConnectionCell
             ?? ConnectionCell()
-        if let c = node.connection { cell.show(c, inGroup: outlineView.parent(forItem: node) != nil) }
+        if let c = node.connection { cell.show(c, tag: store.tag(of: c), inGroup: outlineView.parent(forItem: node) != nil) }
         return cell
     }
 
@@ -353,13 +353,13 @@ final class ConnectionCell: NSTableCellView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
-    func show(_ c: ConnectionConfig, inGroup: Bool) {
+    func show(_ c: ConnectionConfig, tag: ConnectionTag?, inGroup: Bool) {
         row.edgeInsets.left = 2 + (inGroup ? Self.groupIndent : 0)
         title.stringValue = c.displayName
         detail.stringValue = c.place
         toolTip = c.summary
         icon.show(c)
-        tagCapsule.show(c.tag, color: c.markColor)
+        tagCapsule.show(tag)
     }
 
     /// On the selected row the secondary line follows the selection's text colour.

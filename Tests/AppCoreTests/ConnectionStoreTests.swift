@@ -47,6 +47,50 @@ private func tempFile() -> URL {
         #expect(reloaded.connections == [a, b])
     }
 
+    @Test func tagsStartAsTheDefaultsAndAreKeptOnlyOnceEdited() throws {
+        let url = tempFile()
+        let store = ConnectionStore(fileURL: url)
+        try store.load()
+        #expect(store.tags == ConnectionTag.defaults)
+        try store.save(ConnectionConfig(name: "a", filePath: "/tmp/a.db"))
+        #expect(!String(decoding: try Data(contentsOf: url), as: UTF8.self).contains("\"tags\""))
+
+        var tags = store.tags
+        tags[4].name = "Live"
+        tags[4].color = .yellow
+        tags.append(ConnectionTag(name: "QA", color: .green))
+        try store.setTags(tags)
+        let reloaded = ConnectionStore(fileURL: url)
+        try reloaded.load()
+        #expect(reloaded.tags == tags)
+        #expect(reloaded.tag(id: ConnectionTag.production.id)?.name == "Live")
+
+        // Every tag removed stays removed.
+        try reloaded.setTags([])
+        let empty = ConnectionStore(fileURL: url)
+        try empty.load()
+        #expect(empty.tags.isEmpty)
+    }
+
+    @Test func settingTagsTrimsNamesAndUntagsConnectionsWhoseTagIsGone() throws {
+        let store = ConnectionStore(fileURL: tempFile())
+        let qa = ConnectionTag(name: "QA", color: .green)
+        try store.setTags([.production, qa, ConnectionTag(name: "  ", color: .red), ConnectionTag(name: " qa ", color: .blue)])
+        #expect(store.tags == [.production, qa])
+        let prod = ConnectionConfig(name: "p", filePath: "/tmp/p.db", tagID: ConnectionTag.production.id)
+        let tested = ConnectionConfig(name: "q", filePath: "/tmp/q.db", tagID: qa.id)
+        try store.save(prod)
+        try store.save(tested)
+        #expect(store.tag(of: tested) == qa)
+
+        var renamed = qa
+        renamed.name = "  Quality "
+        try store.setTags([renamed])
+        #expect(store.tags.map(\.name) == ["Quality"])
+        #expect(store.connection(id: prod.id)?.tagID == nil)
+        #expect(store.tag(of: store.connection(id: tested.id)!)?.name == "Quality")
+    }
+
     @Test func saveReplacesById() throws {
         let store = ConnectionStore(fileURL: tempFile())
         var c = ConnectionConfig(name: "one", filePath: "/tmp/1.db")

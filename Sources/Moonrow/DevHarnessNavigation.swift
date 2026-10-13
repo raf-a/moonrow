@@ -306,7 +306,8 @@ extension DevHarness {
     }
 
     /// Groups in the welcome window: listing, collapsing (kept in the store), searching by tag,
-    /// moving a connection into a group, deleting a group. Start from an empty store.
+    /// moving a connection into a group, deleting a group. Then the connection form's tag menu
+    /// and Edit Tags…: renaming, recolouring, adding and removing tags. Start from an empty store.
     static func welcomeDemo(_ app: AppDelegate, snapshots: URL?) async throws {
         if let snapshots { try FileManager.default.createDirectory(at: snapshots, withIntermediateDirectories: true) }
         func check(_ ok: Bool, _ what: String) throws {
@@ -318,9 +319,9 @@ extension DevHarness {
         let production = try store.addGroup(named: "Production")
         let local = try store.addGroup(named: "Local")
         try store.save(ConnectionConfig(name: "shop prod", driver: .postgres, host: "db.example.com", user: "shop",
-                                        database: "shop", tag: .production, groupID: production.id))
+                                        database: "shop", tagID: ConnectionTag.production.id, groupID: production.id))
         let staging = ConnectionConfig(name: "shop staging", driver: .postgres, host: "staging.example.com", user: "shop",
-                                       database: "shop", tag: .staging)
+                                       database: "shop", tagID: ConnectionTag.staging.id)
         try store.save(staging)
         try store.save(ConnectionConfig(name: "notes.db", filePath: "~/notes.db", groupID: local.id))
         app.showConnections(nil)
@@ -361,6 +362,71 @@ extension DevHarness {
                   "⇧⌘K without a workspace shows the picker on its own, listed as the welcome window lists them \(picker.list.shownRows)")
         try check(picker.selected?.name == "shop prod", "the first connection shown is selected (\(picker.selected?.name ?? "none"))")
         if let snapshots { snapshot(picker.window, to: snapshots.appending(path: "welcome-3-open-connection.png")) }
+        picker.window.close()
+        try await tagsDemo(app, staging: staging.id, snapshots: snapshots)
+    }
+
+    /// The form's tag menu lists the store's tags and Edit Tags…; the sheet's edits reach the
+    /// menu, the list and the store, and connections whose tag is removed lose it.
+    private static func tagsDemo(_ app: AppDelegate, staging: UUID, snapshots: URL?) async throws {
+        func check(_ ok: Bool, _ what: String) throws {
+            guard ok else { throw HarnessError("expected: \(what)") }
+            print("ok: \(what)")
+        }
+        let store = app.store
+        let welcome = try require(app.welcome, "welcome window")
+        app.editConnection(try require(store.connection(id: staging), "shop staging"), isNew: false)
+        let form = try require(app.forms.last, "connection form")
+        let formWindow = try require(form.window, "form window")
+        func menu() -> [String] { form.tagPopup.itemArray.map { $0.isSeparatorItem ? "—" : $0.title } }
+        try check(menu() == ["None", "Local", "Testing", "Development", "Staging", "Production", "—", "Edit Tags…"]
+                  && form.tagPopup.titleOfSelectedItem == "Staging", "the tag menu: None, the tags, Edit Tags… \(menu())")
+        if let snapshots { snapshot(formWindow, to: snapshots.appending(path: "tags-1-form.png")) }
+
+        form.editTags(nil)
+        let sheet = try require(form.tagsSheet, "Edit Tags sheet")
+        let sheetWindow = try require(sheet.window, "sheet window")
+        _ = try await waitFor("sheet shown") { formWindow.attachedSheet === sheetWindow ? true : nil }
+        try check(form.tagPopup.titleOfSelectedItem == "Staging", "Edit Tags… leaves the connection's tag selected")
+        func nameField(_ row: Int) throws -> NSTextField {
+            try require((sheet.table.view(atColumn: 1, row: row, makeIfNecessary: true) as? NSTableCellView)?.textField, "name \(row)")
+        }
+        func type(_ text: String, row: Int) throws {
+            let field = try nameField(row)
+            field.stringValue = text
+            sheet.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: field))
+        }
+        try type("Pre-release", row: 3)
+        let colour = try require(sheet.table.view(atColumn: 0, row: 3, makeIfNecessary: true)?.subviews.first as? NSPopUpButton, "colour")
+        colour.selectItem(withTitle: "Yellow")
+        _ = colour.target?.perform(colour.action, with: colour)
+        sheet.addTag(nil)
+        try type("QA", row: 5)
+        try type("qa", row: 1)
+        try check(!sheet.status.stringValue.isEmpty && sheet.table.numberOfRows == 6, "two tags with one name can't be saved: \(sheet.status.stringValue)")
+        try type("Testing", row: 1)
+        sheet.table.selectRowIndexes([4], byExtendingSelection: false)
+        sheet.removeTags(nil)
+        try check(sheet.status.stringValue == "1 connection will have no tag.", "removing Production says who loses it: \(sheet.status.stringValue)")
+        // Dragging Pre-release and QA above Local.
+        sheet.moveRows([3, 4], to: 0)
+        try check(sheet.table.selectedRowIndexes == [0, 1], "dragged rows stay selected")
+        if let snapshots { snapshot(sheetWindow, to: snapshots.appending(path: "tags-2-sheet.png")) }
+        sheet.save(nil)
+        _ = try await waitFor("sheet closed") { formWindow.attachedSheet == nil ? true : nil }
+
+        try check(store.tags.map(\.name) == ["Pre-release", "QA", "Local", "Testing", "Development"]
+                  && store.tag(id: ConnectionTag.staging.id)?.color == .yellow, "the store has the edited tags")
+        try check(menu() == ["None", "Pre-release", "QA", "Local", "Testing", "Development", "—", "Edit Tags…"]
+                  && form.tagPopup.titleOfSelectedItem == "Pre-release", "the menu follows, the renamed tag still selected \(menu())")
+        try check(store.connections.first { $0.name == "shop prod" }?.tagID == nil, "shop prod lost the removed tag")
+        welcome.search.stringValue = "pre-release"
+        welcome.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification))
+        try check(welcome.list.shownRows == ["shop staging"], "the list searches the renamed tag \(welcome.list.shownRows)")
+        welcome.search.stringValue = ""
+        welcome.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification))
+        if let snapshots, let window = welcome.window { snapshot(window, to: snapshots.appending(path: "tags-3-list.png")) }
+        form.close()
     }
 
     /// The window's panes and tabs as text: `*` marks the selected tab, `_x_` a preview, `[S]`
