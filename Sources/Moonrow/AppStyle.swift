@@ -102,37 +102,146 @@ extension ConnectionConfig {
     var markColor: NSColor? { (color ?? tag?.suggestedColor)?.nsColor }
 }
 
-/// A connection's colour as a capsule, with its tag written in it when it has one.
-final class ConnectionMarkView: NSView {
-    private let color: NSColor?
-    private let label = NSTextField(labelWithString: "")
-
-    init(_ config: ConnectionConfig) {
-        color = config.markColor
+/// The connection's tag as a capsule in its colour ("Production"), or a dot in the colour when
+/// it has a colour and no tag. Shown after the connection's name in the workspace title. A solid
+/// fill rather than glass: tinted glass greys out with its window, and the colour is a warning.
+final class ConnectionBadge: NSView {
+    init?(_ config: ConnectionConfig) {
+        guard let color = config.markColor else { return nil }
         super.init(frame: .zero)
-        wantsLayer = true
-        label.stringValue = config.tag?.title.uppercased() ?? ""
-        label.font = .systemFont(ofSize: 10, weight: .bold)
-        label.textColor = .white
-        label.isHidden = config.tag == nil
-        addSubview(label)
-        label.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            label.centerYAnchor.constraint(equalTo: centerYAnchor),
-            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
-            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-            heightAnchor.constraint(equalToConstant: 18),
-        ])
-        if config.tag == nil { widthAnchor.constraint(equalToConstant: 18).isActive = true }
+        translatesAutoresizingMaskIntoConstraints = false
+        let mark: NSView
+        if let tag = config.tag {
+            let label = NSTextField(labelWithString: tag.title)
+            label.font = .systemFont(ofSize: 11, weight: .semibold)
+            label.textColor = color.prefersDarkText ? .black : .white
+            mark = Fill(color, label: label)
+        } else {
+            mark = Fill(color, label: nil)
+        }
+        addSubview(mark)
+        mark.pin(to: self)
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
-    override func updateLayer() {
-        layer?.cornerRadius = 9
-        layer?.backgroundColor = (color ?? .systemGray).cgColor
+    private final class Fill: NSView {
+        let color: NSColor
+
+        /// A capsule around `label`, or a dot without one.
+        init(_ color: NSColor, label: NSTextField?) {
+            self.color = color
+            super.init(frame: .zero)
+            wantsLayer = true
+            if let label {
+                addSubview(label)
+                label.translatesAutoresizingMaskIntoConstraints = false
+                NSLayoutConstraint.activate([
+                    label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 7),
+                    label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -7),
+                    label.centerYAnchor.constraint(equalTo: centerYAnchor),
+                    heightAnchor.constraint(equalToConstant: 17),
+                ])
+            } else {
+                NSLayoutConstraint.activate([
+                    widthAnchor.constraint(equalToConstant: 9),
+                    heightAnchor.constraint(equalToConstant: 9),
+                ])
+            }
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { fatalError() }
+
+        override var wantsUpdateLayer: Bool { true }
+
+        override func updateLayer() {
+            layer?.cornerRadius = bounds.height / 2
+            layer?.backgroundColor = color.cgColor
+        }
+
+        override func layout() {
+            super.layout()
+            needsDisplay = true
+        }
+    }
+}
+
+extension NSColor {
+    /// Text on this colour reads better in black than in white (yellow, light greys).
+    var prefersDarkText: Bool {
+        guard let c = usingColorSpace(.sRGB) else { return false }
+        return 0.299 * c.redComponent + 0.587 * c.greenComponent + 0.114 * c.blueComponent > 0.65
+    }
+}
+
+/// A capsule behind `content`: Liquid Glass on macOS 26 and later (tinted when `tint` is set);
+/// before, the tint as a solid fill, or the popover material without one.
+final class GlassCapsule: NSView {
+    let content: NSView
+    private let backdrop: NSView
+    private let tint: NSColor?
+
+    init(_ content: NSView, tint: NSColor? = nil, padding: CGFloat = 8) {
+        self.content = content
+        self.tint = tint
+        let holder = NSView()
+        content.translatesAutoresizingMaskIntoConstraints = false
+        holder.addSubview(content)
+        NSLayoutConstraint.activate([
+            content.leadingAnchor.constraint(equalTo: holder.leadingAnchor, constant: padding),
+            content.trailingAnchor.constraint(equalTo: holder.trailingAnchor, constant: -padding),
+            content.centerYAnchor.constraint(equalTo: holder.centerYAnchor),
+            content.topAnchor.constraint(greaterThanOrEqualTo: holder.topAnchor),
+        ])
+        if #available(macOS 26.0, *) {
+            let glass = NSGlassEffectView()
+            glass.tintColor = tint
+            glass.contentView = holder
+            // Pinned, so the capsule takes its size from the content.
+            holder.pin(to: glass)
+            backdrop = glass
+        } else {
+            let effect = NSVisualEffectView()
+            effect.material = .popover
+            effect.blendingMode = .withinWindow
+            effect.state = .active
+            // A tinted capsule is a solid fill there, so the effect view stays hidden under it.
+            effect.isHidden = tint != nil
+            backdrop = effect
+        }
+        super.init(frame: .zero)
+        wantsLayer = true
+        addSubview(backdrop)
+        backdrop.pin(to: self)
+        if holder.superview == nil {
+            addSubview(holder)
+            holder.pin(to: self)
+        }
     }
 
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
     override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        if #available(macOS 26.0, *) { return }
+        // Filled here so the colour follows the appearance.
+        layer?.backgroundColor = tint?.cgColor
+    }
+
+    override func layout() {
+        super.layout()
+        let radius = bounds.height / 2
+        if #available(macOS 26.0, *), let glass = backdrop as? NSGlassEffectView {
+            glass.cornerRadius = radius
+        } else {
+            layer?.cornerRadius = radius
+            backdrop.wantsLayer = true
+            backdrop.layer?.cornerRadius = radius
+            backdrop.layer?.masksToBounds = true
+        }
+    }
 }

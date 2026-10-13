@@ -232,7 +232,12 @@ public struct ConnectionConfig: Codable, Hashable, Sendable, Identifiable {
     }
 
     /// One line describing where the connection points, e.g. `PostgreSQL · app@db.local:5432/shop`.
-    public var summary: String {
+    public var summary: String { summary(file: (expandedFilePath as NSString).abbreviatingWithTildeInPath) }
+
+    /// `summary` with only the database file's name, not its folder (the workspace's title).
+    public var shortSummary: String { summary(file: (expandedFilePath as NSString).lastPathComponent) }
+
+    private func summary(file: String) -> String {
         var parts = [driver.displayName]
         if driver.isServer {
             var target = user.isEmpty ? "" : user + "@"
@@ -242,7 +247,7 @@ public struct ConnectionConfig: Codable, Hashable, Sendable, Identifiable {
             parts.append(target)
             if usesSSH { parts.append("via SSH " + (sshUser.isEmpty ? "" : sshUser + "@") + sshHost) }
         } else if !filePath.isEmpty {
-            parts.append((expandedFilePath as NSString).abbreviatingWithTildeInPath)
+            parts.append(file)
         }
         if readOnly { parts.append("read-only") }
         if safeMode != .silent { parts.append("safe mode") }

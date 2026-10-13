@@ -66,9 +66,7 @@ final class PickerPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
         note.textColor = .secondaryLabelColor
         note.font = .systemFont(ofSize: 11)
 
-        let background = NSVisualEffectView()
-        background.material = .menu
-        background.state = .active
+        let background = NSView()
         for v in [field, scroll, note] {
             v.translatesAutoresizingMaskIntoConstraints = false
             background.addSubview(v)
@@ -85,7 +83,23 @@ final class PickerPanel: NSObject, NSTableViewDataSource, NSTableViewDelegate, N
             note.trailingAnchor.constraint(lessThanOrEqualTo: background.trailingAnchor, constant: -14),
             note.bottomAnchor.constraint(equalTo: background.bottomAnchor, constant: -8),
         ])
-        panel.contentView = background
+        if #available(macOS 26.0, *) {
+            // A glass panel: the window draws nothing of its own, the glass is its shape.
+            panel.backgroundColor = .clear
+            panel.isOpaque = false
+            let glass = NSGlassEffectView()
+            glass.cornerRadius = 18
+            glass.contentView = background
+            background.pin(to: glass)
+            panel.contentView = glass
+        } else {
+            let effect = NSVisualEffectView()
+            effect.material = .menu
+            effect.state = .active
+            effect.addSubview(background)
+            background.pin(to: effect)
+            panel.contentView = effect
+        }
     }
 
     /// Shows the panel near the top of `window`, over its content.

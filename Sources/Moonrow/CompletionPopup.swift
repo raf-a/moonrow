@@ -46,23 +46,49 @@ final class CompletionPopup: NSObject, NSTableViewDataSource, NSTableViewDelegat
         scroll.documentView = table
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = false
-        let effect = NSVisualEffectView()
-        effect.material = .popover
-        effect.state = .active
-        effect.wantsLayer = true
-        effect.layer?.cornerRadius = 6
-        effect.layer?.masksToBounds = true
-        effect.layer?.borderWidth = 0.5
-        effect.layer?.borderColor = NSColor.separatorColor.cgColor
+        let content = NSView()
         scroll.translatesAutoresizingMaskIntoConstraints = false
-        effect.addSubview(scroll)
+        content.addSubview(scroll)
         NSLayoutConstraint.activate([
-            scroll.leadingAnchor.constraint(equalTo: effect.leadingAnchor),
-            scroll.trailingAnchor.constraint(equalTo: effect.trailingAnchor),
-            scroll.topAnchor.constraint(equalTo: effect.topAnchor, constant: 3),
-            scroll.bottomAnchor.constraint(equalTo: effect.bottomAnchor, constant: -3),
+            scroll.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            scroll.topAnchor.constraint(equalTo: content.topAnchor, constant: 4),
+            scroll.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -4),
         ])
-        panel.contentView = effect
+        if #available(macOS 26.0, *) {
+            let glass = NSGlassEffectView()
+            glass.cornerRadius = 10
+            glass.contentView = content
+            content.pin(to: glass)
+            panel.contentView = glass
+        } else {
+            let effect = Background()
+            effect.material = .popover
+            effect.state = .active
+            effect.wantsLayer = true
+            effect.layer?.cornerRadius = 6
+            effect.layer?.masksToBounds = true
+            effect.layer?.borderWidth = 0.5
+            effect.addSubview(content)
+            content.pin(to: effect)
+            panel.contentView = effect
+        }
+    }
+
+    /// The popover material with a hairline border in the separator colour of the appearance.
+    private final class Background: NSVisualEffectView {
+        override func viewDidChangeEffectiveAppearance() {
+            super.viewDidChangeEffectiveAppearance()
+            // A CGColor is resolved once, so it's set again for each appearance.
+            effectiveAppearance.performAsCurrentDrawingAppearance {
+                layer?.borderColor = NSColor.separatorColor.cgColor
+            }
+        }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            viewDidChangeEffectiveAppearance()
+        }
     }
 
     /// Shows `items` below `anchor` (screen coordinates), keeping the selection on the same

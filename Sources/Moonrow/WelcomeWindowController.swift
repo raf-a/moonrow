@@ -55,7 +55,9 @@ final class WelcomeWindowController: NSWindowController, NSWindowDelegate, NSSea
         side.material = .sidebar
         side.blendingMode = .behindWindow
 
-        let icon = NSImageView(image: NSApp.applicationIconImage)
+        // From Icon Services, as Finder and the Dock draw it. With the Icon Composer icon in
+        // Assets.car, NSApp.applicationIconImage comes back as the generic app icon.
+        let icon = NSImageView(image: NSWorkspace.shared.icon(forFile: Bundle.main.bundlePath))
         icon.imageScaling = .scaleProportionallyUpOrDown
         icon.widthAnchor.constraint(equalToConstant: 88).isActive = true
         icon.heightAnchor.constraint(equalToConstant: 88).isActive = true
@@ -71,6 +73,10 @@ final class WelcomeWindowController: NSWindowController, NSWindowDelegate, NSSea
         let restoreButton = NSButton(title: "Restore", target: nil, action: #selector(MoonrowActions.restoreDatabase(_:)))
         for b in [newButton, backupButton, restoreButton] {
             b.controlSize = .large
+            if #available(macOS 26.0, *) {
+                b.bezelStyle = .glass
+                b.borderShape = .capsule
+            }
             b.widthAnchor.constraint(equalToConstant: 190).isActive = true
         }
 
@@ -95,8 +101,6 @@ final class WelcomeWindowController: NSWindowController, NSWindowDelegate, NSSea
                            target: nil, action: #selector(MoonrowActions.newConnection(_:)))
         add.bezelStyle = .accessoryBarAction
         add.toolTip = "New connection"
-        let header = NSStackView(views: [search, newGroup, add])
-        header.spacing = 6
 
         outline.target = self
         outline.doubleAction = #selector(connectClicked(_:))
@@ -104,14 +108,16 @@ final class WelcomeWindowController: NSWindowController, NSWindowDelegate, NSSea
         outline.onReturn = { [weak self] in self?.returnPressed() }
         outline.onDelete = { [weak self] in self?.deleteClicked(nil) }
         let scroll = list.scrollView
-
-        let main = NSStackView(views: [header, scroll])
-        main.orientation = .vertical
-        main.alignment = .leading
-        main.spacing = 10
-        main.edgeInsets = NSEdgeInsets(top: 40, left: 16, bottom: 16, right: 16)
-        header.widthAnchor.constraint(equalTo: main.widthAnchor, constant: -32).isActive = true
-        scroll.widthAnchor.constraint(equalTo: header.widthAnchor).isActive = true
+        // The same controls as the workspace's: the system's search field, and on macOS 26
+        // glass buttons like the toolbar's.
+        if #available(macOS 26.0, *) {
+            for b in [newGroup, add] {
+                b.bezelStyle = .glass
+                // Round, as the toolbar's.
+                b.borderShape = .circle
+            }
+        }
+        let main = header(search: search, buttons: [newGroup, add], over: scroll)
 
         for v in [side, main] {
             v.translatesAutoresizingMaskIntoConstraints = false
@@ -128,6 +134,27 @@ final class WelcomeWindowController: NSWindowController, NSWindowDelegate, NSSea
             main.bottomAnchor.constraint(equalTo: root.bottomAnchor),
         ])
         return root
+    }
+
+    /// The search field and buttons in a row above the list.
+    private func header(search: NSSearchField, buttons: [NSButton], over scroll: NSScrollView) -> NSView {
+        let header = NSStackView(views: [search] + buttons)
+        header.spacing = 6
+        if #available(macOS 26.0, *) {
+            // Circles as tall as the search field (they share the stack now, so they can be tied).
+            for b in buttons {
+                b.heightAnchor.constraint(equalTo: search.heightAnchor).isActive = true
+                b.widthAnchor.constraint(equalTo: b.heightAnchor).isActive = true
+            }
+        }
+        let main = NSStackView(views: [header, scroll])
+        main.orientation = .vertical
+        main.alignment = .leading
+        main.spacing = 10
+        main.edgeInsets = NSEdgeInsets(top: 40, left: 16, bottom: 16, right: 16)
+        header.widthAnchor.constraint(equalTo: main.widthAnchor, constant: -32).isActive = true
+        scroll.widthAnchor.constraint(equalTo: header.widthAnchor).isActive = true
+        return main
     }
 
     private func makeContextMenu() -> NSMenu {

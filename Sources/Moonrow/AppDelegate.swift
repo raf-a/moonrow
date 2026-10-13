@@ -77,7 +77,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MoonrowActions {
             reopening = reopenWorkspaces()
         }
         if workspaces.isEmpty, reopening == 0 { showWelcome(nil) }
-        NSApp.activate()
+        // `MOONROW_BACKGROUND` keeps a harness run behind the apps in use.
+        if ProcessInfo.processInfo.environment["MOONROW_BACKGROUND"] == nil { NSApp.activate() }
         DevHarness.runIfRequested(self)
     }
 

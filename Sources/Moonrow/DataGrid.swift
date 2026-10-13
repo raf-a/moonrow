@@ -8,6 +8,13 @@ import DBKit
 /// selected rows across that span.
 @MainActor
 final class DataGrid: NSTableView {
+    override func addTableColumn(_ tableColumn: NSTableColumn) {
+        if !(tableColumn.headerCell is GridHeaderCell) {
+            tableColumn.headerCell = GridHeaderCell(textCell: tableColumn.headerCell.stringValue)
+        }
+        super.addTableColumn(tableColumn)
+    }
+
     /// Identifier of the column holding the cell cursor.
     var focusedColumn: NSUserInterfaceItemIdentifier? {
         didSet {
@@ -295,6 +302,20 @@ final class GridCell: NSTableCellView {
     /// Width a column needs to show `text` without truncating.
     static func width(of text: String, header: Bool) -> CGFloat {
         let font = header ? headerFont : font
-        return ceil((text as NSString).size(withAttributes: [.font: font]).width) + 2 * padding + (header ? 14 : 4)
+        return ceil((text as NSString).size(withAttributes: [.font: font]).width) + 2 * padding
+            + (header ? 14 + GridHeaderCell.inset : 4)
+    }
+}
+
+/// A column title in line with the text of the cells under it: the standard header cell starts
+/// its title nearer the column's edge than the cells start their text.
+final class GridHeaderCell: NSTableHeaderCell {
+    static let inset: CGFloat = 5
+
+    override func drawInterior(withFrame cellFrame: NSRect, in controlView: NSView) {
+        var frame = cellFrame
+        frame.origin.x += Self.inset
+        frame.size.width -= Self.inset
+        super.drawInterior(withFrame: frame, in: controlView)
     }
 }

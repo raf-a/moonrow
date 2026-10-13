@@ -54,7 +54,14 @@ let package = Package(
         // App logic without AppKit, so `swift test` covers it.
         .target(name: "AppCore", dependencies: ["SQLScript", "DBKit", "WireSupport", "SSHTunnel", "DriverSQLite", "DriverPostgres", "DriverMySQL"]),
         // The AppKit app. `scripts/build-app.sh` wraps it into Moonrow.app.
-        .executableTarget(name: "Moonrow", dependencies: ["AppCore"]),
+        .executableTarget(
+            name: "Moonrow",
+            dependencies: ["AppCore"],
+            // SwiftPM links with `-platform_version macos 14.0 14.0`, which stamps the binary as
+            // built against SDK 14, and AppKit then keeps the pre-macOS 26 look. Linking as built
+            // against SDK 26 turns on Liquid Glass; macOS 14 is still the minimum.
+            linkerSettings: [.unsafeFlags(["-Xlinker", "-platform_version", "-Xlinker", "macos", "-Xlinker", "14.0", "-Xlinker", "26.0"])]
+        ),
         .testTarget(name: "SQLScriptTests", dependencies: ["SQLScript"]),
         .testTarget(name: "DBKitTests", dependencies: ["DBKit"]),
         .testTarget(name: "DriverSQLiteTests", dependencies: ["DriverSQLite"]),

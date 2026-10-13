@@ -130,6 +130,18 @@ enum DevHarness {
             }
             return
         }
+        // `MOONROW_SHOW=Sample:users,events,?;Other` opens saved connections by name and, in each,
+        // the tables listed (`?` is a query tab), then leaves the app running to be looked at.
+        if let spec = env["MOONROW_SHOW"] {
+            Task {
+                do {
+                    try await show(app, spec)
+                } catch {
+                    print("show failed: \(error)")
+                }
+            }
+            return
+        }
         // Staged changes across pages, tabs and reloads, then discarded: it never commits.
         if let table = env["MOONROW_STAGED"] {
             Task {
@@ -322,6 +334,23 @@ enum DevHarness {
         try await Task.sleep(for: .seconds(1.5))
         guard let window = workspace.window else { return }
         snapshot(window, to: snapshots.appending(path: "\(target).png"))
+    }
+
+    private static func show(_ app: AppDelegate, _ spec: String) async throws {
+        for part in spec.split(separator: ";") {
+            let fields = part.split(separator: ":", maxSplits: 1).map(String.init)
+            let config = try require(app.store.connections.first { $0.name == fields[0] }, "saved connection \(fields[0])")
+            app.connect(config, presentingErrorsIn: nil, placement: .window)
+            let workspace = try await waitFor("workspace \(fields[0])") { app.workspaces.first { $0.config.id == config.id } }
+            for name in fields.count > 1 ? fields[1].split(separator: ",").map(String.init) : [] {
+                if name == "?" {
+                    workspace.newQueryTab(nil)
+                } else {
+                    let object = try await waitFor("table \(name)") { workspace.sidebar.object(named: name) }
+                    workspace.open(object, intent: .newTab, focus: false)
+                }
+            }
+        }
     }
 
     /// With only `MOONROW_SNAPSHOTS` set: renders every visible window once launched, then quits.
@@ -745,7 +774,7 @@ enum DevHarness {
         workspace.tableTab?.switchTo(.data)
 
         // The Changes item counts what's staged; ⌘S commits from anywhere, here the sidebar.
-        let item = try require(window.toolbar?.items.first { $0.itemIdentifier.rawValue == "changes" }, "Changes item")
+        let item = try require(workspace.toolbarItem(.init("changes")), "Changes item")
         try check(item.isEnabled && workspace.shownChangeCount == changes.changeCount, "the toolbar shows \(changes.changeCount) changes")
         snap("6-before-commit.png", window)
         window.makeFirstResponder(outline)

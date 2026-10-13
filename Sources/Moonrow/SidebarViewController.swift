@@ -73,7 +73,9 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     private let schemaPopup = NSPopUpButton()
     private let schemaBar = NSStackView()
     private let newTableButton = NSButton()
-    private let newMenuButton = NSPopUpButton(frame: .zero, pullsDown: true)
+    /// A plain button rather than a pull-down, so its chevron is drawn as the + beside it is.
+    private let newMenuButton = NSButton()
+    private lazy var newMenu = makeNewMenu()
     /// The schema (Postgres) or database (MySQL) whose items are listed; nil for SQLite, or a
     /// MySQL connection without a default database.
     private(set) var schema: String?
@@ -201,23 +203,24 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         schemaPopup.target = self
         schemaPopup.action = #selector(schemaChosen(_:))
         schemaPopup.toolTip = "Schema"
-        newTableButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "New table")
+        newTableButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "New table")?
+            .withSymbolConfiguration(.init(pointSize: 14, weight: .medium))
         newTableButton.bezelStyle = .accessoryBarAction
+        newTableButton.isBordered = false
+        newTableButton.contentTintColor = .secondaryLabelColor
         newTableButton.controlSize = .small
         newTableButton.target = self
         newTableButton.action = #selector(newTable(_:))
         newTableButton.toolTip = "New table"
+        newMenuButton.image = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: "More new items")?
+            .withSymbolConfiguration(.init(pointSize: 10, weight: .semibold))
         newMenuButton.bezelStyle = .accessoryBarAction
         newMenuButton.isBordered = false
+        newMenuButton.contentTintColor = .secondaryLabelColor
         newMenuButton.controlSize = .small
         newMenuButton.toolTip = "New view, function or procedure"
-        (newMenuButton.cell as? NSPopUpButtonCell)?.arrowPosition = .noArrow
-        let newMenu = makeNewMenu()
-        let title = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-        title.image = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: "More new items")
-        newMenu.insertItem(title, at: 0)
-        newMenuButton.menu = newMenu
-        newMenuButton.imagePosition = .imageOnly
+        newMenuButton.target = self
+        newMenuButton.action = #selector(showNewMenu(_:))
         schemaBar.addArrangedSubview(newTableButton)
         schemaBar.addArrangedSubview(newMenuButton)
         schemaBar.addArrangedSubview(schemaPopup)
@@ -250,6 +253,11 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     /// Selects (and so opens) the item with this name. False if the list has no such item yet.
     @discardableResult
+    /// The listed object called `name`, if any (the harnesses open it).
+    func object(named name: String) -> DatabaseObject? {
+        objects.first { $0.ref.name == name }
+    }
+
     func select(named name: String) -> Bool {
         select { $0.ref.name == name }
     }
@@ -385,6 +393,12 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.items.first?.isEnabled = targetObject.map(Self.opens) ?? false
+    }
+
+    /// The chevron's menu, under it.
+    @objc private func showNewMenu(_ sender: NSButton) {
+        let below = sender.isFlipped ? sender.bounds.maxY + 4 : sender.bounds.minY - 4
+        newMenu.popUp(positioning: nil, at: NSPoint(x: sender.bounds.minX, y: below), in: sender)
     }
 
     /// New ▸ Table…, View, Materialized View, Function, Procedure.

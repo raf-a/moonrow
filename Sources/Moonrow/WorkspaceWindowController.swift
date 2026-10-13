@@ -91,8 +91,11 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         window.contentViewController = split
         window.setContentSize(NSSize(width: 1100, height: 680))
         window.minSize = NSSize(width: 600, height: 360)
+        // The toolbar shows the name, the connection's tag and the subtitle itself (`titleView`);
+        // the window keeps them for the Window menu and window tabs.
         window.title = config.displayName
-        window.subtitle = config.summary
+        window.subtitle = config.shortSummary
+        window.titleVisibility = .hidden
         // Workspaces can be merged into one window's tabs (Window ▸ Merge All Windows); the
         // system's tab overview is View ▸ Show All Tabs.
         window.tabbingMode = .automatic
@@ -332,17 +335,29 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
             sidebar.reveal(table)
         }
         if let object = definitionTab?.object {
-            window?.subtitle = "\(object.ref) — \(config.summary)"
+            subtitle = "\(object.ref) — \(config.shortSummary)"
         } else if let table, tableTab?.newTableID == nil {
-            window?.subtitle = "\(table) — \(config.summary)"
+            subtitle = "\(table) — \(config.shortSummary)"
         } else if let editor = queryController {
-            window?.subtitle = "\(editor.tabItem.title) — \(config.summary)"
+            subtitle = "\(editor.tabItem.title) — \(config.shortSummary)"
         } else {
-            window?.subtitle = config.summary
+            subtitle = config.shortSummary
         }
         if !isNavigating, let tab = content.current { history.visit(NavigationPlace(tab)) }
         onSessionChange?()
     }
+
+    /// What the title shows under the connection's name: the open table or query, and the
+    /// connection's summary.
+    private var subtitle: String {
+        get { titleView.subtitle }
+        set {
+            titleView.subtitle = newValue
+            window?.subtitle = newValue
+        }
+    }
+
+    private lazy var titleView = WorkspaceTitleView(config)
 
     // MARK: - Staged changes
 
@@ -653,6 +668,28 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
 
     @objc private func safetyLevelChanged() { updateSafetyItem() }
 
+    private lazy var safetyMenu = makeSafetyMenu()
+
+    /// The Safe Mode button's menu, under the button.
+    @objc private func showSafetyMenu(_ sender: Any?) {
+        guard let window, let frame = window.contentView?.superview else { return }
+        // A click: under the button. Otherwise (accessibility, keyboard): at the pointer.
+        let point: NSPoint
+        if let event = NSApp.currentEvent, event.type == .leftMouseDown || event.type == .leftMouseUp, event.window == window {
+            point = frame.convert(event.locationInWindow, from: nil)
+        } else {
+            point = frame.convert(window.convertPoint(fromScreen: NSEvent.mouseLocation), from: nil)
+        }
+        var view = frame.hitTest(point)
+        while let v = view, !(v is NSControl) { view = v.superview }
+        if let button = view {
+            let below = button.isFlipped ? button.bounds.maxY + 4 : button.bounds.minY - 4
+            safetyMenu.popUp(positioning: nil, at: NSPoint(x: button.bounds.minX, y: below), in: button)
+        } else {
+            safetyMenu.popUp(positioning: nil, at: point, in: frame)
+        }
+    }
+
     private func makeSafetyMenu() -> NSMenu {
         let menu = NSMenu(title: "Safe Mode")
         for (i, level) in SafeMode.allCases.enumerated() {
@@ -669,14 +706,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     }
 
     private func updateSafetyItem() {
-        guard let item = window?.toolbar?.items.first(where: { $0.itemIdentifier == Self.safetyItem }) as? NSMenuToolbarItem else { return }
+        guard let item = toolbarItem(Self.safetyItem) else { return }
         let level = safety.level
         let symbol = config.readOnly ? "lock.fill"
             : level == .silent ? "shield" : level.requiresPassword ? "lock.shield" : "exclamationmark.shield"
         item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Safe mode")
         item.label = "Safe Mode"
         item.toolTip = "Safe mode: \(level.title)" + (config.readOnly ? " · read-only connection" : "")
-        for menuItem in item.menu.items where menuItem.action == #selector(changeSafeMode(_:)) {
+        for menuItem in safetyMenu.items where menuItem.action == #selector(changeSafeMode(_:)) {
             menuItem.state = menuItem.tag == SafeMode.allCases.firstIndex(of: level) ? .on : .off
         }
     }
@@ -686,13 +723,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     private static let reloadItem = NSToolbarItem.Identifier("reload")
     private static let changesItem = NSToolbarItem.Identifier("changes")
     private static let safetyItem = NSToolbarItem.Identifier("safety")
-    private static let markItem = NSToolbarItem.Identifier("mark")
+    private static let titleItem = NSToolbarItem.Identifier("title")
+    /// Changes, Safe Mode and Reload, side by side as one group.
+    private static let actionsItem = NSToolbarItem.Identifier("actions")
     private static let inspectorToggleItem = NSToolbarItem.Identifier("rightSidebar")
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        var items: [NSToolbarItem.Identifier] = [.toggleSidebar, .sidebarTrackingSeparator]
-        if config.markColor != nil || config.tag != nil { items.append(Self.markItem) }
-        return items + [.flexibleSpace, Self.changesItem, Self.safetyItem, Self.reloadItem,
+        [.toggleSidebar, .sidebarTrackingSeparator, Self.titleItem, .flexibleSpace, Self.actionsItem,
                         .inspectorTrackingSeparator, .flexibleSpace, Self.inspectorToggleItem]
     }
 
@@ -706,18 +743,36 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     ) -> NSToolbarItem? {
         switch id {
         case Self.safetyItem:
-            let item = NSMenuToolbarItem(itemIdentifier: id)
-            item.menu = makeSafetyMenu()
-            item.showsIndicator = true
+            // On macOS 26 a pull-down gets a glass capsule of its own; as a plain button that
+            // opens the menu it shares one with Changes and Reload.
+            let item: NSToolbarItem
+            if #available(macOS 26.0, *) {
+                item = NSToolbarItem(itemIdentifier: id)
+                item.isBordered = true
+                item.target = self
+                item.action = #selector(showSafetyMenu(_:))
+            } else {
+                let pullDown = NSMenuToolbarItem(itemIdentifier: id)
+                pullDown.menu = safetyMenu
+                pullDown.showsIndicator = true
+                item = pullDown
+            }
             DispatchQueue.main.async { [weak self] in self?.updateSafetyItem() }
             item.image = NSImage(systemSymbolName: "shield", accessibilityDescription: "Safe mode")
             item.label = "Safe Mode"
             return item
-        case Self.markItem:
+        case Self.actionsItem:
+            let group = NSToolbarItemGroup(itemIdentifier: id)
+            group.subitems = [Self.changesItem, Self.safetyItem, Self.reloadItem].compactMap {
+                self.toolbar(toolbar, itemForItemIdentifier: $0, willBeInsertedIntoToolbar: flag)
+            }
+            group.label = "Actions"
+            return group
+        case Self.titleItem:
             let item = NSToolbarItem(itemIdentifier: id)
-            item.view = ConnectionMarkView(config)
-            item.label = config.tag?.title ?? "Colour"
-            item.toolTip = config.tag.map { "\($0.title) connection" } ?? config.displayName
+            item.view = titleView
+            item.label = config.displayName
+            item.isBordered = false
             return item
         default:
             break
@@ -749,9 +804,17 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         return item
     }
 
+    /// The toolbar's item `id`, inside a group or not.
+    func toolbarItem(_ id: NSToolbarItem.Identifier) -> NSToolbarItem? {
+        for item in window?.toolbar?.items ?? [] {
+            for sub in (item as? NSToolbarItemGroup)?.subitems ?? [item] where sub.itemIdentifier == id { return sub }
+        }
+        return nil
+    }
+
     /// The Changes item: an icon with the count as a badge, greyed out with nothing staged.
     func updateChangesItem() {
-        guard let item = window?.toolbar?.items.first(where: { $0.itemIdentifier == Self.changesItem }) else { return }
+        guard let item = toolbarItem(Self.changesItem) else { return }
         let n = changes.changeCount
         shownChangeCount = n
         // Toolbar badges arrived in macOS 26; earlier systems show the icon alone.
@@ -798,6 +861,48 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         UserDefaults.standard.set(!inspectorItem.isCollapsed, forKey: Self.inspectorVisibleKey)
         inspector.refresh()
     }
+}
+
+/// The workspace's title in the toolbar: the connection's name with its tag as a badge after it,
+/// and the subtitle under them.
+final class WorkspaceTitleView: NSView {
+    private let name: NSTextField
+    private let detail = NSTextField(labelWithString: "")
+
+    var subtitle: String {
+        get { detail.stringValue }
+        set { detail.stringValue = newValue }
+    }
+
+    init(_ config: ConnectionConfig) {
+        name = NSTextField(labelWithString: config.displayName)
+        super.init(frame: .zero)
+        name.font = .boldSystemFont(ofSize: 13)
+        name.lineBreakMode = .byTruncatingTail
+        name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        detail.font = .systemFont(ofSize: 11)
+        detail.textColor = .secondaryLabelColor
+        detail.lineBreakMode = .byTruncatingTail
+        detail.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        detail.stringValue = config.shortSummary
+
+        let top = NSStackView(views: [name])
+        top.spacing = 6
+        if let badge = ConnectionBadge(config) { top.addArrangedSubview(badge) }
+        let stack = NSStackView(views: [top, detail])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 1
+        // The toolbar's items keep their room; the title and subtitle are cut short instead.
+        for v in [top, stack] { v.setClippingResistancePriority(.defaultLow, for: .horizontal) }
+        addSubview(stack)
+        stack.pin(to: self)
+        widthAnchor.constraint(greaterThanOrEqualToConstant: 120).isActive = true
+        widthAnchor.constraint(lessThanOrEqualToConstant: 460).isActive = true
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
 }
 
 /// A tab the window showed, for Back / Forward: the tab, and the table it showed then.

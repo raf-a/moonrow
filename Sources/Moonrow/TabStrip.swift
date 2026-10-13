@@ -42,6 +42,9 @@ final class TabStrip: NSView {
     private let stack = NSStackView()
     private let addButton = NSButton()
     private var tabViews: [TabView] = []
+    /// macOS 26 and later: the glass capsule under the selected tab. It sits behind the scroll
+    /// view rather than in it, so the clip view doesn't cut off its edge and shadow.
+    private var selectionGlass: NSView?
     static let height: CGFloat = 28
 
     override init(frame: NSRect) {
@@ -70,6 +73,16 @@ final class TabStrip: NSView {
         let line = NSBox()
         line.boxType = .separator
         line.translatesAutoresizingMaskIntoConstraints = false
+        if #available(macOS 26.0, *) {
+            let glass = NSGlassEffectView()
+            glass.isHidden = true
+            addSubview(glass)
+            selectionGlass = glass
+            // Follows the tabs as they scroll.
+            scroll.contentView.postsBoundsChangedNotifications = true
+            NotificationCenter.default.addObserver(self, selector: #selector(placeSelectionGlass),
+                                                   name: NSView.boundsDidChangeNotification, object: scroll.contentView)
+        }
         for v in [scroll, addButton, line] { addSubview(v) }
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: Self.height),
@@ -118,6 +131,8 @@ final class TabStrip: NSView {
                 self.onDoubleClick?(i)
             }
             v.isActive = isActive
+            v.usesGlass = selectionGlass != nil
+            v.onLayout = { [weak self] in self?.placeSelectionGlass() }
             tabViews.append(v)
             stack.addArrangedSubview(v)
         }
@@ -131,6 +146,27 @@ final class TabStrip: NSView {
             layoutSubtreeIfNeeded()
             tabViews[i].scrollToVisible(tabViews[i].bounds)
         }
+        placeSelectionGlass()
+    }
+
+    override func layout() {
+        super.layout()
+        placeSelectionGlass()
+    }
+
+    /// Puts the glass under the selected tab, cut to the part of the strip the tabs show in.
+    @objc private func placeSelectionGlass() {
+        guard #available(macOS 26.0, *), let glass = selectionGlass as? NSGlassEffectView else { return }
+        guard let i = selectedIndex, i < tabViews.count else {
+            glass.isHidden = true
+            return
+        }
+        let tab = tabViews[i]
+        let frame = convert(tab.bounds, from: tab).insetBy(dx: TabView.glassInset, dy: TabView.glassInset)
+        let shown = frame.intersection(scroll.frame)
+        glass.isHidden = shown.isEmpty
+        glass.frame = shown
+        glass.cornerRadius = frame.height / 2
     }
 
     @objc private func addClicked() { onAdd?() }
@@ -156,6 +192,12 @@ private final class TabView: NSView {
     private let icon = NSImageView()
     private let label = NSTextField(labelWithString: "")
     private let close = NSButton()
+    /// macOS 26 and later: the selected tab sits on the strip's glass capsule instead of a fill
+    /// and an accent line.
+    var usesGlass = false { didSet { update() } }
+    /// Called when the tab's size changes, so the strip moves its glass along.
+    var onLayout: (() -> Void)?
+    static let glassInset: CGFloat = 2
 
     init() {
         super.init(frame: .zero)
@@ -201,7 +243,9 @@ private final class TabView: NSView {
         toolTip = item.toolTip ?? item.title
         icon.image = item.symbol.flatMap { NSImage(systemSymbolName: $0, accessibilityDescription: nil) }
         icon.isHidden = icon.image == nil
-        icon.contentTintColor = item.tint ?? (isSelected ? .controlAccentColor : .secondaryLabelColor)
+        // With glass the active pane's selected tab is told apart by its icon alone.
+        let accent = isSelected && (!usesGlass || isActive)
+        icon.contentTintColor = item.tint ?? (accent ? .controlAccentColor : .secondaryLabelColor)
         label.textColor = item.tint ?? (isSelected ? .labelColor : .secondaryLabelColor)
         // The × keeps its space so titles don't shift on hover.
         close.isHidden = !item.closable
@@ -209,7 +253,21 @@ private final class TabView: NSView {
         needsDisplay = true
     }
 
+    override func layout() {
+        super.layout()
+        onLayout?()
+    }
+
     override func draw(_ dirtyRect: NSRect) {
+        if usesGlass {
+            // The selected tab's capsule is the glass view; hover gets the same shape, filled.
+            if isHovered, !isSelected {
+                let rect = bounds.insetBy(dx: Self.glassInset, dy: Self.glassInset)
+                NSColor.quaternaryLabelColor.withAlphaComponent(0.12).setFill()
+                NSBezierPath(roundedRect: rect, xRadius: rect.height / 2, yRadius: rect.height / 2).fill()
+            }
+            return
+        }
         // Filled here rather than as a layer colour: a CGColor is resolved once, against whatever
         // appearance is current at the time, and doesn't follow the window into dark mode.
         if isSelected {
