@@ -61,6 +61,27 @@ public final class PostgresConnection: DatabaseConnection, @unchecked Sendable {
         }
     }
 
+    public func withTransaction<T: Sendable>(_ body: @Sendable (any TransactionScope) async throws -> T) async throws -> T {
+        let dialect = dialect
+        return try await host.withSession { session in
+            try await session.query(dialect.beginTransaction)
+            do {
+                let value = try await body(PGScope(session: session))
+                try await session.query(dialect.commitTransaction)
+                return value
+            } catch {
+                if session.isAlive, session.transactionStatus != UInt8(ascii: "I") {
+                    _ = try? await session.query(dialect.rollbackTransaction)
+                }
+                throw error
+            }
+        }
+    }
+
+    public func copyIn(_ sql: String, from source: @escaping CopySource) async throws -> Int {
+        try await host.withSession { try await $0.copyIn(sql, from: source) }
+    }
+
     private func rows(_ sql: String, _ bindings: [DBValue] = []) async throws -> [[DBValue]] {
         try await host.withSession { try await $0.query(sql, bindings).rows }
     }
@@ -299,5 +320,21 @@ extension DBValue {
 extension PGSession {
     func query(_ sql: String) async throws {
         _ = try await query(sql, [])
+    }
+}
+
+/// Statements inside `PostgresConnection.withTransaction`, on the session it holds.
+struct PGScope: TransactionScope {
+    let session: PGSession
+
+    func execute(_ statement: SQLStatement) async throws -> Int {
+        let signal = CancelSignal()
+        let collector = Collector()
+        try await withTaskCancellationHandler {
+            try await session.run(statement, batchSize: 10_000, cancel: signal) { collector.add($0) }
+        } onCancel: {
+            signal.fire()
+        }
+        return collector.result.rowsAffected ?? 0
     }
 }

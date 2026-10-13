@@ -223,12 +223,26 @@ public struct SQLExportOptions: Codable, Hashable, Sendable {
     public var includeStructure: Bool
     public var includeData: Bool
     public var rowsPerInsert: Int
+    /// The file is gzip-compressed (`.sql.gz`).
+    public var gzip: Bool
 
-    public init(dropTable: Bool = false, includeStructure: Bool = true, includeData: Bool = true, rowsPerInsert: Int = 100) {
+    public init(dropTable: Bool = false, includeStructure: Bool = true, includeData: Bool = true, rowsPerInsert: Int = 100, gzip: Bool = false) {
         self.dropTable = dropTable
         self.includeStructure = includeStructure
         self.includeData = includeData
         self.rowsPerInsert = max(1, rowsPerInsert)
+        self.gzip = gzip
+    }
+
+    // Options saved before a key existed keep its default.
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = SQLExportOptions()
+        dropTable = (try? c.decodeIfPresent(Bool.self, forKey: .dropTable)) ?? d.dropTable
+        includeStructure = (try? c.decodeIfPresent(Bool.self, forKey: .includeStructure)) ?? d.includeStructure
+        includeData = (try? c.decodeIfPresent(Bool.self, forKey: .includeData)) ?? d.includeData
+        rowsPerInsert = max(1, (try? c.decodeIfPresent(Int.self, forKey: .rowsPerInsert)) ?? d.rowsPerInsert)
+        gzip = (try? c.decodeIfPresent(Bool.self, forKey: .gzip)) ?? d.gzip
     }
 }
 
@@ -243,6 +257,10 @@ public struct SQLWriter: RowWriter {
     /// Where the rows came from, for the header comment.
     public var source: String
     public var date: Date
+    /// The header comment; off for the second and later tables of one file.
+    public var writeComment = true
+    /// Statements a Postgres table's serial and identity columns need (`SequenceStatements`).
+    public var sequences = SequenceStatements()
 
     private var columnList = ""
     private var pending: [String] = []
@@ -262,7 +280,20 @@ public struct SQLWriter: RowWriter {
     public mutating func header(columns: [String]) -> String {
         columnList = columns.map(dialect.quoteIdentifier).joined(separator: ", ")
         pending = []
-        var out = """
+        var out = writeComment ? Self.comment(source: source, dialect: dialect, date: date) : ""
+        let name = dialect.qualified(table)
+        if options.dropTable { out += "DROP TABLE IF EXISTS \(name);\n\n" }
+        if options.includeStructure, let createStatement {
+            out += sequences.beforeCreate.map { $0 + ";\n" }.joined()
+            out += createStatement + "\n\n"
+            if !sequences.afterCreate.isEmpty { out += sequences.afterCreate.map { $0 + ";\n" }.joined() + "\n" }
+        }
+        return out
+    }
+
+    /// The comment a SQL export starts with.
+    public static func comment(source: String, dialect: any Dialect, date: Date) -> String {
+        """
             -- Exported by Tabula
             -- Source: \(source.replacingOccurrences(of: "\n", with: " "))
             -- Dialect: \(dialect.name)
@@ -270,10 +301,6 @@ public struct SQLWriter: RowWriter {
 
 
             """
-        let name = dialect.qualified(table)
-        if options.dropTable { out += "DROP TABLE IF EXISTS \(name);\n\n" }
-        if options.includeStructure, let createStatement { out += createStatement + "\n\n" }
-        return out
     }
 
     public mutating func rows(_ rows: [[DBValue]]) -> String {
@@ -286,7 +313,10 @@ public struct SQLWriter: RowWriter {
         return out
     }
 
-    public mutating func footer() -> String { flush() }
+    public mutating func footer() -> String {
+        guard options.includeData, !sequences.afterData.isEmpty else { return flush() }
+        return flush() + sequences.afterData.map { $0 + ";\n" }.joined()
+    }
 
     private mutating func flush() -> String {
         guard !pending.isEmpty else { return "" }
@@ -399,6 +429,34 @@ public enum CopyFormat: String, CaseIterable, Sendable {
             var w = SQLWriter(SQLExportOptions(includeStructure: false), dialect: dialect, table: table ?? TableRef("result"))
             _ = w.header(columns: columns)
             return w.rows(rows) + w.footer()
+        }
+    }
+}
+
+/// What a SQL export of a Postgres table adds so its script runs on its own: the sequence a
+/// `serial` column's default uses is created before the table (a DROP TABLE took it along) and
+/// owned by its column again, and after the rows each serial or identity sequence is moved past
+/// the largest value inserted.
+public struct SequenceStatements: Sendable, Hashable {
+    public var beforeCreate: [String] = []
+    public var afterCreate: [String] = []
+    public var afterData: [String] = []
+
+    public init() {}
+
+    public init(table: TableRef, columns: [ColumnInfo], dialect: any Dialect) {
+        guard dialect is PostgresDialect else { return }
+        let name = dialect.qualified(table)
+        for c in columns {
+            let column = dialect.quoteIdentifier(c.name)
+            if let d = c.defaultExpression, let m = d.wholeMatch(of: /nextval\('((?:[^']|'')+)'(?:::regclass)?\)/) {
+                let sequence = String(m.1).replacingOccurrences(of: "''", with: "'")
+                beforeCreate.append("CREATE SEQUENCE IF NOT EXISTS \(sequence)")
+                afterCreate.append("ALTER SEQUENCE \(sequence) OWNED BY \(name).\(column)")
+                afterData.append("SELECT setval(\(dialect.literal(.text(sequence))), max(\(column))) FROM \(name)")
+            } else if c.generated?.hasSuffix("AS IDENTITY") == true {
+                afterData.append("SELECT setval(pg_get_serial_sequence(\(dialect.literal(.text(name))), \(dialect.literal(.text(c.name)))), max(\(column))) FROM \(name)")
+            }
         }
     }
 }

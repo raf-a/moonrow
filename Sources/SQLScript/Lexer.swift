@@ -14,6 +14,8 @@ public struct LexerDialect: Sendable, Hashable {
     public var delimiterCommand: Bool
     /// `CREATE TRIGGER … BEGIN …; …; END;` keeps its inner semicolons (SQLite).
     public var triggerBodies: Bool
+    /// `/*! … */` and `/*M! … */` are code the server runs (MySQL, MariaDB), not comments.
+    public var executableComments: Bool
     public var keywords: Set<String>
 
     public init(
@@ -26,6 +28,7 @@ public struct LexerDialect: Sendable, Hashable {
         nestedBlockComments: Bool = false,
         delimiterCommand: Bool = false,
         triggerBodies: Bool = false,
+        executableComments: Bool = false,
         keywords: Set<String> = SQLKeywords.common
     ) {
         self.doubleQuoteIsIdentifier = doubleQuoteIsIdentifier
@@ -37,6 +40,7 @@ public struct LexerDialect: Sendable, Hashable {
         self.nestedBlockComments = nestedBlockComments
         self.delimiterCommand = delimiterCommand
         self.triggerBodies = triggerBodies
+        self.executableComments = executableComments
         self.keywords = keywords
     }
 
@@ -46,7 +50,7 @@ public struct LexerDialect: Sendable, Hashable {
         dollarQuotedStrings: true, nestedBlockComments: true)
     public static let mysql = LexerDialect(
         doubleQuoteIsIdentifier: false, backtickIdentifiers: true, hashLineComments: true,
-        backslashEscapes: true, delimiterCommand: true)
+        backslashEscapes: true, delimiterCommand: true, executableComments: true)
 }
 
 public enum TokenKind: Sendable, Hashable {

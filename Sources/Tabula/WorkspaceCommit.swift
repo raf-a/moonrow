@@ -186,6 +186,10 @@ extension WorkspaceWindowController: NSMenuItemValidation {
             return !changes.isEmpty && !isCommitting
         case #selector(showRunningQueries(_:)):
             return ServerSessions.isSupported(connection) && openSession != nil
+        case #selector(importCSV(_:)), #selector(importJSON(_:)), #selector(importSQLFile(_:)):
+            return !config.readOnly
+        case #selector(exportTables(_:)):
+            return environment.catalog.objects.contains { $0.kind.isRelation }
         case #selector(toggleQueryLog(_:)):
             item.state = center.isLogVisible ? .on : .off
             return true

@@ -89,6 +89,20 @@ public enum ConnectionFactory {
     }
 
     private static func tunnelEndpoint(_ c: ConnectionConfig, _ login: SSHLogin) throws -> Endpoint {
+        let tunnel = try makeTunnel(c, login)
+        let host = c.host.trimmingCharacters(in: .whitespaces)
+        return tunnel.endpoint(host: host.isEmpty ? "127.0.0.1" : host, port: c.effectivePort)
+    }
+
+    /// The database's host and port as the SSH server sees them.
+    public static func tunnelTarget(_ c: ConnectionConfig) -> (host: String, port: Int) {
+        let host = c.host.trimmingCharacters(in: .whitespaces)
+        return (host.isEmpty ? "127.0.0.1" : host, c.effectivePort)
+    }
+
+    /// A tunnel for the connection, with the password mode deciding which prompts reach the
+    /// user and which answers may be kept. Not logged in yet.
+    public static func makeTunnel(_ c: ConnectionConfig, _ login: SSHLogin) throws -> SSHTunnel {
         guard !c.usesSocket else {
             throw DatabaseError(
                 "A socket can't be reached over SSH. Enter the database's host and port as the SSH server sees them (127.0.0.1 for the SSH server itself).")
@@ -114,9 +128,7 @@ public enum ConnectionFactory {
                 save(secret, value)
             }
         }
-        let tunnel = try SSHTunnel(tunnelConfiguration(c, login), responder: responder, onSave: onSave)
-        let host = c.host.trimmingCharacters(in: .whitespaces)
-        return tunnel.endpoint(host: host.isEmpty ? "127.0.0.1" : host, port: c.effectivePort)
+        return try SSHTunnel(tunnelConfiguration(c, login), responder: responder, onSave: onSave)
     }
 
     static func postgresConfiguration(_ c: ConnectionConfig, password: String?) -> PostgresConfiguration {

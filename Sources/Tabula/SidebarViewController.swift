@@ -39,8 +39,10 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     var onMarkForDeletion: ((Deletion) -> Void)?
     var onCopyScript: ((DatabaseObject, Script) -> Void)?
     var onExport: ((DatabaseObject) -> Void)?
+    /// Export Tables… with the selected tables and views ticked.
+    var onExportTables: (() -> Void)?
     /// Nil on read-only connections.
-    var onImportCSV: ((DatabaseObject) -> Void)?
+    var onImport: ((DatabaseObject, ImportFormat) -> Void)?
     /// After the object list (re)loads.
     var onObjectsLoaded: (([DatabaseObject]) -> Void)?
     /// Once, after the next list loads (tabs following what a commit created).
@@ -167,7 +169,9 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         menu.addItem(withTitle: "Delete…", action: #selector(deleteItem(_:)), keyEquivalent: "\u{8}").target = self
         menu.addItem(.separator())
         menu.addItem(withTitle: "Export…", action: #selector(exportItem(_:)), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Export Tables…", action: #selector(exportTablesItem(_:)), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Import CSV…", action: #selector(importCSVItem(_:)), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Import JSON…", action: #selector(importJSONItem(_:)), keyEquivalent: "").target = self
         menu.addItem(.separator())
         menu.addItem(withTitle: "Copy Name", action: #selector(copyName(_:)), keyEquivalent: "").target = self
         let scripts = NSMenuItem(title: "Copy Script As", action: nil, keyEquivalent: "")
@@ -445,8 +449,10 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             return kind == .table
         case #selector(exportItem(_:)):
             return kind?.isRelation == true
-        case #selector(importCSVItem(_:)):
-            return kind == .table && onImportCSV != nil
+        case #selector(importCSVItem(_:)), #selector(importJSONItem(_:)):
+            return kind == .table && onImport != nil
+        case #selector(exportTablesItem(_:)):
+            return onExportTables != nil
         case #selector(copyScript(_:)):
             guard let kind else { return false }
             if kind.isRoutine { return item.tag <= 1 }
@@ -524,7 +530,18 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     }
 
     @objc private func importCSVItem(_ sender: Any?) {
-        if let object = targetObject { onImportCSV?(object) }
+        if let object = targetObject { onImport?(object, .csv) }
+    }
+
+    @objc private func importJSONItem(_ sender: Any?) {
+        if let object = targetObject { onImport?(object, .json) }
+    }
+
+    @objc private func exportTablesItem(_ sender: Any?) { onExportTables?() }
+
+    /// The selected tables, views and routines (not staged ones).
+    var selectedObjects: [DatabaseObject] {
+        targetItems.filter { !$0.isStaged }.map(\.object)
     }
 
     @objc private func copyScript(_ sender: NSMenuItem) {

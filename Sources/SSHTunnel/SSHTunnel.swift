@@ -205,6 +205,23 @@ public actor SSHTunnel {
         }
     }
 
+    /// Carries an accepted socket to `host:port`: a mux client gets it as stdin and stdout, and
+    /// our copy is closed. For `LocalForward`.
+    func carry(_ descriptor: Int32, host: String, port: Int) async {
+        do {
+            try await connect()
+            let process = try Subprocess(
+                configuration.sshPath,
+                SSHTunnelConfiguration.streamArguments(controlPath: controlPath, host: host, port: port),
+                environment: baseEnvironment, stdio: descriptor)
+            streams.removeAll { !$0.isRunning }
+            streams.append(process)
+        } catch {
+            // The client sees its connection close.
+        }
+        Darwin.close(descriptor)
+    }
+
     /// Logs in unless the master is up already.
     public func connect() async throws {
         if isClosed { throw SSHTunnelError("The SSH tunnel is closed.") }

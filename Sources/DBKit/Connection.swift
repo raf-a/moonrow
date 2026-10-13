@@ -1,3 +1,5 @@
+import Foundation
+
 /// A live connection to one database. Drivers implement this.
 public protocol DatabaseConnection: Sendable {
     var dialect: any Dialect { get }
@@ -34,11 +36,57 @@ public protocol DatabaseConnection: Sendable {
     /// connections that don't.
     var statementLog: StatementLog? { get }
 
+    /// Runs `body` inside one transaction: committed when it returns, rolled back when it
+    /// throws. Nothing else runs on the connection meanwhile, and a dropped session isn't
+    /// reopened halfway, so statements can be sent as they're produced (a streamed import).
+    func withTransaction<T: Sendable>(_ body: @Sendable (any TransactionScope) async throws -> T) async throws -> T
+
+    /// Runs a `COPY … FROM STDIN` statement, sending what `source` hands out until it returns
+    /// nil. Returns the rows copied. Only Postgres has it.
+    func copyIn(_ sql: String, from source: @escaping CopySource) async throws -> Int
+
     func close() async
+}
+
+/// Statements sent inside `DatabaseConnection.withTransaction`.
+public protocol TransactionScope: Sendable {
+    /// Runs one statement and returns the rows it affected. Cancelling the task stops it.
+    func execute(_ statement: SQLStatement) async throws -> Int
+}
+
+/// The data for a `COPY … FROM STDIN`, a piece at a time; nil at the end.
+public typealias CopySource = @Sendable () async throws -> Data?
+
+/// The default scope: statements on the connection itself.
+struct ConnectionScope: TransactionScope {
+    let connection: any DatabaseConnection
+
+    func execute(_ statement: SQLStatement) async throws -> Int {
+        try await connection.execute(statement).rowsAffected ?? 0
+    }
 }
 
 extension DatabaseConnection {
     public var statementLog: StatementLog? { nil }
+
+    /// BEGIN, the body's statements and COMMIT, each sent on its own (SQLite and test fakes).
+    public func withTransaction<T: Sendable>(_ body: @Sendable (any TransactionScope) async throws -> T) async throws -> T {
+        _ = try await execute(SQLStatement(dialect.beginTransaction))
+        do {
+            let value = try await body(ConnectionScope(connection: self))
+            _ = try await execute(SQLStatement(dialect.commitTransaction))
+            return value
+        } catch {
+            // The rollback must run even when the task was cancelled.
+            let rollback = SQLStatement(dialect.rollbackTransaction)
+            await Task.detached { _ = try? await self.execute(rollback) }.value
+            throw error
+        }
+    }
+
+    public func copyIn(_ sql: String, from source: @escaping CopySource) async throws -> Int {
+        throw DatabaseError("COPY FROM STDIN isn't supported on this connection.", sql: sql)
+    }
 
     public func structure(of table: TableRef) async throws -> TableStructure {
         TableStructure(

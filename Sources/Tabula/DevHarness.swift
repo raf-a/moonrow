@@ -23,6 +23,7 @@ import Darwin
 ///     TABULA_CONNECT=postgres://… TABULA_OPENDB=far_away TABULA_STORE=… TABULA_SNAPSHOTS=… Tabula
 ///     TABULA_WELCOME=1 TABULA_STORE=<empty dir>/connections.json TABULA_SNAPSHOTS=… Tabula
 ///     TABULA_OBJECTS=users TABULA_STORE=… TABULA_SNAPSHOTS=… Tabula /tmp/copy-of-sample.sqlite   (or TABULA_CONNECT to a scratch database)
+///     TABULA_TRANSFER=users TABULA_STORE=… TABULA_SNAPSHOTS=… Tabula /tmp/copy-of-sample.sqlite  (or TABULA_CONNECT to a scratch database)
 ///
 /// The bench opens the table in the first workspace with every row in one page, scrolls it like
 /// a fast trackpad, jumps to far-apart rows, prints timings and quits. The demo drives the grid's
@@ -167,6 +168,19 @@ enum DevHarness {
                     try await objectsDemo(app, table: table, snapshots: snapshots)
                 } catch {
                     print("objects demo failed: \(error)")
+                }
+                NSApp.terminate(nil)
+            }
+            return
+        }
+        // M11: export, import, backup and restore. It commits.
+        if let table = env["TABULA_TRANSFER"] {
+            Task {
+                do {
+                    guard env["TABULA_STORE"] != nil else { throw HarnessError("TABULA_TRANSFER needs TABULA_STORE") }
+                    try await transferDemo(app, table: table, snapshots: snapshots)
+                } catch {
+                    print("transfer demo failed: \(error)")
                 }
                 NSApp.terminate(nil)
             }
@@ -1140,10 +1154,11 @@ enum DevHarness {
         let data = try await waitFor("table view") { tab.data }
         _ = try await waitFor("rows") { data.cache }
         let before = data.total
-        let sheet = try require(workspace.importCSV(into: DatabaseObject(tab.table, kind: .table), file: file), "import sheet")
-        let csv = try await waitFor("parsed file") { sheet.csv }
-        print("file: \(csv.rows.count) rows, columns \(csv.columnNames), encoding \(csv.encoding), delimiter \(csv.delimiter.debugDescription)")
-        print("mapping: \(zip(sheet.columns.map(\.name), sheet.mapping).map { "\($0) ← \($1.map { csv.columnNames[$0] } ?? "-")" })")
+        let sheet = try require(workspace.importFile(.csv, into: DatabaseObject(tab.table, kind: .table), file: file), "import sheet")
+        _ = try await waitFor("parsed file") { sheet.preview.isEmpty || sheet.columns.isEmpty ? nil : true }
+        let names = sheet.columnNames
+        print("file: columns \(names), first \(sheet.preview.count) rows previewed")
+        print("mapping: \(zip(sheet.columns.map(\.name), sheet.mapping).map { "\($0) ← \($1.map { names[$0] } ?? "-")" })")
         try await Task.sleep(for: .milliseconds(200))
         if let snapshots { snapshot(sheet.window!, to: snapshots.appending(path: "import-1-sheet.png")) }
         var outcome: Result<Int, any Error>?

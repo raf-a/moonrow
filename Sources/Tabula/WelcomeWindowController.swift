@@ -69,12 +69,19 @@ final class WelcomeWindowController: NSWindowController, NSWindowDelegate, NSSea
 
         let newButton = NSButton(title: "New Connection…", target: nil, action: #selector(TabulaActions.newConnection(_:)))
         let openButton = NSButton(title: "Open Database File…", target: nil, action: #selector(AppDelegate.openDatabaseFile(_:)))
+        let backupButton = NSButton(title: "Backup…", target: nil, action: #selector(TabulaActions.backupDatabases(_:)))
+        let restoreButton = NSButton(title: "Restore…", target: nil, action: #selector(TabulaActions.restoreDatabase(_:)))
         for b in [newButton, openButton] {
             b.controlSize = .large
             b.widthAnchor.constraint(equalToConstant: 190).isActive = true
         }
+        for b in [backupButton, restoreButton] {
+            b.widthAnchor.constraint(equalToConstant: 92).isActive = true
+        }
+        let toolButtons = NSStackView(views: [backupButton, restoreButton])
+        toolButtons.spacing = 6
 
-        let sideStack = NSStackView(views: [icon, name, version, NSView(), newButton, openButton])
+        let sideStack = NSStackView(views: [icon, name, version, NSView(), newButton, openButton, toolButtons])
         sideStack.orientation = .vertical
         sideStack.alignment = .centerX
         sideStack.spacing = 8

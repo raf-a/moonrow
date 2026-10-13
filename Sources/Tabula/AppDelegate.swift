@@ -224,6 +224,72 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TabulaActions {
         preferences?.showWindow(nil)
     }
 
+    /// Settings ▸ Locations.
+    func showLocations() {
+        showPreferences(nil)
+        preferences?.show(pane: PreferencesWindowController.locationsPane)
+    }
+
+    // MARK: - Backup and restore
+
+    private(set) var backupWindow: BackupWindowController?
+    private(set) var restoreWindow: RestoreWindowController?
+
+    private var toolEnvironment: ToolWindowEnvironment {
+        ToolWindowEnvironment(
+            connections: { [weak self] in
+                guard let self else { return [] }
+                return self.store.connections.filter { $0.driver.isServer }.sorted { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }
+            },
+            login: { [weak self] config, window in await self?.toolLogin(config, in: window) },
+            locator: { [weak self] in self?.settings.settings.toolLocator ?? ToolLocator() },
+            onRestored: { [weak self] id in
+                for workspace in self?.workspaces ?? [] where workspace.config.id == id { workspace.sidebar.reload() }
+            },
+            showLocations: { [weak self] in self?.showLocations() })
+    }
+
+    /// The password a workspace on this connection logged in with, else what its password mode
+    /// gives (asking if it asks); with the SSH login. Nil when cancelled.
+    private func toolLogin(_ config: ConnectionConfig, in window: NSWindow?) async -> (password: String?, ssh: SSHLogin)? {
+        let ssh = sshLogin(for: config, in: window)
+        if let open = workspaces.first(where: { $0.config.id == config.id }) { return (open.loginPassword, ssh) }
+        switch config.passwordMode {
+        case .keychain: return ((try? secrets.password(for: config.id)) ?? nil, ssh)
+        case .none: return (nil, ssh)
+        case .ask:
+            guard let typed = await askPassword(for: config, in: window) else { return nil }
+            return (typed, ssh)
+        }
+    }
+
+    /// The frontmost workspace's connection and database, for the windows to start on.
+    private var frontmostTarget: (id: UUID, database: String?)? {
+        guard let workspace = frontmostWorkspace, workspace.config.driver.isServer, store.connection(id: workspace.config.id) != nil else { return nil }
+        let database = workspace.config.driver == .postgres ? (workspace.config.database.isEmpty ? nil : workspace.config.database) : workspace.sidebar.schema
+        return (workspace.config.id, database)
+    }
+
+    /// File ▸ Backup… and the welcome window's button.
+    @objc func backupDatabases(_ sender: Any?) {
+        if backupWindow == nil { backupWindow = BackupWindowController(environment: toolEnvironment) }
+        guard let window = backupWindow else { return }
+        let target = frontmostTarget
+        window.preferredDatabase = target?.database
+        window.showWindow(nil)
+        window.reloadConnections(select: target?.id)
+    }
+
+    /// File ▸ Restore… and the welcome window's button.
+    @objc func restoreDatabase(_ sender: Any?) {
+        if restoreWindow == nil { restoreWindow = RestoreWindowController(environment: toolEnvironment) }
+        guard let window = restoreWindow else { return }
+        let target = frontmostTarget
+        window.preferredDatabase = target?.database
+        window.showWindow(nil)
+        window.reloadConnections(select: target?.id)
+    }
+
     /// File ▸ Open… (⌘O): SQL files, each in a new query tab of the frontmost workspace.
     @objc func openDocument(_ sender: Any?) {
         guard let workspace = frontmostWorkspace else { return needWorkspace(for: nil) }
@@ -357,7 +423,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TabulaActions {
     }
 
     /// Nil when cancelled.
-    private func askPassword(for config: ConnectionConfig, in window: NSWindow?) async -> String? {
+    func askPassword(for config: ConnectionConfig, in window: NSWindow?) async -> String? {
         let alert = NSAlert()
         alert.messageText = "Password for \(config.displayName)"
         alert.informativeText = config.summary

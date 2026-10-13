@@ -71,9 +71,14 @@ import AppKit
     @objc optional func selectNextWorkspace(_ sender: Any?)
     @objc optional func selectPreviousWorkspace(_ sender: Any?)
 
-    // Export and import
+    // Export, import, backup and restore
     @objc optional func exportData(_ sender: Any?)
+    @objc optional func exportTables(_ sender: Any?)
     @objc optional func importCSV(_ sender: Any?)
+    @objc optional func importJSON(_ sender: Any?)
+    @objc optional func importSQLFile(_ sender: Any?)
+    @objc optional func backupDatabases(_ sender: Any?)
+    @objc optional func restoreDatabase(_ sender: Any?)
     @objc optional func copyRowsAs(_ sender: Any?)
 }
 
@@ -141,7 +146,15 @@ enum MainMenu {
             m.add("Save SQL As…", #selector(TabulaActions.saveSQLAs(_:)), "s", [.command, .shift])
             m.addItem(.separator())
             m.add("Export…", #selector(TabulaActions.exportData(_:)), "e")
-            m.add("Import CSV…", #selector(TabulaActions.importCSV(_:)))
+            m.add("Export Tables…", #selector(TabulaActions.exportTables(_:)))
+            let importItem = m.add("Import", nil)
+            importItem.submenu = NSMenu(title: "Import")
+            importItem.submenu!.add("From CSV…", #selector(TabulaActions.importCSV(_:)))
+            importItem.submenu!.add("From JSON…", #selector(TabulaActions.importJSON(_:)))
+            importItem.submenu!.add("From SQL File…", #selector(TabulaActions.importSQLFile(_:)))
+            m.addItem(.separator())
+            m.add("Backup…", #selector(TabulaActions.backupDatabases(_:)))
+            m.add("Restore…", #selector(TabulaActions.restoreDatabase(_:)))
         }
 
         main.addSubmenu("Edit") { m in

@@ -6,12 +6,15 @@ public struct SQLStatementRange: Sendable, Hashable {
     /// From the end of the previous delimiter through this statement's delimiter.
     public var fullRange: Range<Int>
     public var text: String
+    /// The delimiter in effect when the statement ended (MySQL's `DELIMITER` can change it).
+    public var delimiter: String = ";"
 }
 
 public enum SQLSplitter {
     /// Splits a script into statements. Statements that contain only comments are dropped.
-    public static func split(_ sql: String, dialect: LexerDialect) -> [SQLStatementRange] {
-        split(SQLLexer(sql, dialect: dialect))
+    /// `delimiter` is the one in effect at the start (a script continued after `DELIMITER //`).
+    public static func split(_ sql: String, dialect: LexerDialect, delimiter: String = ";") -> [SQLStatementRange] {
+        split(SQLLexer(sql, dialect: dialect), delimiter: Array(delimiter.utf16))
     }
 
     /// The statement the editor should run for a cursor at `offset` (UTF-16).
@@ -39,12 +42,12 @@ public enum SQLSplitter {
         return next
     }
 
-    static func split(_ lexer: SQLLexer) -> [SQLStatementRange] {
+    static func split(_ lexer: SQLLexer, delimiter initial: [UInt16] = [ch(";")]) -> [SQLStatementRange] {
         let units = lexer.units
         let dialect = lexer.dialect
         var out: [SQLStatementRange] = []
 
-        var delimiter: [UInt16] = [ch(";")]
+        var delimiter: [UInt16] = initial.isEmpty ? [ch(";")] : initial
         var segmentStart = 0
         var first: Int?
         var lastEnd = 0
@@ -58,7 +61,8 @@ public enum SQLSplitter {
                 out.append(SQLStatementRange(
                     range: first..<lastEnd,
                     fullRange: segmentStart..<end,
-                    text: lexer.text(first..<lastEnd)))
+                    text: lexer.text(first..<lastEnd),
+                    delimiter: String(decoding: delimiter, as: UTF16.self)))
             }
             segmentStart = end
             first = nil
@@ -107,7 +111,9 @@ public enum SQLSplitter {
             if kind == .whitespace { continue }
             if first == nil { first = token.range.lowerBound }
             lastEnd = token.range.upperBound
-            if kind.isComment { continue }
+            if kind.isComment, !(kind == .blockComment && dialect.executableComments && isExecutable(units, token.range)) {
+                continue
+            }
             hasCode = true
             if kind == .word || kind == .keyword {
                 let word = lexer.text(token.range).uppercased()
@@ -120,6 +126,13 @@ public enum SQLSplitter {
         }
         finish(at: units.count)
         return out
+    }
+
+    /// `/*!…*/` or `/*M!…*/`.
+    private static func isExecutable(_ units: [UInt16], _ range: Range<Int>) -> Bool {
+        let start = range.lowerBound + 2
+        guard start < range.upperBound else { return false }
+        return units[start] == ch("!") || (units[start] == ch("M") && start + 1 < range.upperBound && units[start + 1] == ch("!"))
     }
 
     private static func matches(_ units: [UInt16], _ needle: [UInt16], at i: Int) -> Bool {

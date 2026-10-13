@@ -328,6 +328,70 @@ final class PGSession: WireSession, @unchecked Sendable {
         onBatch(ResultBatch(columns: columns, rows: rows, rowsAffected: affected))
     }
 
+    /// `COPY … FROM STDIN` with the simple query protocol: the server asks for data
+    /// (CopyInResponse), gets `source`'s pieces as CopyData and then CopyDone, or CopyFail when
+    /// the source fails or the task is cancelled.
+    func copyIn(_ sql: String, from source: CopySource) async throws -> Int {
+        let statement = SQLStatement(sql)
+        guard let log, log.isObserved else { return try await sendCopy(sql, from: source) }
+        return try await log.timing(statement, rows: { $0 }) { try await sendCopy(sql, from: source) }
+    }
+
+    private func sendCopy(_ sql: String, from source: CopySource) async throws -> Int {
+        var out = wire.makeBuffer(capacity: sql.utf8.count + 8)
+        PGFrontend.simpleQuery(sql, into: &out)
+        var affected = 0
+        var failure: DatabaseError?
+        var stopped: (any Error)?
+        do {
+            try await wire.send(out)
+            loop: while true {
+                let message = PGMessage(frame: try await wire.next())
+                var body = message.body
+                switch message.kind {
+                case "G":
+                    do {
+                        while let piece = try await source() {
+                            try Task.checkCancellation()
+                            if piece.isEmpty { continue }
+                            var data = wire.makeBuffer(capacity: piece.count + 8)
+                            PGFrontend.message("d", into: &data) { $0.writeBytes(piece) }
+                            try await wire.send(data)
+                        }
+                        var done = wire.makeBuffer(capacity: 8)
+                        PGFrontend.message("c", into: &done) { _ in }
+                        try await wire.send(done)
+                    } catch {
+                        stopped = error
+                        var fail = wire.makeBuffer()
+                        PGFrontend.copyFail(error is CancellationError ? "Stopped." : "The data couldn't be read.", into: &fail)
+                        try await wire.send(fail)
+                    }
+                case "H":
+                    // COPY TO STDOUT isn't what this is for: let it run out.
+                    continue
+                case "C":
+                    affected = Self.rowCount(body.readCString() ?? "")
+                case "E":
+                    if failure == nil { failure = PGNotice(body).error(sql: sql) }
+                case "S":
+                    if let k = body.readCString(), let v = body.readCString() { parameters[k] = v }
+                case "Z":
+                    transactionStatus = body.readInteger() ?? transactionStatus
+                    break loop
+                default:
+                    continue
+                }
+            }
+        } catch {
+            isBroken = true
+            throw error
+        }
+        if let stopped { throw stopped }
+        if let failure { throw failure }
+        return affected
+    }
+
     /// Runs a statement and collects its rows (introspection, transactions).
     @discardableResult
     func query(_ sql: String, _ bindings: [DBValue] = []) async throws -> QueryResult {

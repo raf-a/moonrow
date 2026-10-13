@@ -32,6 +32,10 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var queryParameters: Bool = true
     /// What the query editor's Run button runs; the other is in its menu.
     public var runButtonRunsAll: Bool = false
+    /// Settings ▸ Locations: the folder holding pg_dump, pg_restore and psql; empty finds them.
+    public var postgresToolsFolder: String = ""
+    /// The folder holding mysqldump and mysql (or MariaDB's); empty finds them.
+    public var mysqlToolsFolder: String = ""
 
     public init() {}
 
@@ -43,6 +47,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case appearance, editorTheme, editorFontName, editorFontSize, gridFontSize, alternatingRows
         case defaultSafeMode, keyBindings, reopenWorkspaces, queryParameters, runButtonRunsAll
+        case postgresToolsFolder, mysqlToolsFolder
     }
 
     // Each value is read on its own: one that's missing or not understood keeps its default
@@ -64,6 +69,13 @@ public struct AppSettings: Codable, Equatable, Sendable {
         reopenWorkspaces = value(.reopenWorkspaces, d.reopenWorkspaces)
         queryParameters = value(.queryParameters, d.queryParameters)
         runButtonRunsAll = value(.runButtonRunsAll, d.runButtonRunsAll)
+        postgresToolsFolder = value(.postgresToolsFolder, d.postgresToolsFolder)
+        mysqlToolsFolder = value(.mysqlToolsFolder, d.mysqlToolsFolder)
+    }
+
+    /// Finds the backup tools with the folders chosen here.
+    public var toolLocator: ToolLocator {
+        ToolLocator(folders: [.postgres: postgresToolsFolder, .mysql: mysqlToolsFolder])
     }
 }
 

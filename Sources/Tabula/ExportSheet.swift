@@ -19,45 +19,64 @@ enum ExportSubject {
     var isTable: Bool { if case .table = self { true } else { false } }
 }
 
-/// The last options used, per kind of subject.
+/// The last options used, per kind of export (a table, a result, several tables).
 struct ExportSettings: Codable {
     var format = 0
     var csv = CSVOptions()
     var json = JSONOptions()
     var sql = SQLExportOptions()
+    var xlsx = XLSXOptions()
     var wholeTable = false
+    var pattern = FileNamePattern.export
 
-    static func load(table: Bool) -> ExportSettings {
-        guard let data = UserDefaults.standard.data(forKey: key(table)),
+    enum Kind: String { case table, result, tables }
+
+    init() {}
+
+    init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        func value<T: Decodable>(_ key: CodingKeys, _ fallback: T) -> T { (try? c.decodeIfPresent(T.self, forKey: key)) ?? fallback }
+        let d = ExportSettings()
+        format = value(.format, d.format)
+        csv = value(.csv, d.csv)
+        json = value(.json, d.json)
+        sql = value(.sql, d.sql)
+        xlsx = value(.xlsx, d.xlsx)
+        wholeTable = value(.wholeTable, d.wholeTable)
+        pattern = value(.pattern, d.pattern)
+    }
+
+    static func load(_ kind: Kind) -> ExportSettings {
+        guard let data = UserDefaults.standard.data(forKey: key(kind)),
               let s = try? JSONDecoder().decode(ExportSettings.self, from: data) else { return ExportSettings() }
         return s
     }
 
-    func save(table: Bool) {
-        if let data = try? JSONEncoder().encode(self) { UserDefaults.standard.set(data, forKey: Self.key(table)) }
+    func save(_ kind: Kind) {
+        if let data = try? JSONEncoder().encode(self) { UserDefaults.standard.set(data, forKey: Self.key(kind)) }
     }
 
-    private static func key(_ table: Bool) -> String { table ? "Export.table" : "Export.result" }
+    private static func key(_ kind: Kind) -> String {
+        switch kind {
+        case .table: "Export.table"
+        case .result: "Export.result"
+        case .tables: "Export.tables"
+        }
+    }
 }
 
-/// A sheet with the format and its options, then a save panel, progress and Stop.
+/// The format choice and its options, shared by the export sheets.
 @MainActor
-final class ExportSheetController: NSWindowController, NSTextFieldDelegate {
-    let subject: ExportSubject
-    private let connection: any DatabaseConnection
-    private var settings: ExportSettings
-    private var keepAlive: ExportSheetController?
-    private var task: Task<Void, Never>?
-    private(set) var exportedURL: URL?
-    /// For the dev harness: called with the row count or the error when an export ends.
-    var onFinish: ((Result<Int, any Error>) -> Void)?
+final class ExportOptionsView: NSStackView, NSTextFieldDelegate {
+    /// Which SQL rows show: the table name for results, CREATE for tables, none of drop /
+    /// create / rows when each table has its own (Export Tables).
+    enum SQLMode { case result, table, perTable }
 
-    private let formatControl = NSSegmentedControl(labels: ["CSV", "JSON", "SQL"], trackingMode: .selectOne, target: nil, action: nil)
-    private let scopePopup = NSPopUpButton()
+    let formatControl = NSSegmentedControl(labels: ["CSV", "JSON", "SQL", "Excel"], trackingMode: .selectOne, target: nil, action: nil)
     private let csvPane = NSGridView()
     private let jsonPane = NSGridView()
     private let sqlPane = NSGridView()
-
+    private let xlsxPane = NSGridView()
     private let delimiterPopup = NSPopUpButton()
     private let customDelimiter = NSTextField()
     private let quotingPopup = NSPopUpButton()
@@ -70,25 +89,260 @@ final class ExportSheetController: NSWindowController, NSTextFieldDelegate {
     private let dropBox = NSButton(checkboxWithTitle: "DROP TABLE IF EXISTS first", target: nil, action: nil)
     private let createBox = NSButton(checkboxWithTitle: "CREATE TABLE", target: nil, action: nil)
     private let dataBox = NSButton(checkboxWithTitle: "Rows as INSERT statements", target: nil, action: nil)
+    private let gzipBox = NSButton(checkboxWithTitle: "Compress with gzip (.sql.gz)", target: nil, action: nil)
     private let perInsertField = NSTextField()
-    private let tableNameField = NSTextField()
+    let tableNameField = NSTextField()
+    private let xlsxHeaderBox = NSButton(checkboxWithTitle: "Column names in a bold first row", target: nil, action: nil)
+    let patternField = NSTextField()
+    private let patternMenu = NSPopUpButton(frame: .zero, pullsDown: true)
 
+    private let sqlMode: SQLMode
+    private var settings: ExportSettings
+    /// Any option changed (the sheet clears its status, the file name follows).
+    var onChange: (() -> Void)?
+
+    static let delimiters: [(String, String)] = [("Comma", ","), ("Semicolon", ";"), ("Tab", "\t"), ("Pipe", "|")]
+
+    init(settings: ExportSettings, sqlMode: SQLMode, extraRows: [(String, NSView)] = [], patternTitle: String = "File name") {
+        self.settings = settings
+        self.sqlMode = sqlMode
+        super.init(frame: .zero)
+        orientation = .vertical
+        alignment = .leading
+        spacing = 12
+
+        let top = Self.grid()
+        for (title, view) in extraRows { top.addRow(with: [Self.label(title), view]) }
+        formatControl.target = self
+        formatControl.action = #selector(changed(_:))
+        top.addRow(with: [Self.label("Format"), formatControl])
+
+        patternField.placeholderString = FileNamePattern.export
+        patternField.delegate = self
+        patternField.widthAnchor.constraint(equalToConstant: 220).isActive = true
+        patternMenu.addItem(withTitle: "Insert")
+        patternMenu.controlSize = .small
+        for token in FileNamePattern.tokens {
+            let item = patternMenu.menu!.addItem(withTitle: "\(token.title)  \(token.placeholder)", action: #selector(insertToken(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = token.placeholder
+        }
+        top.addRow(with: [Self.label(patternTitle), Self.row(patternField, patternMenu)])
+
+        for (title, _) in Self.delimiters { delimiterPopup.addItem(withTitle: title) }
+        delimiterPopup.addItem(withTitle: "Other:")
+        customDelimiter.widthAnchor.constraint(equalToConstant: 32).isActive = true
+        customDelimiter.alignment = .center
+        customDelimiter.delegate = self
+        quotingPopup.addItems(withTitles: ["Only when needed", "Every field"])
+        lineBreakPopup.addItems(withTitles: ["LF (\\n)", "CRLF (\\r\\n)", "CR (\\r)"])
+        decimalPopup.addItems(withTitles: [". (1.5)", ", (1,5)"])
+        csvPane.addRow(with: [Self.label("Delimiter"), Self.row(delimiterPopup, customDelimiter)])
+        csvPane.addRow(with: [Self.label("Quotes"), quotingPopup])
+        csvPane.addRow(with: [Self.label("Line break"), lineBreakPopup])
+        csvPane.addRow(with: [Self.label("Decimal"), decimalPopup])
+        for box in [headerBox, nullBox, flattenBox] { csvPane.addRow(with: [NSGridCell.emptyContentView, box]) }
+
+        jsonPane.addRow(with: [Self.label(""), prettyBox])
+        jsonPane.addRow(with: [NSGridCell.emptyContentView, Self.note("Blobs are written as base64 strings.")])
+
+        perInsertField.alignment = .right
+        perInsertField.widthAnchor.constraint(equalToConstant: 60).isActive = true
+        perInsertField.delegate = self
+        tableNameField.placeholderString = "result"
+        tableNameField.widthAnchor.constraint(equalToConstant: 200).isActive = true
+        switch sqlMode {
+        case .result:
+            sqlPane.addRow(with: [Self.label("Table name"), tableNameField])
+            sqlPane.addRow(with: [Self.label("Include"), dropBox])
+            sqlPane.addRow(with: [NSGridCell.emptyContentView, dataBox])
+        case .table:
+            sqlPane.addRow(with: [Self.label("Include"), dropBox])
+            sqlPane.addRow(with: [NSGridCell.emptyContentView, createBox])
+            sqlPane.addRow(with: [NSGridCell.emptyContentView, dataBox])
+        case .perTable:
+            sqlPane.addRow(with: [NSGridCell.emptyContentView, Self.note("Structure, DROP and rows are chosen per table in the list.")])
+        }
+        sqlPane.addRow(with: [Self.label("Rows per INSERT"), perInsertField])
+        sqlPane.addRow(with: [NSGridCell.emptyContentView, gzipBox])
+
+        xlsxPane.addRow(with: [Self.label(""), xlsxHeaderBox])
+        xlsxPane.addRow(with: [NSGridCell.emptyContentView, Self.note("Blobs are written as hex. A sheet holds at most 1,048,576 rows.")])
+
+        for control in [delimiterPopup, quotingPopup, lineBreakPopup, decimalPopup] as [NSControl] + [headerBox, nullBox, flattenBox, prettyBox, dropBox, createBox, dataBox, gzipBox, xlsxHeaderBox] {
+            control.target = self
+            control.action = #selector(changed(_:))
+        }
+        for pane in [top, csvPane, jsonPane, sqlPane, xlsxPane] { Self.style(pane) }
+        for v in [top, csvPane, jsonPane, sqlPane, xlsxPane] { addArrangedSubview(v) }
+        show(settings)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    static func grid() -> NSGridView { NSGridView() }
+
+    static func style(_ pane: NSGridView) {
+        pane.rowSpacing = 7
+        pane.columnSpacing = 8
+        if pane.numberOfColumns > 0 {
+            pane.column(at: 0).xPlacement = .trailing
+            pane.column(at: 0).width = 120
+        }
+        pane.setContentHuggingPriority(.required, for: .vertical)
+        pane.rowAlignment = .firstBaseline
+    }
+
+    static func label(_ text: String) -> NSTextField { NSTextField(labelWithString: text) }
+
+    static func note(_ text: String) -> NSTextField {
+        let f = NSTextField(wrappingLabelWithString: text)
+        f.textColor = .secondaryLabelColor
+        f.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        f.preferredMaxLayoutWidth = 300
+        return f
+    }
+
+    static func row(_ views: NSView...) -> NSStackView {
+        let s = NSStackView(views: views)
+        s.spacing = 8
+        return s
+    }
+
+    private func show(_ s: ExportSettings) {
+        formatControl.selectedSegment = min(3, max(0, s.format))
+        if let i = Self.delimiters.firstIndex(where: { $0.1 == s.csv.delimiter }) {
+            delimiterPopup.selectItem(at: i)
+            customDelimiter.stringValue = ""
+        } else {
+            delimiterPopup.selectItem(at: Self.delimiters.count)
+            customDelimiter.stringValue = s.csv.delimiter
+        }
+        quotingPopup.selectItem(at: s.csv.quoting == .always ? 1 : 0)
+        lineBreakPopup.selectItem(at: CSVOptions.LineBreak.allCases.firstIndex(of: s.csv.lineBreak) ?? 0)
+        decimalPopup.selectItem(at: s.csv.decimalSeparator == "," ? 1 : 0)
+        headerBox.state = s.csv.includeHeader ? .on : .off
+        nullBox.state = s.csv.nullAsEmpty ? .on : .off
+        flattenBox.state = s.csv.flattenLineBreaks ? .on : .off
+        prettyBox.state = s.json.pretty ? .on : .off
+        dropBox.state = s.sql.dropTable ? .on : .off
+        createBox.state = s.sql.includeStructure ? .on : .off
+        dataBox.state = s.sql.includeData ? .on : .off
+        gzipBox.state = s.sql.gzip ? .on : .off
+        perInsertField.stringValue = String(s.sql.rowsPerInsert)
+        xlsxHeaderBox.state = s.xlsx.includeHeader ? .on : .off
+        patternField.stringValue = s.pattern
+        updatePanes()
+    }
+
+    /// The options as shown.
+    var edited: ExportSettings {
+        var s = settings
+        s.format = formatControl.selectedSegment
+        let d = delimiterPopup.indexOfSelectedItem
+        s.csv.delimiter = d < Self.delimiters.count ? Self.delimiters[d].1 : customDelimiter.stringValue
+        s.csv.quoting = quotingPopup.indexOfSelectedItem == 1 ? .always : .ifNeeded
+        s.csv.lineBreak = CSVOptions.LineBreak.allCases[max(0, lineBreakPopup.indexOfSelectedItem)]
+        s.csv.decimalSeparator = decimalPopup.indexOfSelectedItem == 1 ? "," : "."
+        s.csv.includeHeader = headerBox.state == .on
+        s.csv.nullAsEmpty = nullBox.state == .on
+        s.csv.flattenLineBreaks = flattenBox.state == .on
+        s.json.pretty = prettyBox.state == .on
+        s.sql.dropTable = dropBox.state == .on
+        s.sql.includeStructure = createBox.state == .on
+        s.sql.includeData = dataBox.state == .on
+        s.sql.gzip = gzipBox.state == .on
+        s.sql.rowsPerInsert = max(1, Int(perInsertField.stringValue.filter(\.isNumber)) ?? 100)
+        s.xlsx.includeHeader = xlsxHeaderBox.state == .on
+        s.pattern = patternField.stringValue.trimmingCharacters(in: .whitespaces)
+        return s
+    }
+
+    var format: ExportFormat {
+        let s = edited
+        switch s.format {
+        case 1: return .json(s.json)
+        case 2:
+            var o = s.sql
+            if sqlMode == .result { o.includeStructure = false }
+            return .sql(o)
+        case 3: return .xlsx(s.xlsx)
+        default: return .csv(s.csv)
+        }
+    }
+
+    private func updatePanes() {
+        let f = formatControl.selectedSegment
+        csvPane.isHidden = f != 0
+        jsonPane.isHidden = f != 1
+        sqlPane.isHidden = f != 2
+        xlsxPane.isHidden = f != 3
+        customDelimiter.isHidden = delimiterPopup.indexOfSelectedItem < Self.delimiters.count
+    }
+
+    @objc private func changed(_ sender: Any?) {
+        updatePanes()
+        onChange?()
+    }
+
+    @objc private func insertToken(_ sender: NSMenuItem) {
+        guard let token = sender.representedObject as? String else { return }
+        if let editor = patternField.currentEditor() {
+            editor.insertText(token)
+        } else {
+            patternField.stringValue += token
+        }
+        onChange?()
+    }
+
+    /// 0 CSV, 1 JSON, 2 SQL, 3 Excel. For the dev harness.
+    func selectFormat(_ index: Int) {
+        formatControl.selectedSegment = index
+        changed(nil)
+    }
+
+    /// For the dev harness.
+    func setGzip(_ on: Bool) {
+        gzipBox.state = on ? .on : .off
+        changed(nil)
+    }
+
+    func controlTextDidChange(_ obj: Notification) { onChange?() }
+}
+
+/// A sheet with the format and its options, then a save panel, progress and Stop.
+@MainActor
+final class ExportSheetController: NSWindowController {
+    let subject: ExportSubject
+    private let connection: any DatabaseConnection
+    private let context: FileNamePattern.Context
+    private var settings: ExportSettings
+    private var keepAlive: ExportSheetController?
+    private var task: Task<Void, Never>?
+    private(set) var exportedURL: URL?
+    /// For the dev harness: called with the row count or the error when an export ends.
+    var onFinish: ((Result<Int, any Error>) -> Void)?
+
+    private let scopePopup = NSPopUpButton()
+    private(set) var options: ExportOptionsView!
     private let progress = NSProgressIndicator()
     private let status = NSTextField(labelWithString: "")
     private let revealButton = NSButton(title: "Show in Finder", target: nil, action: nil)
     private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
     private let exportButton = NSButton(title: "Export…", target: nil, action: nil)
 
-    private static let delimiters: [(String, String)] = [("Comma", ","), ("Semicolon", ";"), ("Tab", "\t"), ("Pipe", "|")]
+    private var kind: ExportSettings.Kind { subject.isTable ? .table : .result }
 
-    init(subject: ExportSubject, connection: any DatabaseConnection) {
+    init(subject: ExportSubject, connection: any DatabaseConnection, context: FileNamePattern.Context = .init()) {
         self.subject = subject
         self.connection = connection
-        self.settings = ExportSettings.load(table: subject.isTable)
+        self.context = context
+        self.settings = ExportSettings.load(subject.isTable ? .table : .result)
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 300), styleMask: [.titled], backing: .buffered, defer: true)
         super.init(window: window)
         window.contentView = makeContent()
-        show(settings)
+        fitWindow()
     }
 
     @available(*, unavailable)
@@ -109,58 +363,16 @@ final class ExportSheetController: NSWindowController, NSTextFieldDelegate {
         source.textColor = .secondaryLabelColor
         source.preferredMaxLayoutWidth = 420
 
-        formatControl.target = self
-        formatControl.action = #selector(formatChanged(_:))
-
-        let topGrid = NSGridView()
+        var extra: [(String, NSView)] = []
         if case .table(_, _, let filter, let sort, let shown) = subject, filter != nil || !sort.isEmpty {
             let current = filter == nil ? "Current sort" : sort.isEmpty ? "Current filter" : "Current filter and sort"
             scopePopup.addItems(withTitles: [current + (shown.map { " (\($0.formatted()) rows)" } ?? ""), "Whole table"])
-            topGrid.addRow(with: [label("Rows"), scopePopup])
+            scopePopup.selectItem(at: settings.wholeTable ? 1 : 0)
+            extra.append(("Rows", scopePopup))
         }
-        topGrid.addRow(with: [label("Format"), formatControl])
-        let top: [NSView] = [title, source, topGrid]
-
-        for (title, _) in Self.delimiters { delimiterPopup.addItem(withTitle: title) }
-        delimiterPopup.addItem(withTitle: "Other:")
-        delimiterPopup.target = self
-        delimiterPopup.action = #selector(delimiterChanged(_:))
-        customDelimiter.widthAnchor.constraint(equalToConstant: 32).isActive = true
-        customDelimiter.alignment = .center
-        customDelimiter.delegate = self
-        quotingPopup.addItems(withTitles: ["Only when needed", "Every field"])
-        lineBreakPopup.addItems(withTitles: ["LF (\\n)", "CRLF (\\r\\n)", "CR (\\r)"])
-        decimalPopup.addItems(withTitles: [". (1.5)", ", (1,5)"])
-        csvPane.addRow(with: [label("Delimiter"), row(delimiterPopup, customDelimiter)])
-        csvPane.addRow(with: [label("Quotes"), quotingPopup])
-        csvPane.addRow(with: [label("Line break"), lineBreakPopup])
-        csvPane.addRow(with: [label("Decimal"), decimalPopup])
-        for box in [headerBox, nullBox, flattenBox] { csvPane.addRow(with: [NSGridCell.emptyContentView, box]) }
-
-        jsonPane.addRow(with: [label(""), prettyBox])
-        let blobs = NSTextField(labelWithString: "Blobs are written as base64 strings.")
-        blobs.textColor = .secondaryLabelColor
-        blobs.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        jsonPane.addRow(with: [NSGridCell.emptyContentView, blobs])
-
-        perInsertField.alignment = .right
-        perInsertField.widthAnchor.constraint(equalToConstant: 60).isActive = true
-        tableNameField.placeholderString = "result"
-        tableNameField.widthAnchor.constraint(equalToConstant: 200).isActive = true
-        if !subject.isTable { sqlPane.addRow(with: [label("Table name"), tableNameField]) }
-        sqlPane.addRow(with: [label("Include"), dropBox])
-        if subject.isTable { sqlPane.addRow(with: [NSGridCell.emptyContentView, createBox]) }
-        sqlPane.addRow(with: [NSGridCell.emptyContentView, dataBox])
-        sqlPane.addRow(with: [label("Rows per INSERT"), perInsertField])
-
-        for pane in [topGrid, csvPane, jsonPane, sqlPane] {
-            pane.rowSpacing = 7
-            pane.columnSpacing = 8
-            pane.column(at: 0).xPlacement = .trailing
-            pane.column(at: 0).width = 120
-            pane.setContentHuggingPriority(.required, for: .vertical)
-            pane.rowAlignment = .firstBaseline
-        }
+        options = ExportOptionsView(settings: settings, sqlMode: subject.isTable ? .table : .result, extraRows: extra)
+        options.tableNameField.stringValue = subject.isTable ? "" : subject.name.lowercased().replacingOccurrences(of: " ", with: "_")
+        options.onChange = { [weak self] in self?.optionsChanged() }
 
         progress.style = .bar
         progress.isIndeterminate = false
@@ -180,7 +392,7 @@ final class ExportSheetController: NSWindowController, NSTextFieldDelegate {
         exportButton.keyEquivalent = "\r"
         let buttons = NSStackView(views: [revealButton, NSView(), cancelButton, exportButton])
 
-        let stack = NSStackView(views: top + [csvPane, jsonPane, sqlPane, progress, status, buttons])
+        let stack = NSStackView(views: [title, source, options, progress, status, buttons])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
@@ -189,14 +401,6 @@ final class ExportSheetController: NSWindowController, NSTextFieldDelegate {
         buttons.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40).isActive = true
         stack.widthAnchor.constraint(equalToConstant: 460).isActive = true
         return stack
-    }
-
-    private func label(_ text: String) -> NSTextField { NSTextField(labelWithString: text) }
-
-    private func row(_ views: NSView...) -> NSStackView {
-        let s = NSStackView(views: views)
-        s.spacing = 8
-        return s
     }
 
     private var sourceDescription: String {
@@ -211,109 +415,48 @@ final class ExportSheetController: NSWindowController, NSTextFieldDelegate {
         }
     }
 
-    // MARK: - Settings
-
-    private func show(_ s: ExportSettings) {
-        formatControl.selectedSegment = min(2, max(0, s.format))
-        scopePopup.selectItem(at: s.wholeTable && scopePopup.numberOfItems > 1 ? 1 : 0)
-        if let i = Self.delimiters.firstIndex(where: { $0.1 == s.csv.delimiter }) {
-            delimiterPopup.selectItem(at: i)
-            customDelimiter.stringValue = ""
-        } else {
-            delimiterPopup.selectItem(at: Self.delimiters.count)
-            customDelimiter.stringValue = s.csv.delimiter
-        }
-        quotingPopup.selectItem(at: s.csv.quoting == .always ? 1 : 0)
-        lineBreakPopup.selectItem(at: CSVOptions.LineBreak.allCases.firstIndex(of: s.csv.lineBreak) ?? 0)
-        decimalPopup.selectItem(at: s.csv.decimalSeparator == "," ? 1 : 0)
-        headerBox.state = s.csv.includeHeader ? .on : .off
-        nullBox.state = s.csv.nullAsEmpty ? .on : .off
-        flattenBox.state = s.csv.flattenLineBreaks ? .on : .off
-        prettyBox.state = s.json.pretty ? .on : .off
-        dropBox.state = s.sql.dropTable ? .on : .off
-        createBox.state = s.sql.includeStructure ? .on : .off
-        dataBox.state = s.sql.includeData ? .on : .off
-        perInsertField.stringValue = String(s.sql.rowsPerInsert)
-        tableNameField.stringValue = subject.isTable ? "" : subject.name.lowercased().replacingOccurrences(of: " ", with: "_")
-        updatePanes()
+    private func fitWindow() {
+        if let window, let content = window.contentView { window.fit(to: content) }
     }
 
-    private func edited() -> ExportSettings {
-        var s = settings
-        s.format = formatControl.selectedSegment
-        s.wholeTable = scopePopup.indexOfSelectedItem == 1
-        let d = delimiterPopup.indexOfSelectedItem
-        s.csv.delimiter = d < Self.delimiters.count ? Self.delimiters[d].1 : customDelimiter.stringValue
-        s.csv.quoting = quotingPopup.indexOfSelectedItem == 1 ? .always : .ifNeeded
-        s.csv.lineBreak = CSVOptions.LineBreak.allCases[max(0, lineBreakPopup.indexOfSelectedItem)]
-        s.csv.decimalSeparator = decimalPopup.indexOfSelectedItem == 1 ? "," : "."
-        s.csv.includeHeader = headerBox.state == .on
-        s.csv.nullAsEmpty = nullBox.state == .on
-        s.csv.flattenLineBreaks = flattenBox.state == .on
-        s.json.pretty = prettyBox.state == .on
-        s.sql.dropTable = dropBox.state == .on
-        s.sql.includeStructure = createBox.state == .on
-        s.sql.includeData = dataBox.state == .on
-        s.sql.rowsPerInsert = max(1, Int(perInsertField.stringValue.filter(\.isNumber)) ?? 100)
-        return s
-    }
-
-    private var format: ExportFormat {
-        let s = edited()
-        switch s.format {
-        case 1: return .json(s.json)
-        case 2:
-            var o = s.sql
-            if !subject.isTable { o.includeStructure = false }
-            return .sql(o)
-        default: return .csv(s.csv)
-        }
-    }
-
-    private func updatePanes() {
-        let f = formatControl.selectedSegment
-        csvPane.isHidden = f != 0
-        jsonPane.isHidden = f != 1
-        sqlPane.isHidden = f != 2
-        customDelimiter.isHidden = delimiterPopup.indexOfSelectedItem < Self.delimiters.count
+    private func optionsChanged() {
         if task == nil {
             status.stringValue = ""
             progress.isHidden = true
             revealButton.isHidden = true
         }
-        if let window, let content = window.contentView { window.fit(to: content) }
+        fitWindow()
     }
 
-    @objc private func formatChanged(_ sender: Any?) { updatePanes() }
-
-    /// 0 CSV, 1 JSON, 2 SQL. For the dev harness.
+    /// 0 CSV, 1 JSON, 2 SQL, 3 Excel. For the dev harness.
     func selectFormat(_ index: Int) {
-        formatControl.selectedSegment = index
-        updatePanes()
+        options.selectFormat(index)
         window?.displayIfNeeded()
     }
-    @objc private func delimiterChanged(_ sender: Any?) { updatePanes() }
 
     // MARK: - Exporting
 
-    private var defaultFileName: String {
-        let base = subject.name.isEmpty ? "export" : subject.name
-        return base.replacingOccurrences(of: "/", with: "-") + "." + format.fileExtension
+    var defaultFileName: String {
+        var c = context
+        c.table = subject.name
+        let name = FileNamePattern(options.edited.pattern.isEmpty ? FileNamePattern.export : options.edited.pattern)
+            .render(c, fallback: subject.name.isEmpty ? "export" : subject.name)
+        return name + "." + options.format.fileExtension
     }
 
     private func job() -> ExportJob {
         switch subject {
         case .table(let t, _, let filter, let sort, _):
             let whole = scopePopup.indexOfSelectedItem == 1
-            return ExportJob(source: .table(t, filter: whole ? nil : filter, sort: whole ? [] : sort, connection: connection), format: format)
+            return ExportJob(source: .table(t, filter: whole ? nil : filter, sort: whole ? [] : sort, connection: connection), format: options.format)
         case .result(_, let columns, let rows, _):
-            let name = tableNameField.stringValue.trimmingCharacters(in: .whitespaces)
-            return ExportJob(source: .rows(name: name.isEmpty ? "result" : name, columns: columns, rows: rows, dialect: connection.dialect), format: format)
+            let name = options.tableNameField.stringValue.trimmingCharacters(in: .whitespaces)
+            return ExportJob(source: .rows(name: name.isEmpty ? "result" : name, columns: columns, rows: rows, dialect: connection.dialect), format: options.format)
         }
     }
 
     @objc private func exportClicked(_ sender: Any?) {
-        if case .csv(let o) = format {
+        if case .csv(let o) = options.format {
             do { try o.validate() } catch { return showStatus("\(error)", error: true) }
         }
         guard let window else { return }
@@ -328,8 +471,9 @@ final class ExportSheetController: NSWindowController, NSTextFieldDelegate {
 
     /// Writes the file with the options shown. The dev harness calls this directly.
     func export(to url: URL) {
-        settings = edited()
-        settings.save(table: subject.isTable)
+        settings = options.edited
+        settings.wholeTable = scopePopup.indexOfSelectedItem == 1
+        settings.save(kind)
         let job = job()
         let total: Int? = switch subject {
         case .table(_, _, _, _, let shown): scopePopup.indexOfSelectedItem == 1 ? nil : shown
@@ -404,8 +548,6 @@ final class ExportSheetController: NSWindowController, NSTextFieldDelegate {
     @objc private func reveal(_ sender: Any?) {
         if let exportedURL { NSWorkspace.shared.activateFileViewerSelecting([exportedURL]) }
     }
-
-    func controlTextDidChange(_ obj: Notification) { status.stringValue = "" }
 }
 
 extension CopyFormat {

@@ -26,6 +26,9 @@ public actor SQLiteConnection: DatabaseConnection {
             throw DatabaseError(message, code: Int(rc))
         }
         sqlite3_extended_result_codes(raw, 1)
+        // Another connection to the file (an import's session, another app) may hold a write
+        // lock for a moment; wait for it rather than failing at once.
+        sqlite3_busy_timeout(raw, 5000)
         self.db = Handle(raw)
         self.path = path
     }

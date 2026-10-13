@@ -126,6 +126,11 @@ public enum Keymap {
         KeyCommand("showRunningQueries:", "Running Queries", "General", ""),
         KeyCommand("searchInDatabase:", "Search in Database", "General", ""),
         KeyCommand("showDiagram:", "Show Diagram", "General", ""),
+        KeyCommand("exportTables:", "Export Tables", "General", ""),
+        KeyCommand("importJSON:", "Import JSON", "General", ""),
+        KeyCommand("importSQLFile:", "Import SQL File", "General", ""),
+        KeyCommand("backupDatabases:", "Backup", "General", ""),
+        KeyCommand("restoreDatabase:", "Restore", "General", ""),
 
         KeyCommand("quickOpen:", "Quick Open", "Navigate", "p"),
         KeyCommand("openDatabase:", "Open Database", "Navigate", "k"),

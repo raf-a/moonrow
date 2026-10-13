@@ -36,9 +36,10 @@ extension WorkspaceWindowController {
 
     /// For actions that run at once (CSV import): when `object` has staged changes, asks to
     /// commit everything staged or discard what's staged for it, then runs `proceed`.
-    func resolveEdits(on object: DatabaseObject, before action: String, then proceed: @escaping () -> Void) {
+    func resolveEdits(on object: DatabaseObject, before action: String, in sheetWindow: NSWindow? = nil,
+                      then proceed: @escaping () -> Void, cancelled: @escaping () -> Void = {}) {
         for tab in tableTabs { tab.endEditing() }
-        guard changes.mark(for: object.ref) != nil, let window else { return proceed() }
+        guard changes.mark(for: object.ref) != nil, let window = sheetWindow ?? window else { return proceed() }
         let alert = NSAlert()
         alert.messageText = "\(object.ref.name) has staged changes"
         alert.informativeText = "\(action) runs at once. Commit everything staged first, or discard what's staged for \(object.ref.name)?"
@@ -54,7 +55,7 @@ extension WorkspaceWindowController {
                 self.changes.discard(object.ref)
                 for tab in self.tabs(showing: object) { tab.reload() }
                 proceed()
-            default: break
+            default: cancelled()
             }
         }
     }

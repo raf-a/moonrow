@@ -158,9 +158,10 @@ private func tempDir() -> URL {
         let bindings = Keymap.commands.map(\.defaultBinding).filter { !$0.isEmpty }
         #expect(Set(bindings).count == bindings.count)
         // Space (right sidebar) and ⌥⌫ (truncate) have no ⌘; Add to Queries and the
-        // M9–M10 commands have none.
+        // M9–M11 commands have none.
         let unusual = Set(["toggleRightSidebar:", "truncateTable:", "addToQueries:", "showRunningQueries:",
-                           "searchInDatabase:", "showDiagram:", "showTableDefinition:"])
+                           "searchInDatabase:", "showDiagram:", "showTableDefinition:",
+                           "exportTables:", "importJSON:", "importSQLFile:", "backupDatabases:", "restoreDatabase:"])
         #expect(Keymap.commands.allSatisfy { $0.defaultBinding.isValid || unusual.contains($0.id) })
         #expect(Keymap.command("addToQueries:")?.defaultBinding.isEmpty == true)
         #expect(Keymap.command("toggleRightSidebar:")?.defaultBinding.display == "Space")

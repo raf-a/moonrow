@@ -457,6 +457,61 @@ struct SSHTunnelServerTests {
         }
         #expect(try SSHTestServer.tunnelProcessCount() == before)
     }
+
+    /// pg_dump and mysqldump reach the databases by container name through a local port the
+    /// tunnel carries; the port and the ssh processes go away afterwards.
+    @Test func backupThroughTheTunnel() async throws {
+        let before = try SSHTestServer.tunnelProcessCount()
+        let ssh = SSHTestServer.url!
+        let login = SSHLogin(
+            password: ssh.password, responder: PromptLog.trustingHostKeys().responder,
+            knownHostsFiles: [directory.appending(path: "known_hosts").path], configFile: "none", useAgent: false,
+            helperPath: SSHTestServer.helperPath)
+        let locator = ToolLocator()
+        var targets: [(ConnectionConfig, String?, ToolLocator.Role)] = []
+        if let pg = SSHTestServer.pg {
+            var c = ConnectionConfig(driver: .postgres, host: "tabula-test-pg", port: 5432, user: pg.user!, database: String(pg.path.dropFirst()),
+                                     tlsMode: .require, overSSH: true, sshHost: ssh.host!, sshPort: ssh.port, sshUser: ssh.user!)
+            c.sshPasswordMode = .keychain
+            targets.append((c, pg.password, .backupPostgres))
+        }
+        if let my = SSHTestServer.mysql {
+            var c = ConnectionConfig(driver: .mysql, host: "tabula-test-mysql", port: 3306, user: my.user!, database: String(my.path.dropFirst()),
+                                     overSSH: true, sshHost: ssh.host!, sshPort: ssh.port, sshUser: ssh.user!)
+            c.sshPasswordMode = .keychain
+            targets.append((c, my.password, .backupMySQL))
+        }
+        for (config, password, role) in targets {
+            guard let tool = locator.choose(role, serverMajor: nil, mariaDBServer: false).0 else { continue }
+            var options = BackupOptions()
+            options.content = .schemaOnly
+            let job = BackupJob(config: config, password: password, ssh: login, databases: [config.database], options: options,
+                                tool: tool, serverIsMariaDB: false, pattern: FileNamePattern("{database}"))
+            let lines = LockedLines()
+            let files = try await job.run(into: directory, log: { lines.add($0) })
+            let file = try #require(files.first)
+            let head = try FileHandle(forReadingFrom: file).read(upToCount: 64) ?? Data()
+            if role == .backupPostgres {
+                #expect(head.starts(with: Data("PGDMP".utf8)))
+                #expect(lines.all.first?.contains("--host=tabula-test-pg") == true)
+            } else {
+                #expect(String(decoding: head, as: UTF8.self).contains("dump"))
+                #expect(lines.all.first?.contains("--host=127.0.0.1") == true)
+            }
+        }
+        let deadline = ContinuousClock.now + .seconds(4)
+        while try SSHTestServer.tunnelProcessCount() != before, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        #expect(try SSHTestServer.tunnelProcessCount() == before)
+    }
+}
+
+final class LockedLines: @unchecked Sendable {
+    private let lock = NSLock()
+    private var list: [String] = []
+    var all: [String] { lock.withLock { list } }
+    func add(_ s: String) { lock.withLock { list.append(s) } }
 }
 
 final class SavedLog: @unchecked Sendable {

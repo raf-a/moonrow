@@ -7,6 +7,8 @@ import DBKit
 @MainActor
 final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate, TabulaActions {
     let config: ConnectionConfig
+    /// The database password the workspace logged in with (Backup and Restore reuse it).
+    let loginPassword: String?
     let connection: any DatabaseConnection
     let environment: QueryEnvironment
     var onClose: (() -> Void)?
@@ -56,6 +58,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     init(config: ConnectionConfig, connection: any DatabaseConnection, history: QueryHistory, savedQueries: SavedQueries,
          password: String?) {
         self.config = config
+        self.loginPassword = password
         self.connection = connection
         let safety = SafetyGate(
             level: config.safeMode, credential: SafetyCredential(password: password, connectionName: config.displayName),

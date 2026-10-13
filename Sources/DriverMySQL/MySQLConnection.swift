@@ -52,6 +52,21 @@ public final class MySQLConnection: DatabaseConnection, @unchecked Sendable {
         return try await host.withSession { try await $0.transaction(statements, dialect: dialect, verify: verify) }
     }
 
+    public func withTransaction<T: Sendable>(_ body: @Sendable (any TransactionScope) async throws -> T) async throws -> T {
+        let dialect = dialect
+        return try await host.withSession { session in
+            _ = try await session.collect(SQLStatement(dialect.beginTransaction))
+            do {
+                let value = try await body(MySQLScope(session: session))
+                _ = try await session.collect(SQLStatement(dialect.commitTransaction))
+                return value
+            } catch {
+                if session.isAlive { _ = try? await session.collect(SQLStatement(dialect.rollbackTransaction)) }
+                throw error
+            }
+        }
+    }
+
     public func close() async {
         await host.close()
     }
@@ -272,5 +287,21 @@ public final class MySQLConnection: DatabaseConnection, @unchecked Sendable {
         case .text(let s): Int(s)
         default: nil
         }
+    }
+}
+
+/// Statements inside `MySQLConnection.withTransaction`, on the session it holds.
+struct MySQLScope: TransactionScope {
+    let session: MySQLSession
+
+    func execute(_ statement: SQLStatement) async throws -> Int {
+        let signal = CancelSignal()
+        let box = ResultBox()
+        try await withTaskCancellationHandler {
+            try await session.run(statement, batchSize: 10_000, cancel: signal) { box.add($0) }
+        } onCancel: {
+            signal.fire()
+        }
+        return box.result.rowsAffected ?? 0
     }
 }
