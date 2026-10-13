@@ -114,8 +114,8 @@ private let my = MySQLDialect()
         let text = "CREATE DEFINER=`root`@`%` PROCEDURE `p`()\nBEGIN\n  SELECT 2;\nEND;"
         let plan = try my.definitionPlan(replacing: p, kind: .procedure, text: text)
         #expect(plan.statements == [
-            "CREATE DEFINER=`root`@`%` PROCEDURE `tabula_check_p`()\nBEGIN\n  SELECT 2;\nEND",
-            "DROP PROCEDURE `tabula_check_p`",
+            "CREATE DEFINER=`root`@`%` PROCEDURE `moonrow_check_p`()\nBEGIN\n  SELECT 2;\nEND",
+            "DROP PROCEDURE `moonrow_check_p`",
             "DROP PROCEDURE `p`",
             "CREATE DEFINER=`root`@`%` PROCEDURE `p`()\nBEGIN\n  SELECT 2;\nEND",
         ])

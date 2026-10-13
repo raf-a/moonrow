@@ -4,9 +4,9 @@ import Testing
 import WireSupport
 @testable import DriverPostgres
 
-/// Against a real server: `scripts/test-servers.sh up`, then `TABULA_TEST_PG` from its `env`.
+/// Against a real server: `scripts/test-servers.sh up`, then `MOONROW_TEST_PG` from its `env`.
 enum TestServer {
-    static let url = ProcessInfo.processInfo.environment["TABULA_TEST_PG"]
+    static let url = ProcessInfo.processInfo.environment["MOONROW_TEST_PG"]
     static var isAvailable: Bool { url != nil }
 
     static func configuration(

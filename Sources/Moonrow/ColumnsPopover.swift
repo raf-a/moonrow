@@ -12,7 +12,7 @@ final class ColumnsPopoverController: NSViewController, NSTableViewDataSource, N
     private let search = NSSearchField()
     private let note = NSTextField(labelWithString: "")
     private var shown: [Int] = []
-    private static let dragType = NSPasteboard.PasteboardType("app.tabula.column-row")
+    private static let dragType = NSPasteboard.PasteboardType("app.moonrow.column-row")
 
     init(columns: [String], layout: ColumnLayout) {
         self.columns = columns

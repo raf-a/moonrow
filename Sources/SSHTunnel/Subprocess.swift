@@ -20,7 +20,7 @@ final class Subprocess: @unchecked Sendable {
 
     /// `stdio` becomes the child's stdin and stdout; nil gives it /dev/null. With `lifeline`, its
     /// stdin is instead a pipe that reaches EOF when our process ends, however it ends
-    /// (`tabula-ssh-helper --guard` stops ssh then).
+    /// (`moonrow-ssh-helper --guard` stops ssh then).
     init(
         _ path: String, _ arguments: [String], environment: [String: String], stdio: Int32? = nil,
         lifeline: Bool = false

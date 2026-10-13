@@ -1,0 +1,107 @@
+{
+  "fill" : {
+    "linear-gradient" : [
+      "srgb:0.12157,0.16471,0.23529,1.00000",
+      "srgb:0.03137,0.04314,0.06667,1.00000"
+    ]
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "glass" : true,
+          "image-name" : "moon.svg",
+          "name" : "moon"
+        }
+      ],
+      "lighting" : "individual",
+      "name" : "Moon",
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.35
+      },
+      "specular" : true,
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.15
+      }
+    },
+    {
+      "layers" : [
+        {
+          "glass" : false,
+          "image-name" : "horizon.svg",
+          "name" : "horizon"
+        }
+      ],
+      "name" : "Horizon",
+      "shadow" : {
+        "kind" : "none",
+        "opacity" : 0
+      },
+      "specular" : false,
+      "translucency" : {
+        "enabled" : false,
+        "value" : 0
+      }
+    },
+    {
+      "layers" : [
+        {
+          "glass" : true,
+          "image-name" : "reflection-1.svg",
+          "name" : "reflection-1",
+          "opacity" : 0.6
+        },
+        {
+          "glass" : true,
+          "image-name" : "reflection-2.svg",
+          "name" : "reflection-2",
+          "opacity" : 0.38
+        },
+        {
+          "glass" : true,
+          "image-name" : "reflection-3.svg",
+          "name" : "reflection-3",
+          "opacity" : 0.18
+        }
+      ],
+      "lighting" : "combined",
+      "name" : "Reflection",
+      "shadow" : {
+        "kind" : "none",
+        "opacity" : 0
+      },
+      "specular" : false,
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.5
+      }
+    },
+    {
+      "layers" : [
+        {
+          "glass" : false,
+          "image-name" : "background.svg",
+          "name" : "background"
+        }
+      ],
+      "name" : "Background",
+      "shadow" : {
+        "kind" : "none",
+        "opacity" : 0
+      },
+      "specular" : false,
+      "translucency" : {
+        "enabled" : false,
+        "value" : 0
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}

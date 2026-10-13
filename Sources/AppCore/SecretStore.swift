@@ -49,21 +49,33 @@ public struct SecretStoreError: Error, CustomStringConvertible {
     public var description: String
 }
 
-/// Generic-password Keychain items: service `app.tabula.connection`, account = connection id
+/// Generic-password Keychain items: service `app.moonrow.connection`, account = connection id
 /// (plus `.ssh` / `.ssh-key` for the SSH secrets).
 public struct KeychainSecretStore: SecretStore {
-    public static let service = "app.tabula.connection"
+    public static let service = "app.moonrow.connection"
+    /// The service from when the app had its working name, Tabula. An item found only there
+    /// moves to `service` when it's first read.
+    static let legacyService = "app.tabula.connection"
 
     public init() {}
 
-    private func query(_ account: String) -> [String: Any] {
+    private func query(_ account: String, service: String = Self.service) -> [String: Any] {
         [kSecClass as String: kSecClassGenericPassword,
-         kSecAttrService as String: Self.service,
+         kSecAttrService as String: service,
          kSecAttrAccount as String: account]
     }
 
     public func secret(_ kind: SecretKind, for id: UUID) throws -> String? {
-        var q = query(kind.account(id))
+        let account = kind.account(id)
+        if let value = try read(account, service: Self.service) { return value }
+        guard let value = try read(account, service: Self.legacyService) else { return nil }
+        try setSecret(value, kind, for: id)
+        SecItemDelete(query(account, service: Self.legacyService) as CFDictionary)
+        return value
+    }
+
+    private func read(_ account: String, service: String) throws -> String? {
+        var q = query(account, service: service)
         q[kSecReturnData as String] = true
         q[kSecMatchLimit as String] = kSecMatchLimitOne
         var item: CFTypeRef?
@@ -76,6 +88,7 @@ public struct KeychainSecretStore: SecretStore {
     public func setSecret(_ value: String?, _ kind: SecretKind, for id: UUID) throws {
         let account = kind.account(id)
         guard let value else {
+            SecItemDelete(query(account, service: Self.legacyService) as CFDictionary)
             let status = SecItemDelete(query(account) as CFDictionary)
             guard status == errSecSuccess || status == errSecItemNotFound else { throw error(status) }
             return
@@ -86,7 +99,7 @@ public struct KeychainSecretStore: SecretStore {
         guard update == errSecItemNotFound else { throw error(update) }
         var add = query(account)
         add[kSecValueData as String] = data
-        add[kSecAttrLabel as String] = kind == .database ? "Tabula connection" : "Tabula connection (SSH)"
+        add[kSecAttrLabel as String] = kind == .database ? "Moonrow connection" : "Moonrow connection (SSH)"
         let status = SecItemAdd(add as CFDictionary, nil)
         guard status == errSecSuccess else { throw error(status) }
     }
@@ -97,7 +110,7 @@ public struct KeychainSecretStore: SecretStore {
     }
 }
 
-/// A JSON file of secrets, for development runs with `TABULA_STORE` so they never touch the
+/// A JSON file of secrets, for development runs with `MOONROW_STORE` so they never touch the
 /// login Keychain. Plain text: not for real credentials.
 public final class FileSecretStore: SecretStore, @unchecked Sendable {
     private let url: URL

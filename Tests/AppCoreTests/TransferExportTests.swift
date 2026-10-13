@@ -21,7 +21,7 @@ func runTool(_ path: String, _ arguments: [String]) throws -> (status: Int32, ou
 }
 
 func temporaryFolder() throws -> URL {
-    let dir = FileManager.default.temporaryDirectory.appending(path: "tabula-transfer-\(UUID().uuidString)")
+    let dir = FileManager.default.temporaryDirectory.appending(path: "moonrow-transfer-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     return dir
 }
@@ -226,7 +226,7 @@ struct XLSXTests {
 
 struct TablesExportTests {
     private func shop() async throws -> (SQLiteConnection, URL) {
-        let url = FileManager.default.temporaryDirectory.appending(path: "tabula-tables-\(UUID().uuidString).db")
+        let url = FileManager.default.temporaryDirectory.appending(path: "moonrow-tables-\(UUID().uuidString).db")
         let db = try SQLiteConnection(path: url.path)
         for sql in [
             // Listed before the table it references, so the script must reorder them.
@@ -261,8 +261,8 @@ struct TablesExportTests {
         let progress = Counts()
         try await job.run(to: out) { i, _ in progress.add(i) }
         let script = String(decoding: try GzipReader.decompress(out), as: UTF8.self)
-        #expect(script.hasPrefix("-- Exported by Tabula\n-- Source: shop (3 tables)"))
-        #expect(script.components(separatedBy: "-- Exported by Tabula").count == 2)
+        #expect(script.hasPrefix("-- Exported by Moonrow\n-- Source: shop (3 tables)"))
+        #expect(script.components(separatedBy: "-- Exported by Moonrow").count == 2)
         // Drops first, the referencing table and the view before the table they use.
         let drop = script.range(of: "DROP TABLE IF EXISTS \"orders\"")!
         #expect(script.range(of: "DROP VIEW IF EXISTS \"big\"")!.lowerBound < drop.lowerBound)

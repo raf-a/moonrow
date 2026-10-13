@@ -14,7 +14,7 @@ final class ResultsViewController: NSViewController {
     private var messages: NSTextView { messagesScroll.documentView as! NSTextView }
     private let statusLabel = NSTextField(labelWithString: "")
     private let placeholder = NSTextField(labelWithString: "Run a query with ⌘↩ (current) or ⇧⌘↩ (all)")
-    private let exportButton = NSButton(title: "Export…", target: nil, action: #selector(TabulaActions.exportData(_:)))
+    private let exportButton = NSButton(title: "Export…", target: nil, action: #selector(MoonrowActions.exportData(_:)))
     private let pinButton = NSButton(title: "", target: nil, action: nil)
     private let chartButton = NSButton(title: "Chart", target: nil, action: nil)
     /// For Copy Rows As ▸ SQL INSERT.
@@ -386,7 +386,7 @@ final class ResultGridController: NSViewController, NSTableViewDataSource, NSTab
         menu.addItem(CopyFormat.menuItem(target: self, action: #selector(copySelectedCellsAs(_:)), title: "Copy Selected Cells As"))
         menu.addItem(withTitle: "Copy Column Values", action: #selector(copyColumnValues(_:)), keyEquivalent: "").target = self
         menu.addItem(.separator())
-        menu.addItem(withTitle: "Export…", action: #selector(TabulaActions.exportData(_:)), keyEquivalent: "")
+        menu.addItem(withTitle: "Export…", action: #selector(MoonrowActions.exportData(_:)), keyEquivalent: "")
         grid.menu = menu
         grid.onFocusChange = { [weak self] _ in self?.refresh(self?.grid.selectedRowIndexes ?? []) }
         for (i, c) in columns.enumerated() {

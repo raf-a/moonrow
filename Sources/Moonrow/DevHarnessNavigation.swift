@@ -4,7 +4,7 @@ import DBKit
 
 // M8's navigation through real mouse and key events where routing matters: preview tabs from
 // sidebar clicks, Open in New Tab, Quick Open, Back / Forward, panes and workspace cycling. It
-// leaves a known layout behind, saved as the session, for `TABULA_SESSION=check`.
+// leaves a known layout behind, saved as the session, for `MOONROW_SESSION=check`.
 
 extension DevHarness {
     static func navigationDemo(_ app: AppDelegate, table: String, snapshots: URL?) async throws {
@@ -82,10 +82,10 @@ extension DevHarness {
         try await click(item: table, count: 1)
         try await loaded()
         try check(titles == [second, third, "_\(table)_"], "another preview \(titles)")
-        try await pressMenu(#selector(TabulaActions.showTableStructure(_:)))
+        try await pressMenu(#selector(MoonrowActions.showTableStructure(_:)))
         try check(titles == [second, third, table] && workspace.tableTab?.mode == .structure,
                   "⌃⌘] switches to Structure and keeps the tab \(titles)")
-        try await pressMenu(#selector(TabulaActions.showTableData(_:)))
+        try await pressMenu(#selector(MoonrowActions.showTableData(_:)))
 
         // The same table twice, then a preview kept by staging a change.
         try await click(item: table, count: 1)
@@ -96,14 +96,14 @@ extension DevHarness {
         try await click(item: "empty_table", count: 1)
         try await loaded()
         try check(titles.last == "_empty_table_", "empty_table previews \(titles)")
-        try await pressMenu(#selector(TabulaActions.addRow(_:)))
+        try await pressMenu(#selector(MoonrowActions.addRow(_:)))
         try check(titles.last == "empty_table" && !workspace.changes.isEmpty, "⌘I stages a row and keeps the tab \(titles)")
         workspace.discardChanges(nil)
         try check(workspace.changes.isEmpty, "discarded")
         snap("2-tabs.png", window)
 
         // Quick Open.
-        try await pressMenu(#selector(TabulaActions.quickOpen(_:)))
+        try await pressMenu(#selector(MoonrowActions.quickOpen(_:)))
         let picker = try await waitFor("Quick Open") { workspace.picker }
         try check(picker.isVisible, "⌘P shows Quick Open")
         picker.field.stringValue = String(second.prefix(3))
@@ -116,34 +116,34 @@ extension DevHarness {
 
         // Back and forward over the tabs shown.
         let before = workspace.history.backList.count
-        try await pressMenu(#selector(TabulaActions.goBack(_:)))
+        try await pressMenu(#selector(MoonrowActions.goBack(_:)))
         try check(currentTitle == "empty_table", "⌃⌘← goes back to empty_table (now \(currentTitle ?? "-"))")
-        try await pressMenu(#selector(TabulaActions.goForward(_:)))
+        try await pressMenu(#selector(MoonrowActions.goForward(_:)))
         try check(currentTitle == second && workspace.history.backList.count == before, "⌃⌘→ goes forward to \(second)")
         // A closed tab comes back as a preview.
-        try await pressMenu(#selector(TabulaActions.goBack(_:)))
-        try await pressMenu(#selector(TabulaActions.closeTab(_:)))
+        try await pressMenu(#selector(MoonrowActions.goBack(_:)))
+        try await pressMenu(#selector(MoonrowActions.closeTab(_:)))
         try check(!titles.contains { $0.contains("empty_table") } && currentTitle != "empty_table", "⌘W closes empty_table")
         let afterClose = currentTitle
-        try await pressMenu(#selector(TabulaActions.goBack(_:)))
+        try await pressMenu(#selector(MoonrowActions.goBack(_:)))
         try await loaded()
         try check(currentTitle == "empty_table" && titles.contains("_empty_table_"),
                   "back to a closed tab reopens its table in the preview tab \(titles)")
-        try await pressMenu(#selector(TabulaActions.goForward(_:)))
+        try await pressMenu(#selector(MoonrowActions.goForward(_:)))
         try check(currentTitle == afterClose, "forward returns to \(afterClose ?? "-")")
 
         // Panes.
         workspace.content.select(0)
-        try await pressMenu(#selector(TabulaActions.splitPaneRight(_:)))
+        try await pressMenu(#selector(MoonrowActions.splitPaneRight(_:)))
         try check(workspace.panes.panes.count == 2 && workspace.panes.activeIndex == 1, "⇧⌘D adds a pane on the right, active")
         try check(workspace.content.tabs.map(\.tabItem.title) == [second], "the new pane shows \(second) too")
         try await click(item: table, count: 1)
         try await loaded()
         try check(workspace.panes.panes[1].tabs.map(\.tabItem.title) == [second, table], "a click opens in the active pane")
         let changesBefore = workspace.changes.changeCount
-        try await pressMenu(#selector(TabulaActions.selectPreviousPane(_:)))
+        try await pressMenu(#selector(MoonrowActions.selectPreviousPane(_:)))
         try check(workspace.panes.activeIndex == 0, "⌥⌘[ activates the left pane")
-        try await pressMenu(#selector(TabulaActions.selectNextPane(_:)))
+        try await pressMenu(#selector(MoonrowActions.selectNextPane(_:)))
         try check(workspace.panes.activeIndex == 1 && workspace.changes.changeCount == changesBefore, "⌥⌘] activates the right pane")
         workspace.newQueryTab(nil)
         let query = try require(workspace.queryController, "query tab")
@@ -158,9 +158,9 @@ extension DevHarness {
         _ = try await waitFor("second window key") { otherWindow.isKeyWindow ? true : nil }
         try check(otherWindow.tabGroup === window.tabGroup && window.tabbedWindows?.count == 2,
                   "a new connection opens as a tab of the workspace window")
-        try await pressMenu(#selector(TabulaActions.selectNextWorkspace(_:)), in: otherWindow)
+        try await pressMenu(#selector(MoonrowActions.selectNextWorkspace(_:)), in: otherWindow)
         try check(window.isKeyWindow, "⇧⌘] goes to the next workspace")
-        try await pressMenu(#selector(TabulaActions.selectPreviousWorkspace(_:)))
+        try await pressMenu(#selector(MoonrowActions.selectPreviousWorkspace(_:)))
         try check(otherWindow.isKeyWindow, "⇧⌘[ goes back")
         for title in ["View", "Window"] {
             let menu = NSApp.mainMenu?.items.first { $0.title == title }?.submenu
@@ -178,7 +178,7 @@ extension DevHarness {
         var saved = ConnectionConfig.sqliteFile(url)
         saved.name = "sample (saved)"
         try app.store.save(saved)
-        try await pressMenu(#selector(TabulaActions.showConnections(_:)))
+        try await pressMenu(#selector(MoonrowActions.showConnections(_:)))
         let connections = try await waitFor("connection picker") { app.picker }
         try check(connections.window.sheetParent === window && connections.list.shownConnections == ["sample (saved)"],
                   "⇧⌘K shows the saved connections as a sheet \(connections.list.shownConnections)")
@@ -196,7 +196,7 @@ extension DevHarness {
 
         // File ▸ New Window: the welcome window; what it connects opens in a window of its own.
         try await makeKey(window)
-        try await pressMenu(#selector(TabulaActions.newWindow(_:)))
+        try await pressMenu(#selector(MoonrowActions.newWindow(_:)))
         let welcome = try await waitFor("welcome window") { app.welcome?.window?.isVisible == true ? app.welcome : nil }
         try check(true, "⌥⌘N shows the welcome window")
         welcome.connect(saved)
@@ -259,7 +259,7 @@ extension DevHarness {
         try await press(key, code: arrows[key] ?? 0, modifiers, in: target)
     }
 
-    /// With `TABULA_CONNECT` to a server with several schemas: Quick Open finds `table` in
+    /// With `MOONROW_CONNECT` to a server with several schemas: Quick Open finds `table` in
     /// another schema and opens it; Open Database (⌘K) switches to that schema and back.
     static func openDatabaseDemo(_ app: AppDelegate, table: String, snapshots: URL?) async throws {
         if let snapshots { try FileManager.default.createDirectory(at: snapshots, withIntermediateDirectories: true) }
@@ -273,7 +273,7 @@ extension DevHarness {
         // The schema the workspace starts in.
         let start: String = try await waitFor("schemas") { workspace.sidebar.schemaNames.isEmpty ? nil : workspace.sidebar.schema }
 
-        try await pressMenu(#selector(TabulaActions.quickOpen(_:)), in: window)
+        try await pressMenu(#selector(MoonrowActions.quickOpen(_:)), in: window)
         let quick = try await waitFor("Quick Open") { workspace.picker }
         quick.field.stringValue = String(table.prefix(5))
         quick.refresh()
@@ -284,7 +284,7 @@ extension DevHarness {
         let tab = try await waitFor("\(table) tab") { workspace.tableTab.flatMap { $0.table.name == table ? $0 : nil } }
         try check(tab.table.schema == found.detail && !tab.isPreview, "Return opens \(found.detail).\(table) in a regular tab")
 
-        try await pressMenu(#selector(TabulaActions.openDatabase(_:)), in: window)
+        try await pressMenu(#selector(MoonrowActions.openDatabase(_:)), in: window)
         let picker = try await waitFor("Open Database") { workspace.picker }
         picker.field.stringValue = found.detail
         picker.refresh()
@@ -295,7 +295,7 @@ extension DevHarness {
         let listed = try await waitFor("listed") { workspace.environment.catalog.objects.first { $0.ref.schema == found.detail } }
         try check(listed.ref.schema == found.detail, "⌘K switches the workspace to \(found.detail) and lists its items")
         if let snapshots, let w = workspace.window { snapshot(w, to: snapshots.appending(path: "opendb-3-switched.png")) }
-        try await pressMenu(#selector(TabulaActions.openDatabase(_:)), in: window)
+        try await pressMenu(#selector(MoonrowActions.openDatabase(_:)), in: window)
         let back = try await waitFor("Open Database") { workspace.picker }
         back.field.stringValue = start
         back.refresh()
@@ -314,7 +314,7 @@ extension DevHarness {
             print("ok: \(what)")
         }
         let store = app.store
-        guard store.connections.isEmpty else { throw HarnessError("TABULA_WELCOME needs an empty store") }
+        guard store.connections.isEmpty else { throw HarnessError("MOONROW_WELCOME needs an empty store") }
         let production = try store.addGroup(named: "Production")
         let local = try store.addGroup(named: "Local")
         try store.save(ConnectionConfig(name: "shop prod", driver: .postgres, host: "db.example.com", user: "shop",

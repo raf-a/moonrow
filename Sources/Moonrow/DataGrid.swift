@@ -114,9 +114,9 @@ final class DataGrid: NSTableView {
         case (124, .shift):
             extendFocus(to: (focusedColumnIndex ?? -1) + 1)
         case (51, []), (117, []):  // Delete, Forward Delete
-            NSApp.sendAction(#selector(TabulaActions.deleteRows(_:)), to: nil, from: self)
+            NSApp.sendAction(#selector(MoonrowActions.deleteRows(_:)), to: nil, from: self)
         case (49, []):  // Space: the right sidebar
-            NSApp.sendAction(#selector(TabulaActions.toggleRightSidebar(_:)), to: nil, from: self)
+            NSApp.sendAction(#selector(MoonrowActions.toggleRightSidebar(_:)), to: nil, from: self)
         default:
             super.keyDown(with: event)
         }

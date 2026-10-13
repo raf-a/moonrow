@@ -3,7 +3,7 @@ import AppKit
 import DBKit
 
 extension DevHarness {
-    /// `TABULA_OBJECTS=<table>`: M10's schema objects through the real controls. It commits:
+    /// `MOONROW_OBJECTS=<table>`: M10's schema objects through the real controls. It commits:
     /// point it at a copy of a SQLite file or a scratch server database. `table` needs a text
     /// column and at least one row. Steps: a new view from the sidebar's New menu (typed, ⇧⌘P,
     /// ⌘S); editing its definition in the view's Definition side (undo, redo, ⌘S); a trigger
@@ -36,7 +36,7 @@ extension DevHarness {
             editor.insertText(text, replacementRange: editor.selectedRange())
         }
         func commit(_ what: String) async throws {
-            try await key(#selector(TabulaActions.commitChanges(_:)))
+            try await key(#selector(MoonrowActions.commitChanges(_:)))
             _ = try await waitFor("\(what) committed") { changes.isEmpty && !workspace.isCommitting ? true : nil }
             print("ok: ⌘S commits \(what)")
         }
@@ -72,7 +72,7 @@ extension DevHarness {
         try check(newTab.tabItem.title == viewName, "the tab takes the name typed")
         try check(workspace.sidebar.stagedNewDefinitions().map(\.name) == [viewName], "the sidebar lists the new view")
         snap("objects-01-new-view.png", window)
-        try await key(#selector(TabulaActions.previewChanges(_:)))
+        try await key(#selector(MoonrowActions.previewChanges(_:)))
         try await Task.sleep(for: .milliseconds(300))
         snap("objects-02-preview.png", window.attachedSheet)
         try check(try changes.plan(dialect: dialect).preview.contains("CREATE VIEW"), "⇧⌘P shows the CREATE VIEW")

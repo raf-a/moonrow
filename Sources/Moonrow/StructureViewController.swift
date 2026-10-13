@@ -8,7 +8,7 @@ import DBKit
 /// commits (⌘S) or discards (⇧⌘⌫) it with everything else staged.
 @MainActor
 final class StructureViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate,
-    NSTextFieldDelegate, NSSearchFieldDelegate, NSMenuItemValidation, NSPopoverDelegate, TabulaActions
+    NSTextFieldDelegate, NSSearchFieldDelegate, NSMenuItemValidation, NSPopoverDelegate, MoonrowActions
 {
     private enum ColumnField: String, CaseIterable {
         case key, name, type, nullable, defaultValue, extra, foreignKey, comment

@@ -14,7 +14,7 @@ public struct BackupOptions: Codable, Hashable, Sendable {
     public enum PostgresFormat: String, Codable, Sendable, CaseIterable {
         /// pg_dump's own compressed archive, for pg_restore.
         case custom
-        /// A SQL script, for psql (or Tabula's SQL import).
+        /// A SQL script, for psql (or Moonrow's SQL import).
         case plain
         case tar
         /// A folder of files, one per table.
@@ -474,7 +474,7 @@ public enum BackupCommands {
     static func postgresConnection(_ login: Login, databaseFlag: String = "--dbname") -> ([String], [String: String]) {
         let e = login.endpoint
         let args = ["--host=\(e.socket ?? e.host)", "--port=\(e.port)", "--username=\(login.user)", "\(databaseFlag)=\(login.database)", "--no-password"]
-        var env: [String: String] = ["PGCONNECT_TIMEOUT": "15", "PGAPPNAME": "Tabula"]
+        var env: [String: String] = ["PGCONNECT_TIMEOUT": "15", "PGAPPNAME": "Moonrow"]
         if let p = login.password { env["PGPASSWORD"] = p }
         if let a = e.hostAddress { env["PGHOSTADDR"] = a }
         if e.socket == nil {
@@ -493,7 +493,7 @@ public enum BackupCommands {
             }
             // libpq checks the certificate in `require` mode too when ~/.postgresql/root.crt
             // exists; the connection's own sessions don't, so neither do its tools.
-            if !login.config.tlsMode.verifiesCertificate { env["PGSSLROOTCERT"] = "/nonexistent/tabula-no-root-certificate" }
+            if !login.config.tlsMode.verifiesCertificate { env["PGSSLROOTCERT"] = "/nonexistent/moonrow-no-root-certificate" }
         }
         return (args, env)
     }
@@ -573,7 +573,7 @@ public enum BackupCommands {
 
     /// A private folder (0700) for the option file.
     public static func privateFolder() throws -> URL {
-        let url = FileManager.default.temporaryDirectory.appending(path: "tabula-tool-\(UUID().uuidString.prefix(8))")
+        let url = FileManager.default.temporaryDirectory.appending(path: "moonrow-tool-\(UUID().uuidString.prefix(8))")
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         return url
     }
@@ -838,7 +838,7 @@ final class LineCollector: @unchecked Sendable {
 /// Feeds a tool's output into a gzip file, in order, off the pipe's handler.
 final class GzipPump: @unchecked Sendable {
     private let writer: GzipWriter
-    private let queue = DispatchQueue(label: "tabula.gzip")
+    private let queue = DispatchQueue(label: "moonrow.gzip")
     private let done = DispatchSemaphore(value: 0)
     private var error: (any Error)?
 

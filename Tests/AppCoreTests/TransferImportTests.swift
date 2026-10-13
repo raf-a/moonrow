@@ -142,7 +142,7 @@ extension ImportRecord: Equatable {
 
 struct SQLDumpReaderTests {
     private func write(_ text: String, gzip: Bool = false) throws -> URL {
-        let url = FileManager.default.temporaryDirectory.appending(path: "tabula-dump-\(UUID().uuidString).sql\(gzip ? ".gz" : "")")
+        let url = FileManager.default.temporaryDirectory.appending(path: "moonrow-dump-\(UUID().uuidString).sql\(gzip ? ".gz" : "")")
         if gzip {
             let w = try GzipWriter(url: url)
             try w.write(text)
@@ -249,7 +249,7 @@ struct SQLDumpReaderTests {
 /// files (our export, a Postgres dump with COPY, a MySQL dump with executable comments).
 @Suite(.serialized) struct ImportRoundTripTests {
     private func file(_ text: String, _ ext: String) throws -> URL {
-        let url = FileManager.default.temporaryDirectory.appending(path: "tabula-import-\(UUID().uuidString).\(ext)")
+        let url = FileManager.default.temporaryDirectory.appending(path: "moonrow-import-\(UUID().uuidString).\(ext)")
         try Data(text.utf8).write(to: url)
         return url
     }
@@ -352,7 +352,7 @@ struct SQLDumpReaderTests {
             let items = [TablesExportJob.Item(DatabaseObject(TableRef("items"), kind: .table), drop: true)]
             let job = TablesExportJob(items: items, format: .sql(SQLExportOptions(gzip: true)), connection: f.db,
                                       pattern: FileNamePattern("x"), context: .init())
-            let url = FileManager.default.temporaryDirectory.appending(path: "tabula-export-\(UUID().uuidString).sql.gz")
+            let url = FileManager.default.temporaryDirectory.appending(path: "moonrow-export-\(UUID().uuidString).sql.gz")
             defer { try? FileManager.default.removeItem(at: url) }
             try await job.run(to: url)
             let before = try await f.db.execute("SELECT id, name, qty, price, note FROM items ORDER BY id").rows

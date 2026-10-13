@@ -1,16 +1,16 @@
 import Darwin
 import Foundation
 
-// Tabula's companion for SSH tunnels, with two jobs:
+// Moonrow's companion for SSH tunnels, with two jobs:
 //
-//   tabula-ssh-helper --guard <ssh> <args…>
-//       Runs ssh as its child until either ends. Its stdin is a pipe from Tabula: when that
-//       closes (Tabula quit or crashed) it stops ssh, so no tunnel outlives the app. SIGTERM is
+//   moonrow-ssh-helper --guard <ssh> <args…>
+//       Runs ssh as its child until either ends. Its stdin is a pipe from Moonrow: when that
+//       closes (Moonrow quit or crashed) it stops ssh, so no tunnel outlives the app. SIGTERM is
 //       passed on to ssh; it exits with ssh's status.
 //
-//   tabula-ssh-helper <prompt>          (as SSH_ASKPASS)
+//   moonrow-ssh-helper <prompt>          (as SSH_ASKPASS)
 //       ssh runs it with the prompt as its argument and reads the answer from its stdout. It
-//       relays the prompt to the Tabula process that started ssh (socket and token in the
+//       relays the prompt to the Moonrow process that started ssh (socket and token in the
 //       environment) and prints what the user answered; exits 1 when the user cancels.
 
 let arguments = CommandLine.arguments
@@ -26,7 +26,7 @@ func guardChild(_ command: [String]) -> Never {
     posix_spawn_file_actions_addopen(&actions, 0, "/dev/null", O_RDONLY, 0)
     var attributes: posix_spawnattr_t?
     posix_spawnattr_init(&attributes)
-    // Our stdin (the pipe from Tabula) stays with us; ssh gets stdout/stderr and nothing else.
+    // Our stdin (the pipe from Moonrow) stays with us; ssh gets stdout/stderr and nothing else.
     posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_CLOEXEC_DEFAULT))
     posix_spawn_file_actions_addinherit_np(&actions, 1)
     posix_spawn_file_actions_addinherit_np(&actions, 2)
@@ -56,7 +56,7 @@ func guardChild(_ command: [String]) -> Never {
             if n < 0, errno == EINTR { continue }
             if n <= 0 { break }
         }
-        // Tabula is gone.
+        // Moonrow is gone.
         kill(pid, SIGTERM)
         sleep(3)
         kill(pid, SIGKILL)
@@ -69,8 +69,8 @@ func guardChild(_ command: [String]) -> Never {
 
 func askpass(_ prompt: String) -> Never {
     let environment = ProcessInfo.processInfo.environment
-    guard let path = environment["TABULA_ASKPASS_SOCKET"], let token = environment["TABULA_ASKPASS_TOKEN"] else {
-        fputs("tabula-ssh-helper: only Tabula runs this\n", stderr)
+    guard let path = environment["MOONROW_ASKPASS_SOCKET"], let token = environment["MOONROW_ASKPASS_TOKEN"] else {
+        fputs("moonrow-ssh-helper: only Moonrow runs this\n", stderr)
         exit(2)
     }
     // A notification with no answer (e.g. "touch your security key"): ssh doesn't wait for it.
@@ -91,7 +91,7 @@ func askpass(_ prompt: String) -> Never {
         }
     }
     guard connected == 0 else {
-        fputs("tabula-ssh-helper: Tabula isn't listening\n", stderr)
+        fputs("moonrow-ssh-helper: Moonrow isn't listening\n", stderr)
         exit(1)
     }
 

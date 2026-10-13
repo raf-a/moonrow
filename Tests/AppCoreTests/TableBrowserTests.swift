@@ -4,7 +4,7 @@ import Testing
 @testable import AppCore
 
 private func tempDB(rows: Int) async throws -> URL {
-    let url = FileManager.default.temporaryDirectory.appending(path: "tabula-\(UUID().uuidString).db")
+    let url = FileManager.default.temporaryDirectory.appending(path: "moonrow-\(UUID().uuidString).db")
     // Created through the driver directly; the factory refuses missing files.
     let config = ConnectionConfig(filePath: url.path)
     FileManager.default.createFile(atPath: url.path, contents: nil)
@@ -33,7 +33,7 @@ private func tempDB(rows: Int) async throws -> URL {
     }
 
     @Test func refusesNonDatabaseFile() async throws {
-        let url = FileManager.default.temporaryDirectory.appending(path: "tabula-\(UUID().uuidString).txt")
+        let url = FileManager.default.temporaryDirectory.appending(path: "moonrow-\(UUID().uuidString).txt")
         try Data(String(repeating: "definitely not sqlite ", count: 100).utf8).write(to: url)
         await #expect(throws: DatabaseError.self) {
             try await ConnectionFactory.test(ConnectionConfig(filePath: url.path))

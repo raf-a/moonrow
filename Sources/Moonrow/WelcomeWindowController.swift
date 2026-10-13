@@ -60,15 +60,15 @@ final class WelcomeWindowController: NSWindowController, NSWindowDelegate, NSSea
         icon.widthAnchor.constraint(equalToConstant: 88).isActive = true
         icon.heightAnchor.constraint(equalToConstant: 88).isActive = true
 
-        let name = NSTextField(labelWithString: "Tabula")
+        let name = NSTextField(labelWithString: "Moonrow")
         name.font = .systemFont(ofSize: 26, weight: .semibold)
         let version = NSTextField(labelWithString: "Version \(Self.version)")
         version.font = .systemFont(ofSize: 12)
         version.textColor = .secondaryLabelColor
 
-        let newButton = NSButton(title: "New Connection", target: nil, action: #selector(TabulaActions.newConnection(_:)))
-        let backupButton = NSButton(title: "Backup", target: nil, action: #selector(TabulaActions.backupDatabases(_:)))
-        let restoreButton = NSButton(title: "Restore", target: nil, action: #selector(TabulaActions.restoreDatabase(_:)))
+        let newButton = NSButton(title: "New Connection", target: nil, action: #selector(MoonrowActions.newConnection(_:)))
+        let backupButton = NSButton(title: "Backup", target: nil, action: #selector(MoonrowActions.backupDatabases(_:)))
+        let restoreButton = NSButton(title: "Restore", target: nil, action: #selector(MoonrowActions.restoreDatabase(_:)))
         for b in [newButton, backupButton, restoreButton] {
             b.controlSize = .large
             b.widthAnchor.constraint(equalToConstant: 190).isActive = true
@@ -92,7 +92,7 @@ final class WelcomeWindowController: NSWindowController, NSWindowDelegate, NSSea
         newGroup.bezelStyle = .accessoryBarAction
         newGroup.toolTip = "New group"
         let add = NSButton(image: NSImage(systemSymbolName: "plus", accessibilityDescription: "New connection")!,
-                           target: nil, action: #selector(TabulaActions.newConnection(_:)))
+                           target: nil, action: #selector(MoonrowActions.newConnection(_:)))
         add.bezelStyle = .accessoryBarAction
         add.toolTip = "New connection"
         let header = NSStackView(views: [search, newGroup, add])
@@ -163,7 +163,7 @@ final class WelcomeWindowController: NSWindowController, NSWindowDelegate, NSSea
             menu.addItem(.separator())
         }
         menu.add("New Group…", #selector(newGroupClicked(_:))).target = self
-        menu.add("New Connection…", #selector(TabulaActions.newConnection(_:)))
+        menu.add("New Connection…", #selector(MoonrowActions.newConnection(_:)))
     }
 
     private static var version: String {

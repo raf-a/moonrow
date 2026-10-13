@@ -154,7 +154,7 @@ import Testing
     // MARK: - SQLite rebuild
 
     @Test func sqliteRebuildKeepsConstraintsIndexesTriggersAndViews() async throws {
-        let url = FileManager.default.temporaryDirectory.appending(path: "tabula-\(UUID().uuidString).db")
+        let url = FileManager.default.temporaryDirectory.appending(path: "moonrow-\(UUID().uuidString).db")
         defer { try? FileManager.default.removeItem(at: url) }
         let db = try SQLiteConnection(path: url.path)
         for sql in [

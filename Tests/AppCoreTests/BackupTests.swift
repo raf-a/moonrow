@@ -282,7 +282,7 @@ final class Lines: @unchecked Sendable {
     private func server(_ variable: String) async throws -> Server? {
         guard let text = ProcessInfo.processInfo.environment[variable], let (config, password) = ConnectionConfig.parse(url: text) else { return nil }
         var c = config
-        if variable == "TABULA_TEST_MARIADB" { c.driver = .mariadb }
+        if variable == "MOONROW_TEST_MARIADB" { c.driver = .mariadb }
         return Server(config: c, password: password, admin: try await ConnectionFactory.open(c, password: password))
     }
 
@@ -312,7 +312,7 @@ final class Lines: @unchecked Sendable {
         let family: DumpTool.Family = s.config.driver == .postgres ? .postgres : .mysql
         let backupRole: ToolLocator.Role = family == .postgres ? .backupPostgres : .backupMySQL
         guard let dumpTool = Self.locator.choose(backupRole, serverMajor: major, mariaDBServer: maria).0 else { return }
-        let source = "tabula_bk_" + UUID().uuidString.prefix(6).lowercased()
+        let source = "moonrow_bk_" + UUID().uuidString.prefix(6).lowercased()
         var created = [source]
         let dir = try temporaryFolder()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -331,7 +331,7 @@ final class Lines: @unchecked Sendable {
                 let file = dir.appending(path: job.fileName(FileNamePattern("{database}-\(i)")))
                 try await job.run(to: file, log: { log.add($0) })
                 #expect(log.all.first?.hasPrefix("$ ") == true)
-                // The command line never carries the password (the test one, "tabula", is also in
+                // The command line never carries the password (the test one, "moonrow", is also in
                 // the database names, so look for the ways it could be passed).
                 #expect(!log.all[0].contains("PGPASSWORD") && !log.all[0].contains("--password") && !log.all[0].contains(" -p"))
                 let kind = try BackupFileKind.detect(file)
@@ -370,23 +370,23 @@ final class Lines: @unchecked Sendable {
         directory.postgresFormat = .directory
         var single = RestoreOptions()
         single.singleTransaction = true
-        try await roundTrip("TABULA_TEST_PG", [(custom, RestoreOptions()), (plain, single), (directory, RestoreOptions())])
+        try await roundTrip("MOONROW_TEST_PG", [(custom, RestoreOptions()), (plain, single), (directory, RestoreOptions())])
     }
 
     @Test func mysql() async throws {
         var gz = BackupOptions()
         gz.gzip = true
-        try await roundTrip("TABULA_TEST_MYSQL", [(BackupOptions(), RestoreOptions()), (gz, RestoreOptions())])
+        try await roundTrip("MOONROW_TEST_MYSQL", [(BackupOptions(), RestoreOptions()), (gz, RestoreOptions())])
     }
 
     @Test func mariadb() async throws {
         var gz = BackupOptions()
         gz.gzip = true
-        try await roundTrip("TABULA_TEST_MARIADB", [(gz, RestoreOptions())])
+        try await roundTrip("MOONROW_TEST_MARIADB", [(gz, RestoreOptions())])
     }
 
     @Test func failedBackupLeavesNoFile() async throws {
-        guard let s = try await server("TABULA_TEST_PG"),
+        guard let s = try await server("MOONROW_TEST_PG"),
               let tool = Self.locator.choose(.backupPostgres, serverMajor: 18, mariaDBServer: false).0 else { return }
         await s.admin.close()
         let dir = try temporaryFolder()

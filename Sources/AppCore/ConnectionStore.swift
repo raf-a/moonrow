@@ -32,11 +32,21 @@ public final class ConnectionStore {
         self.fileURL = fileURL
     }
 
-    /// `~/Library/Application Support/Tabula/connections.json`.
-    public static func defaultFileURL() -> URL {
-        URL.applicationSupportDirectory
-            .appending(path: "Tabula", directoryHint: .isDirectory)
+    /// `~/Library/Application Support/Moonrow/connections.json`.
+    public static func defaultFileURL(in base: URL = .applicationSupportDirectory) -> URL {
+        base.appending(path: "Moonrow", directoryHint: .isDirectory)
             .appending(path: "connections.json")
+    }
+
+    /// Moves the data folder from when the app had its working name, `Tabula`, to where
+    /// `defaultFileURL(in:)` looks, unless that folder already exists. Returns whether it moved.
+    @discardableResult
+    public static func adoptLegacyDirectory(in base: URL = .applicationSupportDirectory) -> Bool {
+        let legacy = base.appending(path: "Tabula", directoryHint: .isDirectory)
+        let current = defaultFileURL(in: base).deletingLastPathComponent()
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: legacy.path), !fm.fileExists(atPath: current.path) else { return false }
+        return (try? fm.moveItem(at: legacy, to: current)) != nil
     }
 
     /// A missing file means no connections yet. Anything else that fails throws, and the

@@ -25,9 +25,9 @@ struct Backend: Sendable, CustomTestStringConvertible {
     var testDescription: String { name }
 
     static let all: [Backend] = [Backend(kind: .sqlite, name: "SQLite", url: nil)] + [
-        (Kind.postgres, "PostgreSQL", "TABULA_TEST_PG"),
-        (.mysql, "MySQL", "TABULA_TEST_MYSQL"),
-        (.mysql, "MariaDB", "TABULA_TEST_MARIADB"),
+        (Kind.postgres, "PostgreSQL", "MOONROW_TEST_PG"),
+        (.mysql, "MySQL", "MOONROW_TEST_MYSQL"),
+        (.mysql, "MariaDB", "MOONROW_TEST_MARIADB"),
     ].compactMap { kind, name, variable in
         ProcessInfo.processInfo.environment[variable].flatMap(URL.init(string:)).map { Backend(kind: kind, name: name, url: $0) }
     }
@@ -67,7 +67,7 @@ final class Fixture: @unchecked Sendable {
         let name = "t_" + UUID().uuidString.prefix(8).lowercased()
         switch backend.kind {
         case .sqlite:
-            let url = FileManager.default.temporaryDirectory.appending(path: "tabula-\(UUID().uuidString).db")
+            let url = FileManager.default.temporaryDirectory.appending(path: "moonrow-\(UUID().uuidString).db")
             let sqlite = try SQLiteConnection(path: url.path)
             let log = traced
             await sqlite.setStatementLog { log.write($0) }

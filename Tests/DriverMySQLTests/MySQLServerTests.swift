@@ -4,12 +4,12 @@ import Testing
 import WireSupport
 @testable import DriverMySQL
 
-/// A server from `scripts/test-servers.sh env`, e.g. `mysql://root:tabula@127.0.0.1:53306/tabula`.
+/// A server from `scripts/test-servers.sh env`, e.g. `mysql://root:moonrow@127.0.0.1:53306/moonrow`.
 struct TestServer: Sendable, CustomTestStringConvertible {
     let name: String
     let url: URL
 
-    static let all: [TestServer] = [("MySQL", "TABULA_TEST_MYSQL"), ("MariaDB", "TABULA_TEST_MARIADB")]
+    static let all: [TestServer] = [("MySQL", "MOONROW_TEST_MYSQL"), ("MariaDB", "MOONROW_TEST_MARIADB")]
         .compactMap { name, variable in
             ProcessInfo.processInfo.environment[variable].flatMap(URL.init(string:)).map { TestServer(name: name, url: $0) }
         }
@@ -46,7 +46,7 @@ struct TestServer: Sendable, CustomTestStringConvertible {
     }
 }
 
-@Suite(.enabled(if: !TestServer.all.isEmpty, "set TABULA_TEST_MYSQL / TABULA_TEST_MARIADB (scripts/test-servers.sh)"))
+@Suite(.enabled(if: !TestServer.all.isEmpty, "set MOONROW_TEST_MYSQL / MOONROW_TEST_MARIADB (scripts/test-servers.sh)"))
 struct MySQLServerTests {
     private func currentUser(_ c: MySQLConnection) async throws -> String? {
         try await c.execute("SELECT CURRENT_USER()").rows.first?.first.map(\.displayString)

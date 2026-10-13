@@ -180,7 +180,7 @@ final class SavedQueriesViewController: SidebarListController, NSOutlineViewData
     private var folderChildren: [String: [Node]] = [:]
     private var nodes: [String: Node] = [:]
     private var collapsed = Set<String>()
-    private static let dragType = NSPasteboard.PasteboardType("app.tabula.saved-query")
+    private static let dragType = NSPasteboard.PasteboardType("app.moonrow.saved-query")
     var outline: NSOutlineView { table as! NSOutlineView }
 
     init(store: SavedQueries) {

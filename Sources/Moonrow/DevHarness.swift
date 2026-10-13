@@ -3,27 +3,27 @@ import AppKit
 import DBKit
 import Darwin
 
-/// Developer self-checks, off unless `TABULA_BENCH` or `TABULA_DEMO` names a table:
+/// Developer self-checks, off unless `MOONROW_BENCH` or `MOONROW_DEMO` names a table:
 ///
-///     TABULA_BENCH=events TABULA_SNAPSHOTS=build/snapshots Tabula build/sample.sqlite
-///     TABULA_DEMO=users TABULA_SNAPSHOTS=build/snapshots Tabula /tmp/copy-of-sample.sqlite
-///     TABULA_QUERY=events TABULA_STORE=/tmp/tabula-dev/connections.json TABULA_SNAPSHOTS=… Tabula build/sample.sqlite
-///     TABULA_CONNECT=postgres://postgres:tabula@127.0.0.1:55432/postgres TABULA_STORE=… TABULA_SNAPSHOTS=… Tabula
-///     TABULA_CONNECT=postgres://…@tabula-test-pg:5432/postgres TABULA_SSH=ssh://tabula:tabula@127.0.0.1:52222 TABULA_STORE=… Tabula
-///     TABULA_FORM=mysql TABULA_STORE=… TABULA_SNAPSHOTS=… Tabula
-///     TABULA_STRUCTURE=users TABULA_STORE=… TABULA_SNAPSHOTS=… Tabula /tmp/copy-of-sample.sqlite
-///     TABULA_SAFETY=users TABULA_STORE=… TABULA_SNAPSHOTS=… Tabula build/sample.sqlite
-///     TABULA_PREFS=users TABULA_STORE=… TABULA_SNAPSHOTS=… Tabula build/sample.sqlite
-///     TABULA_EXPORT=events TABULA_STORE=… TABULA_SNAPSHOTS=build/snapshots Tabula build/sample.sqlite
-///     TABULA_IMPORT=empty_table=/tmp/rows.csv TABULA_STORE=… TABULA_SNAPSHOTS=… Tabula /tmp/copy-of-sample.sqlite
-///     TABULA_STAGED=users TABULA_STORE=… TABULA_SNAPSHOTS=… Tabula build/sample.sqlite
-///     TABULA_EDITING=notes TABULA_STORE=… TABULA_SNAPSHOTS=… Tabula /tmp/copy-with-a-small-table.sqlite
-///     TABULA_NAVIGATE=users TABULA_STORE=… TABULA_SNAPSHOTS=… Tabula build/sample.sqlite
-///     TABULA_SESSION=check TABULA_STORE=… TABULA_SNAPSHOTS=… Tabula        (after TABULA_NAVIGATE)
-///     TABULA_CONNECT=postgres://… TABULA_OPENDB=far_away TABULA_STORE=… TABULA_SNAPSHOTS=… Tabula
-///     TABULA_WELCOME=1 TABULA_STORE=<empty dir>/connections.json TABULA_SNAPSHOTS=… Tabula
-///     TABULA_OBJECTS=users TABULA_STORE=… TABULA_SNAPSHOTS=… Tabula /tmp/copy-of-sample.sqlite   (or TABULA_CONNECT to a scratch database)
-///     TABULA_TRANSFER=users TABULA_STORE=… TABULA_SNAPSHOTS=… Tabula /tmp/copy-of-sample.sqlite  (or TABULA_CONNECT to a scratch database)
+///     MOONROW_BENCH=events MOONROW_SNAPSHOTS=build/snapshots Moonrow build/sample.sqlite
+///     MOONROW_DEMO=users MOONROW_SNAPSHOTS=build/snapshots Moonrow /tmp/copy-of-sample.sqlite
+///     MOONROW_QUERY=events MOONROW_STORE=/tmp/moonrow-dev/connections.json MOONROW_SNAPSHOTS=… Moonrow build/sample.sqlite
+///     MOONROW_CONNECT=postgres://postgres:moonrow@127.0.0.1:55432/postgres MOONROW_STORE=… MOONROW_SNAPSHOTS=… Moonrow
+///     MOONROW_CONNECT=postgres://…@moonrow-test-pg:5432/postgres MOONROW_SSH=ssh://moonrow:moonrow@127.0.0.1:52222 MOONROW_STORE=… Moonrow
+///     MOONROW_FORM=mysql MOONROW_STORE=… MOONROW_SNAPSHOTS=… Moonrow
+///     MOONROW_STRUCTURE=users MOONROW_STORE=… MOONROW_SNAPSHOTS=… Moonrow /tmp/copy-of-sample.sqlite
+///     MOONROW_SAFETY=users MOONROW_STORE=… MOONROW_SNAPSHOTS=… Moonrow build/sample.sqlite
+///     MOONROW_PREFS=users MOONROW_STORE=… MOONROW_SNAPSHOTS=… Moonrow build/sample.sqlite
+///     MOONROW_EXPORT=events MOONROW_STORE=… MOONROW_SNAPSHOTS=build/snapshots Moonrow build/sample.sqlite
+///     MOONROW_IMPORT=empty_table=/tmp/rows.csv MOONROW_STORE=… MOONROW_SNAPSHOTS=… Moonrow /tmp/copy-of-sample.sqlite
+///     MOONROW_STAGED=users MOONROW_STORE=… MOONROW_SNAPSHOTS=… Moonrow build/sample.sqlite
+///     MOONROW_EDITING=notes MOONROW_STORE=… MOONROW_SNAPSHOTS=… Moonrow /tmp/copy-with-a-small-table.sqlite
+///     MOONROW_NAVIGATE=users MOONROW_STORE=… MOONROW_SNAPSHOTS=… Moonrow build/sample.sqlite
+///     MOONROW_SESSION=check MOONROW_STORE=… MOONROW_SNAPSHOTS=… Moonrow        (after MOONROW_NAVIGATE)
+///     MOONROW_CONNECT=postgres://… MOONROW_OPENDB=far_away MOONROW_STORE=… MOONROW_SNAPSHOTS=… Moonrow
+///     MOONROW_WELCOME=1 MOONROW_STORE=<empty dir>/connections.json MOONROW_SNAPSHOTS=… Moonrow
+///     MOONROW_OBJECTS=users MOONROW_STORE=… MOONROW_SNAPSHOTS=… Moonrow /tmp/copy-of-sample.sqlite   (or MOONROW_CONNECT to a scratch database)
+///     MOONROW_TRANSFER=users MOONROW_STORE=… MOONROW_SNAPSHOTS=… Moonrow /tmp/copy-of-sample.sqlite  (or MOONROW_CONNECT to a scratch database)
 ///
 /// The bench opens the table in the first workspace with every row in one page, scrolls it like
 /// a fast trackpad, jumps to far-apart rows, prints timings and quits. The demo drives the grid's
@@ -31,15 +31,15 @@ import Darwin
 /// COMMITS to the database, so point it at a copy. The query demo types a script into a query
 /// tab (autocomplete included), runs it, cancels an endless query, saves a query and shows the
 /// history; it only reads the database but writes history and saved queries next to
-/// `TABULA_STORE`, which it requires. The structure demo edits a table's columns and indexes
+/// `MOONROW_STORE`, which it requires. The structure demo edits a table's columns and indexes
 /// through the structure editor, commits, then designs and creates a new table; it COMMITS DDL,
-/// so point it at a copy (or a TABULA_CONNECT scratch database). The safety demo walks safe mode's
+/// so point it at a copy (or a MOONROW_CONNECT scratch database). The safety demo walks safe mode's
 /// levels in a query tab (reads pass, writes ask, a wrong password is refused, lowering the level
 /// asks); its writes go to a TEMP table, so the file isn't changed. The preferences demo shows
 /// each pane, rebinds Run All from the Keymap pane, switches theme, appearance and grid font, and
-/// snapshots a workspace in the new style; it writes `settings.json` next to `TABULA_STORE`,
+/// snapshots a workspace in the new style; it writes `settings.json` next to `MOONROW_STORE`,
 /// which the safety and preferences demos require. The export demo opens the table, filters it,
-/// and exports it through the export sheet as CSV, JSON and SQL into `TABULA_SNAPSHOTS`
+/// and exports it through the export sheet as CSV, JSON and SQL into `MOONROW_SNAPSHOTS`
 /// (snapshotting the sheet for each format). The import demo opens the table, loads the CSV file
 /// into the import sheet, snapshots it and imports; it COMMITS, so point it at a copy. Snapshots
 /// are rendered in-process (no screen-recording permission needed).
@@ -47,8 +47,8 @@ import Darwin
 enum DevHarness {
     /// Saved workspaces reopen at launch only outside the harnesses (and in the relaunch check).
     static var allowsSessionRestore: Bool {
-        let quiet: Set = ["TABULA_STORE", "TABULA_SNAPSHOTS", "TABULA_SESSION"]
-        return !ProcessInfo.processInfo.environment.keys.contains { $0.hasPrefix("TABULA_") && !quiet.contains($0) }
+        let quiet: Set = ["MOONROW_STORE", "MOONROW_SNAPSHOTS", "MOONROW_SESSION"]
+        return !ProcessInfo.processInfo.environment.keys.contains { $0.hasPrefix("MOONROW_") && !quiet.contains($0) }
     }
 
     static func runIfRequested(_ app: AppDelegate) {
@@ -66,19 +66,19 @@ enum DevHarness {
                 app.connect(config, presentingErrorsIn: nil)
             }
         }
-        let snapshots = env["TABULA_SNAPSHOTS"].map { URL(filePath: $0, directoryHint: .isDirectory) }
-        // `TABULA_CONNECT=postgres://user:pw@host:port/db` opens a server workspace without saving
-        // the connection; `TABULA_FORM=postgres` opens a new connection form for that driver.
-        if let url = env["TABULA_CONNECT"] {
-            guard env["TABULA_STORE"] != nil, let (parsed, password) = ConnectionConfig.parse(url: url) else {
-                print("TABULA_CONNECT needs TABULA_STORE and a postgres:// or mysql:// URL")
+        let snapshots = env["MOONROW_SNAPSHOTS"].map { URL(filePath: $0, directoryHint: .isDirectory) }
+        // `MOONROW_CONNECT=postgres://user:pw@host:port/db` opens a server workspace without saving
+        // the connection; `MOONROW_FORM=postgres` opens a new connection form for that driver.
+        if let url = env["MOONROW_CONNECT"] {
+            guard env["MOONROW_STORE"] != nil, let (parsed, password) = ConnectionConfig.parse(url: url) else {
+                print("MOONROW_CONNECT needs MOONROW_STORE and a postgres:// or mysql:// URL")
                 NSApp.terminate(nil)
                 return
             }
             var config = parsed
-            // `TABULA_SSH=ssh://user:pw@host:port` goes through that SSH server, trusting its key.
+            // `MOONROW_SSH=ssh://user:pw@host:port` goes through that SSH server, trusting its key.
             var sshPassword: String?
-            if let ssh = env["TABULA_SSH"] {
+            if let ssh = env["MOONROW_SSH"] {
                 do {
                     sshPassword = try config.applySSH(url: ssh)
                     app.autoTrustHostKeys = true
@@ -87,8 +87,8 @@ enum DevHarness {
                 }
             }
             app.connect(config, password: .some(password), sshPassword: sshPassword, presentingErrorsIn: nil)
-            // `TABULA_OPEN=schema.table` switches schema, opens the table and snapshots it.
-            if let target = env["TABULA_OPEN"], let snapshots {
+            // `MOONROW_OPEN=schema.table` switches schema, opens the table and snapshots it.
+            if let target = env["MOONROW_OPEN"], let snapshots {
                 Task {
                     do {
                         try await openAndSnapshot(app, target, snapshots: snapshots)
@@ -100,15 +100,15 @@ enum DevHarness {
                 return
             }
         }
-        if let driver = env["TABULA_FORM"].flatMap(DriverKind.init(rawValue:)) {
+        if let driver = env["MOONROW_FORM"].flatMap(DriverKind.init(rawValue:)) {
             var config = ConnectionConfig(driver: driver)
-            if let ssh = env["TABULA_SSH"] { _ = try? config.applySSH(url: ssh) }
+            if let ssh = env["MOONROW_SSH"] { _ = try? config.applySSH(url: ssh) }
             app.editConnection(config, isNew: true)
         }
-        if let table = env["TABULA_QUERY"] {
+        if let table = env["MOONROW_QUERY"] {
             Task {
                 do {
-                    guard env["TABULA_STORE"] != nil else { throw HarnessError("TABULA_QUERY needs TABULA_STORE") }
+                    guard env["MOONROW_STORE"] != nil else { throw HarnessError("MOONROW_QUERY needs MOONROW_STORE") }
                     try await queryDemo(app, table: table, snapshots: snapshots)
                 } catch {
                     print("query demo failed: \(error)")
@@ -117,11 +117,11 @@ enum DevHarness {
             }
             return
         }
-        for (key, demo) in [("TABULA_SAFETY", safetyDemo), ("TABULA_PREFS", preferencesDemo)] as [(String, (AppDelegate, String, URL?) async throws -> Void)] {
+        for (key, demo) in [("MOONROW_SAFETY", safetyDemo), ("MOONROW_PREFS", preferencesDemo)] as [(String, (AppDelegate, String, URL?) async throws -> Void)] {
             guard let table = env[key] else { continue }
             Task {
                 do {
-                    guard env["TABULA_STORE"] != nil else { throw HarnessError("\(key) needs TABULA_STORE") }
+                    guard env["MOONROW_STORE"] != nil else { throw HarnessError("\(key) needs MOONROW_STORE") }
                     try await demo(app, table, snapshots)
                 } catch {
                     print("\(key) demo failed: \(error)")
@@ -131,10 +131,10 @@ enum DevHarness {
             return
         }
         // Staged changes across pages, tabs and reloads, then discarded: it never commits.
-        if let table = env["TABULA_STAGED"] {
+        if let table = env["MOONROW_STAGED"] {
             Task {
                 do {
-                    guard env["TABULA_STORE"] != nil else { throw HarnessError("TABULA_STAGED needs TABULA_STORE") }
+                    guard env["MOONROW_STORE"] != nil else { throw HarnessError("MOONROW_STAGED needs MOONROW_STORE") }
                     try await stagedDemo(app, table: table, snapshots: snapshots)
                 } catch {
                     print("staged demo failed: \(error)")
@@ -144,11 +144,11 @@ enum DevHarness {
             return
         }
         // Preview tabs, Open in New Tab, Quick Open, Back / Forward, panes and workspaces, then the
-        // session it leaves for `TABULA_SESSION=check`. It never commits.
-        if let table = env["TABULA_NAVIGATE"] {
+        // session it leaves for `MOONROW_SESSION=check`. It never commits.
+        if let table = env["MOONROW_NAVIGATE"] {
             Task {
                 do {
-                    guard env["TABULA_STORE"] != nil else { throw HarnessError("TABULA_NAVIGATE needs TABULA_STORE") }
+                    guard env["MOONROW_STORE"] != nil else { throw HarnessError("MOONROW_NAVIGATE needs MOONROW_STORE") }
                     try await navigationDemo(app, table: table, snapshots: snapshots)
                 } catch {
                     print("navigation demo failed: \(error)")
@@ -160,10 +160,10 @@ enum DevHarness {
         // M9: cells, paste, Quick Filter, columns, the cell editor, Beautify, parameters, pinned
         // results and charts, the query log, saved-query folders, history groups, Running
         // Queries (servers). It stages edits and discards them; it never commits.
-        if let table = env["TABULA_POWER"] {
+        if let table = env["MOONROW_POWER"] {
             Task {
                 do {
-                    guard env["TABULA_STORE"] != nil else { throw HarnessError("TABULA_POWER needs TABULA_STORE") }
+                    guard env["MOONROW_STORE"] != nil else { throw HarnessError("MOONROW_POWER needs MOONROW_STORE") }
                     try await powerDemo(app, table: table, snapshots: snapshots)
                 } catch {
                     print("power demo failed: \(error)")
@@ -173,10 +173,10 @@ enum DevHarness {
             return
         }
         // M10: views, triggers, clones, routines, Search in Database and the diagram. It commits.
-        if let table = env["TABULA_OBJECTS"] {
+        if let table = env["MOONROW_OBJECTS"] {
             Task {
                 do {
-                    guard env["TABULA_STORE"] != nil else { throw HarnessError("TABULA_OBJECTS needs TABULA_STORE") }
+                    guard env["MOONROW_STORE"] != nil else { throw HarnessError("MOONROW_OBJECTS needs MOONROW_STORE") }
                     try await objectsDemo(app, table: table, snapshots: snapshots)
                 } catch {
                     print("objects demo failed: \(error)")
@@ -186,10 +186,10 @@ enum DevHarness {
             return
         }
         // M11: export, import, backup and restore. It commits.
-        if let table = env["TABULA_TRANSFER"] {
+        if let table = env["MOONROW_TRANSFER"] {
             Task {
                 do {
-                    guard env["TABULA_STORE"] != nil else { throw HarnessError("TABULA_TRANSFER needs TABULA_STORE") }
+                    guard env["MOONROW_STORE"] != nil else { throw HarnessError("MOONROW_TRANSFER needs MOONROW_STORE") }
                     try await transferDemo(app, table: table, snapshots: snapshots)
                 } catch {
                     print("transfer demo failed: \(error)")
@@ -198,7 +198,7 @@ enum DevHarness {
             }
             return
         }
-        if let table = env["TABULA_OPENDB"] {
+        if let table = env["MOONROW_OPENDB"] {
             Task {
                 do {
                     try await openDatabaseDemo(app, table: table, snapshots: snapshots)
@@ -209,11 +209,11 @@ enum DevHarness {
             }
             return
         }
-        // Connection groups in the welcome window. It writes connections into TABULA_STORE.
-        if env["TABULA_WELCOME"] != nil {
+        // Connection groups in the welcome window. It writes connections into MOONROW_STORE.
+        if env["MOONROW_WELCOME"] != nil {
             Task {
                 do {
-                    guard env["TABULA_STORE"] != nil else { throw HarnessError("TABULA_WELCOME needs TABULA_STORE") }
+                    guard env["MOONROW_STORE"] != nil else { throw HarnessError("MOONROW_WELCOME needs MOONROW_STORE") }
                     try await welcomeDemo(app, snapshots: snapshots)
                 } catch {
                     print("welcome demo failed: \(error)")
@@ -222,9 +222,9 @@ enum DevHarness {
             }
             return
         }
-        // Run after TABULA_NAVIGATE with the same TABULA_STORE and no file: the workspace it left
+        // Run after MOONROW_NAVIGATE with the same MOONROW_STORE and no file: the workspace it left
         // must come back as it was.
-        if env["TABULA_SESSION"] == "check" {
+        if env["MOONROW_SESSION"] == "check" {
             Task {
                 do {
                     try await sessionCheck(app, snapshots: snapshots)
@@ -238,10 +238,10 @@ enum DevHarness {
         // Undo, the sidebar's delete keys, adding rows by double-click, the right sidebar and the
         // Changes item, then ⌘S. It commits, so point it at a copy; the table should be small
         // enough to leave room below its rows.
-        if let table = env["TABULA_EDITING"] {
+        if let table = env["MOONROW_EDITING"] {
             Task {
                 do {
-                    guard env["TABULA_STORE"] != nil else { throw HarnessError("TABULA_EDITING needs TABULA_STORE") }
+                    guard env["MOONROW_STORE"] != nil else { throw HarnessError("MOONROW_EDITING needs MOONROW_STORE") }
                     try await editingDemo(app, table: table, snapshots: snapshots)
                 } catch {
                     print("editing demo failed: \(error)")
@@ -250,7 +250,7 @@ enum DevHarness {
             }
             return
         }
-        if let table = env["TABULA_STRUCTURE"] {
+        if let table = env["MOONROW_STRUCTURE"] {
             Task {
                 do {
                     try await structureDemo(app, table: table, snapshots: snapshots)
@@ -261,7 +261,7 @@ enum DevHarness {
             }
             return
         }
-        if let table = env["TABULA_EXPORT"] {
+        if let table = env["MOONROW_EXPORT"] {
             Task {
                 do {
                     try await exportDemo(app, table: table, snapshots: snapshots)
@@ -272,11 +272,11 @@ enum DevHarness {
             }
             return
         }
-        if let spec = env["TABULA_IMPORT"] {
+        if let spec = env["MOONROW_IMPORT"] {
             Task {
                 do {
                     let parts = spec.split(separator: "=", maxSplits: 1).map(String.init)
-                    guard parts.count == 2 else { throw HarnessError("TABULA_IMPORT=<table>=<csv path>") }
+                    guard parts.count == 2 else { throw HarnessError("MOONROW_IMPORT=<table>=<csv path>") }
                     try await importDemo(app, table: parts[0], file: URL(filePath: (parts[1] as NSString).expandingTildeInPath), snapshots: snapshots)
                 } catch {
                     print("import demo failed: \(error)")
@@ -285,7 +285,7 @@ enum DevHarness {
             }
             return
         }
-        if let table = env["TABULA_DEMO"] {
+        if let table = env["MOONROW_DEMO"] {
             Task {
                 do {
                     try await demo(app, table: table, snapshots: snapshots)
@@ -296,7 +296,7 @@ enum DevHarness {
             }
             return
         }
-        guard let table = env["TABULA_BENCH"] else {
+        guard let table = env["MOONROW_BENCH"] else {
             if let snapshots { snapshotWindowsAndQuit(to: snapshots) }
             return
         }
@@ -324,7 +324,7 @@ enum DevHarness {
         snapshot(window, to: snapshots.appending(path: "\(target).png"))
     }
 
-    /// With only `TABULA_SNAPSHOTS` set: renders every visible window once launched, then quits.
+    /// With only `MOONROW_SNAPSHOTS` set: renders every visible window once launched, then quits.
     private static func snapshotWindowsAndQuit(to dir: URL) {
         Task {
             try? await Task.sleep(for: .seconds(2))
@@ -645,12 +645,12 @@ enum DevHarness {
         try await undoKey()
         // ⌘⌫ goes through Edit ▸ Delete, to the list while it has the focus.
         window.makeFirstResponder(outline)
-        let deleteItem = try require(menuItem(NSApp.mainMenu, action: #selector(TabulaActions.deleteRows(_:))), "Delete item")
+        let deleteItem = try require(menuItem(NSApp.mainMenu, action: #selector(MoonrowActions.deleteRows(_:))), "Delete item")
         deleteItem.menu?.update()
         try check(deleteItem.isEnabled && deleteItem.title == "Delete Table", "Edit ▸ Delete Table is enabled while the list has the focus")
         // A synthetic ⌘⌫ matches no menu item (AppKit maps the real key itself), so the item's
         // action is sent once the item validates for the list.
-        NSApp.sendAction(#selector(TabulaActions.deleteRows(_:)), to: nil, from: deleteItem)
+        NSApp.sendAction(#selector(MoonrowActions.deleteRows(_:)), to: nil, from: deleteItem)
         _ = try await waitFor("drop staged by ⌘⌫") { changes.mark(for: victim.ref) == .dropped ? true : nil }
         try await undoKey()
         try check(changes.isEmpty, "⌘Z unmarks it again")
@@ -886,9 +886,9 @@ enum DevHarness {
             try await waitFor("safe mode prompt") { gate.prompt.flatMap { $0.sheet.isVisible ? $0 : nil } }
         }
 
-        // What the password levels want: the password in TABULA_CONNECT, else the connection's name.
+        // What the password levels want: the password in MOONROW_CONNECT, else the connection's name.
         let answer = gate.credential.kind == .password
-            ? ProcessInfo.processInfo.environment["TABULA_CONNECT"].flatMap { ConnectionConfig.parse(url: $0)?.password } ?? ""
+            ? ProcessInfo.processInfo.environment["MOONROW_CONNECT"].flatMap { ConnectionConfig.parse(url: $0)?.password } ?? ""
             : gate.connectionName
         /// Changes the level, giving the password when lowering it asks for one.
         func setLevel(_ level: SafeMode) async throws {
@@ -905,7 +905,7 @@ enum DevHarness {
         run("select count(*) from \(table)")
         print("read under \(gate.level.title): prompt \(gate.prompt != nil ? "shown" : "not shown"); \(try await finished())")
 
-        let script = "create temp table tabula_safety_demo (x integer);\ninsert into tabula_safety_demo values (1);\nselect * from tabula_safety_demo"
+        let script = "create temp table moonrow_safety_demo (x integer);\ninsert into moonrow_safety_demo values (1);\nselect * from moonrow_safety_demo"
         run(script)
         var p = try await prompt()
         snap("s1-confirm.png", window)
@@ -989,7 +989,7 @@ enum DevHarness {
         controller.keymap.assign(KeyBinding("c"), to: runAll)
         try await Task.sleep(for: .milliseconds(200))
         snap("p4-keymap-changed.png", prefs)
-        let item = menuItem(NSApp.mainMenu, action: #selector(TabulaActions.runAllQueries(_:)))
+        let item = menuItem(NSApp.mainMenu, action: #selector(MoonrowActions.runAllQueries(_:)))
         print("Run All in the menu: \(item.map { KeyBinding($0.keyEquivalent, .init($0.keyEquivalentModifierMask)).display } ?? "missing")")
 
         // The query tab is selected before the switch: its tab must follow the new appearance.
@@ -1123,7 +1123,7 @@ enum DevHarness {
 
     /// Exports a filtered table as CSV, JSON and SQL through the export sheet.
     private static func exportDemo(_ app: AppDelegate, table: String, snapshots: URL?) async throws {
-        let dir = try require(snapshots, "TABULA_SNAPSHOTS (where the files go)")
+        let dir = try require(snapshots, "MOONROW_SNAPSHOTS (where the files go)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let workspace = try await waitFor("workspace") { app.workspaces.first }
         let window = try require(workspace.window, "workspace window")

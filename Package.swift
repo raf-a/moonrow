@@ -2,7 +2,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "Tabula",
+    name: "Moonrow",
     platforms: [.macOS(.v14)],
     products: [
         .library(name: "SQLScript", targets: ["SQLScript"]),
@@ -12,8 +12,8 @@ let package = Package(
         .library(name: "DriverMySQL", targets: ["DriverMySQL"]),
         .library(name: "SSHTunnel", targets: ["SSHTunnel"]),
         .library(name: "AppCore", targets: ["AppCore"]),
-        .executable(name: "Tabula", targets: ["Tabula"]),
-        .executable(name: "tabula-ssh-helper", targets: ["tabula-ssh-helper"]),
+        .executable(name: "Moonrow", targets: ["Moonrow"]),
+        .executable(name: "moonrow-ssh-helper", targets: ["moonrow-ssh-helper"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.104.0"),
@@ -50,11 +50,11 @@ let package = Package(
         ),
         // SSH_ASKPASS helper ssh runs to ask for passwords; relays prompts to the app. Bundled
         // next to the app's executable.
-        .executableTarget(name: "tabula-ssh-helper"),
+        .executableTarget(name: "moonrow-ssh-helper"),
         // App logic without AppKit, so `swift test` covers it.
         .target(name: "AppCore", dependencies: ["SQLScript", "DBKit", "WireSupport", "SSHTunnel", "DriverSQLite", "DriverPostgres", "DriverMySQL"]),
-        // The AppKit app. `scripts/build-app.sh` wraps it into Tabula.app.
-        .executableTarget(name: "Tabula", dependencies: ["AppCore"]),
+        // The AppKit app. `scripts/build-app.sh` wraps it into Moonrow.app.
+        .executableTarget(name: "Moonrow", dependencies: ["AppCore"]),
         .testTarget(name: "SQLScriptTests", dependencies: ["SQLScript"]),
         .testTarget(name: "DBKitTests", dependencies: ["DBKit"]),
         .testTarget(name: "DriverSQLiteTests", dependencies: ["DriverSQLite"]),
@@ -64,7 +64,7 @@ let package = Package(
         // Depends on the helper so `swift test` builds it next to the test bundle.
         .testTarget(
             name: "SSHTunnelTests",
-            dependencies: ["SSHTunnel", "AppCore", "WireSupport", "DriverPostgres", "DriverMySQL", "tabula-ssh-helper"],
+            dependencies: ["SSHTunnel", "AppCore", "WireSupport", "DriverPostgres", "DriverMySQL", "moonrow-ssh-helper"],
             exclude: ["Fixtures"]
         ),
     ]

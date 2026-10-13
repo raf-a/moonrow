@@ -294,7 +294,7 @@ public struct SQLWriter: RowWriter {
     /// The comment a SQL export starts with.
     public static func comment(source: String, dialect: any Dialect, date: Date) -> String {
         """
-            -- Exported by Tabula
+            -- Exported by Moonrow
             -- Source: \(source.replacingOccurrences(of: "\n", with: " "))
             -- Dialect: \(dialect.name)
             -- Date: \(date.ISO8601Format())

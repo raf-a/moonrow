@@ -9,7 +9,7 @@ import WireSupport
 
 @Suite struct SSHPromptTests {
     @Test func classifiesOpenSSHPrompts() {
-        #expect(SSHPrompt("tabula@127.0.0.1's password: ") == .password(account: "tabula@127.0.0.1"))
+        #expect(SSHPrompt("moonrow@127.0.0.1's password: ") == .password(account: "moonrow@127.0.0.1"))
         #expect(SSHPrompt("Enter passphrase for key '/Users/me/.ssh/id_ed25519': ")
             == .keyPassphrase(keyPath: "/Users/me/.ssh/id_ed25519"))
         let hostKey = """
@@ -33,11 +33,11 @@ import WireSupport
     @Test func masterArguments() {
         let c = SSHTunnelConfiguration(
             host: "-bastion", port: 2222, user: "deploy", identityFile: "/k/id",
-            knownHostsFiles: ["/Users/me/Library/Application Support/Tabula/known_hosts", "/Users/me/.ssh/known_hosts"],
+            knownHostsFiles: ["/Users/me/Library/Application Support/Moonrow/known_hosts", "/Users/me/.ssh/known_hosts"],
             configFile: "none", useAgent: false, helperPath: "/x")
         let args = c.masterArguments(controlPath: "/tmp/t/m")
         #expect(args.prefix(9) == ["-F", "none", "-M", "-S", "/tmp/t/m", "-N", "-T", "-i", "/k/id"])
-        #expect(args.contains(#"UserKnownHostsFile="/Users/me/Library/Application Support/Tabula/known_hosts" /Users/me/.ssh/known_hosts"#))
+        #expect(args.contains(#"UserKnownHostsFile="/Users/me/Library/Application Support/Moonrow/known_hosts" /Users/me/.ssh/known_hosts"#))
         #expect(args.contains("IdentityAgent=none"))
         #expect(args.contains("IdentitiesOnly=yes"))
         #expect(args.contains("ClearAllForwardings=yes"))
@@ -158,22 +158,22 @@ import WireSupport
 
 // MARK: - Against the test servers
 
-/// `TABULA_TEST_SSH` (`ssh://tabula:tabula@127.0.0.1:52222`) from `scripts/test-servers.sh env`;
+/// `MOONROW_TEST_SSH` (`ssh://moonrow:moonrow@127.0.0.1:52222`) from `scripts/test-servers.sh env`;
 /// the databases are reached from there by container name.
 enum SSHTestServer {
-    static let url = ProcessInfo.processInfo.environment["TABULA_TEST_SSH"].flatMap { URLComponents(string: $0) }
-    static let pg = ProcessInfo.processInfo.environment["TABULA_TEST_PG"].flatMap { URLComponents(string: $0) }
-    static let mysql = ProcessInfo.processInfo.environment["TABULA_TEST_MYSQL"].flatMap { URLComponents(string: $0) }
+    static let url = ProcessInfo.processInfo.environment["MOONROW_TEST_SSH"].flatMap { URLComponents(string: $0) }
+    static let pg = ProcessInfo.processInfo.environment["MOONROW_TEST_PG"].flatMap { URLComponents(string: $0) }
+    static let mysql = ProcessInfo.processInfo.environment["MOONROW_TEST_MYSQL"].flatMap { URLComponents(string: $0) }
     static var isAvailable: Bool { url != nil && pg != nil }
 
     /// The helper `swift test` builds next to the test bundle.
     static var helperPath: String {
         for bundle in Bundle.allBundles where bundle.bundlePath.hasSuffix(".xctest") {
-            let path = URL(filePath: bundle.bundlePath).deletingLastPathComponent().appending(path: "tabula-ssh-helper").path
+            let path = URL(filePath: bundle.bundlePath).deletingLastPathComponent().appending(path: "moonrow-ssh-helper").path
             if FileManager.default.isExecutableFile(atPath: path) { return path }
         }
         let root = URL(filePath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        return root.appending(path: ".build/debug/tabula-ssh-helper").path
+        return root.appending(path: ".build/debug/moonrow-ssh-helper").path
     }
 
     /// A copy of a test key with the permissions ssh insists on.
@@ -198,7 +198,7 @@ enum SSHTestServer {
 
     static func postgres(through tunnel: SSHTunnel, tls: TLSMode = .disable) -> PostgresConfiguration {
         PostgresConfiguration(
-            endpoint: tunnel.endpoint(host: "tabula-test-pg", port: 5432), user: pg!.user!, password: pg!.password,
+            endpoint: tunnel.endpoint(host: "moonrow-test-pg", port: 5432), user: pg!.user!, password: pg!.password,
             database: String(pg!.path.dropFirst()), tls: TLSSettings(mode: tls), connectTimeout: 5)
     }
 
@@ -225,7 +225,7 @@ enum SSHTestServer {
         try ps.run()
         let text = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
         ps.waitUntilExit()
-        return text.split(separator: "\n").filter { $0.contains("ssh") && $0.contains("/tmp/tabula-ssh.") }.count
+        return text.split(separator: "\n").filter { $0.contains("ssh") && $0.contains("/tmp/moonrow-ssh.") }.count
     }
 }
 
@@ -385,8 +385,8 @@ struct SSHTunnelServerTests {
             SSHTestServer.configuration(directory: directory, password: SSHTestServer.url!.password),
             responder: PromptLog.trustingHostKeys().responder)
         let db = try await MySQLConnection.connect(MySQLConfiguration(
-            endpoint: tunnel.endpoint(host: "tabula-test-mysql", port: 3306), user: mysql.user!,
-            password: mysql.password!, database: "tabula", tls: TLSSettings(mode: .require), connectTimeout: 5))
+            endpoint: tunnel.endpoint(host: "moonrow-test-mysql", port: 3306), user: mysql.user!,
+            password: mysql.password!, database: "moonrow", tls: TLSSettings(mode: .require), connectTimeout: 5))
         let result = try await db.execute("SELECT @@hostname IS NOT NULL, 6 * 7")
         #expect(result.rows.first?.last == .integer(42))
         await db.close()
@@ -442,7 +442,7 @@ struct SSHTunnelServerTests {
         let before = try SSHTestServer.tunnelProcessCount()
         let pg = SSHTestServer.pg!, ssh = SSHTestServer.url!
         var config = ConnectionConfig(
-            driver: .postgres, host: "tabula-test-pg", port: 5432, user: pg.user!, database: String(pg.path.dropFirst()),
+            driver: .postgres, host: "moonrow-test-pg", port: 5432, user: pg.user!, database: String(pg.path.dropFirst()),
             tlsMode: .disable, overSSH: true, sshHost: ssh.host!, sshPort: ssh.port, sshUser: ssh.user!)
         config.sshPasswordMode = .keychain
         let login = SSHLogin(
@@ -470,13 +470,13 @@ struct SSHTunnelServerTests {
         let locator = ToolLocator()
         var targets: [(ConnectionConfig, String?, ToolLocator.Role)] = []
         if let pg = SSHTestServer.pg {
-            var c = ConnectionConfig(driver: .postgres, host: "tabula-test-pg", port: 5432, user: pg.user!, database: String(pg.path.dropFirst()),
+            var c = ConnectionConfig(driver: .postgres, host: "moonrow-test-pg", port: 5432, user: pg.user!, database: String(pg.path.dropFirst()),
                                      tlsMode: .require, overSSH: true, sshHost: ssh.host!, sshPort: ssh.port, sshUser: ssh.user!)
             c.sshPasswordMode = .keychain
             targets.append((c, pg.password, .backupPostgres))
         }
         if let my = SSHTestServer.mysql {
-            var c = ConnectionConfig(driver: .mysql, host: "tabula-test-mysql", port: 3306, user: my.user!, database: String(my.path.dropFirst()),
+            var c = ConnectionConfig(driver: .mysql, host: "moonrow-test-mysql", port: 3306, user: my.user!, database: String(my.path.dropFirst()),
                                      overSSH: true, sshHost: ssh.host!, sshPort: ssh.port, sshUser: ssh.user!)
             c.sshPasswordMode = .keychain
             targets.append((c, my.password, .backupMySQL))
@@ -493,7 +493,7 @@ struct SSHTunnelServerTests {
             let head = try FileHandle(forReadingFrom: file).read(upToCount: 64) ?? Data()
             if role == .backupPostgres {
                 #expect(head.starts(with: Data("PGDMP".utf8)))
-                #expect(lines.all.first?.contains("--host=tabula-test-pg") == true)
+                #expect(lines.all.first?.contains("--host=moonrow-test-pg") == true)
             } else {
                 #expect(String(decoding: head, as: UTF8.self).contains("dump"))
                 #expect(lines.all.first?.contains("--host=127.0.0.1") == true)

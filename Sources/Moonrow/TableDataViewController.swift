@@ -11,7 +11,7 @@ import DBKit
 /// (⌘S) or discards (⇧⌘⌫) them, together with everything else staged.
 @MainActor
 final class TableDataViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate,
-    NSTextFieldDelegate, NSMenuItemValidation, NSMenuDelegate, TabulaActions
+    NSTextFieldDelegate, NSMenuItemValidation, NSMenuDelegate, MoonrowActions
 {
     let table: TableRef
     let kind: ObjectKind
@@ -883,9 +883,9 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
         menu.addItem(withTitle: "Paste into Selected Cells", action: #selector(pasteIntoSelectedCells(_:)), keyEquivalent: "").target = self
         menu.addItem(.separator())
         // Sent up the responder chain to the workspace.
-        menu.addItem(withTitle: "Export…", action: #selector(TabulaActions.exportData(_:)), keyEquivalent: "")
+        menu.addItem(withTitle: "Export…", action: #selector(MoonrowActions.exportData(_:)), keyEquivalent: "")
         menu.addItem(withTitle: "Export Current Page…", action: #selector(exportCurrentPage(_:)), keyEquivalent: "").target = self
-        menu.addItem(withTitle: "Import CSV…", action: #selector(TabulaActions.importCSV(_:)), keyEquivalent: "")
+        menu.addItem(withTitle: "Import CSV…", action: #selector(MoonrowActions.importCSV(_:)), keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: "Columns…", action: #selector(showColumns(_:)), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Reload", action: #selector(reloadCurrentTab(_:)), keyEquivalent: "").target = self

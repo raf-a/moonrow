@@ -1,21 +1,44 @@
 #!/bin/sh
-# Builds Tabula.app into build/. Usage: scripts/build-app.sh [debug|release]
+# Builds Moonrow.app into build/. Usage: scripts/build-app.sh [debug|release]
 # Run outside Claude Code's sandbox (SwiftPM needs it).
 set -eu
 config="${1:-release}"
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 
-swift build -c "$config" --product Tabula
-swift build -c "$config" --product tabula-ssh-helper
+swift build -c "$config" --product Moonrow
+swift build -c "$config" --product moonrow-ssh-helper
 bindir="$(swift build -c "$config" --show-bin-path)"
 
-app="build/Tabula.app"
+app="build/Moonrow.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-cp "$bindir/Tabula" "$app/Contents/MacOS/Tabula"
+cp "$bindir/Moonrow" "$app/Contents/MacOS/Moonrow"
 # Runs ssh for the tunnels and answers its prompts; the app looks for it next to its executable.
-cp "$bindir/tabula-ssh-helper" "$app/Contents/MacOS/tabula-ssh-helper"
+cp "$bindir/moonrow-ssh-helper" "$app/Contents/MacOS/moonrow-ssh-helper"
+iconutil -c icns -o "$app/Contents/Resources/AppIcon.icns" Assets/AppIcon.iconset
+# Liquid Glass icon (macOS 26+): compile Assets/AppIcon.icon (Icon Composer) into Assets.car.
+# Needs Xcode 26+'s actool. macOS 14-15 keep using AppIcon.icns (actool may regenerate it from
+# AppIcon.icon). Without actool, or if it fails, the app ships the .icns only, as before.
+icon_name_key=""
+if [ -d Assets/AppIcon.icon ] && xcrun --find actool >/dev/null 2>&1; then
+  partial="build/AppIcon-partial.plist"
+  if xcrun actool Assets/AppIcon.icon \
+       --compile "$app/Contents/Resources" \
+       --app-icon AppIcon --include-all-app-icons \
+       --platform macosx --target-device mac \
+       --minimum-deployment-target 14.0 \
+       --output-partial-info-plist "$partial" \
+       --errors --warnings --output-format human-readable-text \
+     && [ -f "$app/Contents/Resources/Assets.car" ]; then
+    icon_name_key="<key>CFBundleIconName</key><string>AppIcon</string>"
+  else
+    echo "warning: actool could not compile Assets/AppIcon.icon; shipping AppIcon.icns only" >&2
+  fi
+  rm -f "$partial"
+else
+  echo "warning: no Xcode 26+ actool; shipping AppIcon.icns only (no Liquid Glass icon)" >&2
+fi
 version="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
 
 cat > "$app/Contents/Info.plist" <<PLIST
@@ -23,10 +46,12 @@ cat > "$app/Contents/Info.plist" <<PLIST
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleExecutable</key><string>Tabula</string>
-  <key>CFBundleIdentifier</key><string>dev.tabula.Tabula</string>
-  <key>CFBundleName</key><string>Tabula</string>
-  <key>CFBundleDisplayName</key><string>Tabula</string>
+  <key>CFBundleExecutable</key><string>Moonrow</string>
+  <key>CFBundleIdentifier</key><string>app.moonrow.Moonrow</string>
+  <key>CFBundleName</key><string>Moonrow</string>
+  <key>CFBundleDisplayName</key><string>Moonrow</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
+  $icon_name_key
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>0.1 ($version)</string>
   <key>CFBundleVersion</key><string>1</string>

@@ -16,7 +16,7 @@ private let logColumns = [
 
 /// A SQLite file with `people` (2 rows), `logs` (2 rows) and `scratch`.
 private func makeDatabase() async throws -> any DatabaseConnection {
-    let url = FileManager.default.temporaryDirectory.appending(path: "tabula-\(UUID().uuidString).db")
+    let url = FileManager.default.temporaryDirectory.appending(path: "moonrow-\(UUID().uuidString).db")
     FileManager.default.createFile(atPath: url.path, contents: nil)
     let db = try await ConnectionFactory.open(ConnectionConfig(filePath: url.path))
     _ = try await db.transaction([

@@ -36,7 +36,7 @@ final class ConnectionList: NSObject, NSOutlineViewDataSource, NSOutlineViewDele
     private(set) var nodes: [Node] = []
     /// Set while the outline is rebuilt, so expanding doesn't save collapse state.
     private var isReloading = false
-    private static let dragType = NSPasteboard.PasteboardType("app.tabula.connection-id")
+    private static let dragType = NSPasteboard.PasteboardType("app.moonrow.connection-id")
 
     /// What's typed in the search field.
     var query = "" {

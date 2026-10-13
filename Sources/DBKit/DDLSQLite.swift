@@ -190,7 +190,7 @@ extension SQLiteDialect {
         parts += c.addedForeignKeys.map { foreignKeyClause($0, from: table) }
 
         let finalName = c.design.name
-        let temporary = TableRef(schema: table.schema, "tabula_new_" + finalName)
+        let temporary = TableRef(schema: table.schema, "moonrow_new_" + finalName)
         var create = "CREATE TABLE \(qualified(temporary)) (\n  " + parts.joined(separator: ",\n  ") + "\n)"
         if !parsed.options.isEmpty { create += " " + parsed.options }
 

@@ -287,7 +287,7 @@ private func column(_ d: inout TableDesign, _ name: String, _ edit: (inout Colum
         #expect(plan.teardown == ["PRAGMA legacy_alter_table = OFF"])
         #expect(plan.statements == [
             """
-            CREATE TABLE "tabula_new_users" (
+            CREATE TABLE "moonrow_new_users" (
               "id" INTEGER PRIMARY KEY AUTOINCREMENT,
               "email" VARCHAR(200) NOT NULL COLLATE NOCASE UNIQUE,
               "nm" TEXT CHECK (length("nm") < 50) NOT NULL,
@@ -297,9 +297,9 @@ private func column(_ d: inout TableDesign, _ name: String, _ edit: (inout Colum
               CHECK (email <> "nm")
             ) STRICT
             """,
-            #"INSERT INTO "tabula_new_users" ("id", "email", "nm", "age", "team_id") SELECT "id", "email", "name", "age", "team_id" FROM "users""#,
+            #"INSERT INTO "moonrow_new_users" ("id", "email", "nm", "age", "team_id") SELECT "id", "email", "name", "age", "team_id" FROM "users""#,
             #"DROP TABLE "users""#,
-            #"ALTER TABLE "tabula_new_users" RENAME TO "users""#,
+            #"ALTER TABLE "moonrow_new_users" RENAME TO "users""#,
             #"CREATE INDEX "users_email_idx" ON "users" ("email", "nm")"#,
             #"CREATE TRIGGER t AFTER UPDATE OF email ON users BEGIN SELECT 1; END"#,
         ])
@@ -316,7 +316,7 @@ private func column(_ d: inout TableDesign, _ name: String, _ edit: (inout Colum
         #expect(plan.setup == ["PRAGMA foreign_keys = OFF", "PRAGMA legacy_alter_table = ON"])
         #expect(plan.teardown == ["PRAGMA legacy_alter_table = OFF", "PRAGMA foreign_keys = ON"])
         #expect(plan.statements[0] == """
-            CREATE TABLE "tabula_new_users" (
+            CREATE TABLE "moonrow_new_users" (
               "id" INTEGER,
               "email" TEXT NOT NULL,
               "name" TEXT,

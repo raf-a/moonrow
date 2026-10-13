@@ -5,7 +5,7 @@ import DBKit
 /// One window per open connection: sidebar (items, saved queries, history) on the left, panes
 /// of tabs (tables and query editors) on the right.
 @MainActor
-final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate, TabulaActions {
+final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate, MoonrowActions {
     let config: ConnectionConfig
     /// The database password the workspace logged in with (Backup and Restore reuse it).
     let loginPassword: String?
@@ -96,7 +96,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         // Workspaces can be merged into one window's tabs (Window ▸ Merge All Windows); the
         // system's tab overview is View ▸ Show All Tabs.
         window.tabbingMode = .automatic
-        window.tabbingIdentifier = "TabulaWorkspace"
+        window.tabbingIdentifier = "MoonrowWorkspace"
         super.init(window: window)
         self.inspectorItem = inspectorItem
         inspectorItem.isCollapsed = !UserDefaults.standard.bool(forKey: Self.inspectorVisibleKey)

@@ -3,7 +3,7 @@ import AppKit
 
 /// Actions sent through the responder chain (nil target). Implemented by whichever window
 /// controller or the app delegate handles them.
-@MainActor @objc protocol TabulaActions {
+@MainActor @objc protocol MoonrowActions {
     @objc optional func newConnection(_ sender: Any?)
     @objc optional func showPreferences(_ sender: Any?)
     @objc optional func showConnections(_ sender: Any?)
@@ -117,7 +117,7 @@ enum MainMenu {
         main.addSubmenu("") { m in
             m.add("About \(appName)", #selector(NSApplication.orderFrontStandardAboutPanel(_:)))
             m.addItem(.separator())
-            m.add("Settings…", #selector(TabulaActions.showPreferences(_:)), ",")
+            m.add("Settings…", #selector(MoonrowActions.showPreferences(_:)), ",")
             m.addItem(.separator())
             let services = m.add("Services", nil)
             services.submenu = NSMenu()
@@ -131,64 +131,64 @@ enum MainMenu {
         }
 
         main.addSubmenu("File") { m in
-            m.add("New Connection…", #selector(TabulaActions.newConnection(_:)), "n")
-            m.add("New Window", #selector(TabulaActions.newWindow(_:)), "n", [.command, .option])
-            m.add("New Query Tab", #selector(TabulaActions.newQueryTab(_:)), "t")
-            m.add("New Table…", #selector(TabulaActions.newTable(_:)))
+            m.add("New Connection…", #selector(MoonrowActions.newConnection(_:)), "n")
+            m.add("New Window", #selector(MoonrowActions.newWindow(_:)), "n", [.command, .option])
+            m.add("New Query Tab", #selector(MoonrowActions.newQueryTab(_:)), "t")
+            m.add("New Table…", #selector(MoonrowActions.newTable(_:)))
             // ⌘O opens SQL files into query tabs; databases open through connections.
             m.add("Open…", #selector(NSDocumentController.openDocument(_:)), "o")
             m.addItem(.separator())
-            m.add("Close Tab", #selector(TabulaActions.closeTab(_:)), "w")
+            m.add("Close Tab", #selector(MoonrowActions.closeTab(_:)), "w")
             m.add("Close Window", #selector(NSWindow.performClose(_:)), "w", [.command, .shift])
             m.addItem(.separator())
-            m.add("Add to Queries…", #selector(TabulaActions.addToQueries(_:)))
-            m.add("Save SQL As…", #selector(TabulaActions.saveSQLAs(_:)), "s", [.command, .shift])
+            m.add("Add to Queries…", #selector(MoonrowActions.addToQueries(_:)))
+            m.add("Save SQL As…", #selector(MoonrowActions.saveSQLAs(_:)), "s", [.command, .shift])
             m.addItem(.separator())
-            m.add("Export…", #selector(TabulaActions.exportData(_:)), "e")
-            m.add("Export Tables…", #selector(TabulaActions.exportTables(_:)))
+            m.add("Export…", #selector(MoonrowActions.exportData(_:)), "e")
+            m.add("Export Tables…", #selector(MoonrowActions.exportTables(_:)))
             let importItem = m.add("Import", nil)
             importItem.submenu = NSMenu(title: "Import")
-            importItem.submenu!.add("From CSV…", #selector(TabulaActions.importCSV(_:)))
-            importItem.submenu!.add("From JSON…", #selector(TabulaActions.importJSON(_:)))
-            importItem.submenu!.add("From SQL File…", #selector(TabulaActions.importSQLFile(_:)))
+            importItem.submenu!.add("From CSV…", #selector(MoonrowActions.importCSV(_:)))
+            importItem.submenu!.add("From JSON…", #selector(MoonrowActions.importJSON(_:)))
+            importItem.submenu!.add("From SQL File…", #selector(MoonrowActions.importSQLFile(_:)))
             m.addItem(.separator())
-            m.add("Backup…", #selector(TabulaActions.backupDatabases(_:)))
-            m.add("Restore…", #selector(TabulaActions.restoreDatabase(_:)))
+            m.add("Backup…", #selector(MoonrowActions.backupDatabases(_:)))
+            m.add("Restore…", #selector(MoonrowActions.restoreDatabase(_:)))
         }
 
         main.addSubmenu("Edit") { m in
             m.add("Undo", Selector(("undo:")), "z")
             m.add("Redo", Selector(("redo:")), "z", [.command, .shift])
             m.addItem(.separator())
-            m.add("Commit Changes", #selector(TabulaActions.commitChanges(_:)), "s")
-            m.add("Discard Changes", #selector(TabulaActions.discardChanges(_:)), "\u{8}", [.command, .shift])
-            m.add("Preview Changes", #selector(TabulaActions.previewChanges(_:)), "p", [.command, .shift])
+            m.add("Commit Changes", #selector(MoonrowActions.commitChanges(_:)), "s")
+            m.add("Discard Changes", #selector(MoonrowActions.discardChanges(_:)), "\u{8}", [.command, .shift])
+            m.add("Preview Changes", #selector(MoonrowActions.previewChanges(_:)), "p", [.command, .shift])
             m.addItem(.separator())
             // ⌘I: Beautify SQL in a query tab, which answers it (AppKit gives a shortcut to one
             // item only).
-            m.add("Add Row", #selector(TabulaActions.addRow(_:)), "i")
-            m.add("Duplicate Rows", #selector(TabulaActions.duplicateRows(_:)), "d")
+            m.add("Add Row", #selector(MoonrowActions.addRow(_:)), "i")
+            m.add("Duplicate Rows", #selector(MoonrowActions.duplicateRows(_:)), "d")
             // Titled by whoever has the focus: Delete Rows, Delete Columns, Delete Table, …
-            m.add("Delete", #selector(TabulaActions.deleteRows(_:)), "\u{8}")
-            m.add("Truncate Table…", #selector(TabulaActions.truncateTable(_:)), "\u{8}", .option)
+            m.add("Delete", #selector(MoonrowActions.deleteRows(_:)), "\u{8}")
+            m.add("Truncate Table…", #selector(MoonrowActions.truncateTable(_:)), "\u{8}", .option)
             let setValue = m.add("Set Value", nil)
             setValue.submenu = NSMenu(title: "Set Value")
-            setValue.submenu!.add("NULL", #selector(TabulaActions.setNull(_:)))
-            setValue.submenu!.add("Empty String", #selector(TabulaActions.setEmpty(_:)))
-            setValue.submenu!.add("DEFAULT", #selector(TabulaActions.setDefault(_:)))
+            setValue.submenu!.add("NULL", #selector(MoonrowActions.setNull(_:)))
+            setValue.submenu!.add("Empty String", #selector(MoonrowActions.setEmpty(_:)))
+            setValue.submenu!.add("DEFAULT", #selector(MoonrowActions.setDefault(_:)))
             setValue.submenu!.addItem(.separator())
-            setValue.submenu!.add("From File…", #selector(TabulaActions.setValueFromFile(_:)))
+            setValue.submenu!.add("From File…", #selector(MoonrowActions.setValueFromFile(_:)))
             m.addItem(.separator())
             m.add("Cut", #selector(NSText.cut(_:)), "x")
             m.add("Copy", #selector(NSText.copy(_:)), "c")
-            m.add("Copy Selected Cells", #selector(TabulaActions.copySelectedCells(_:)), "c", [.command, .shift])
+            m.add("Copy Selected Cells", #selector(MoonrowActions.copySelectedCells(_:)), "c", [.command, .shift])
             m.add("Paste", #selector(NSText.paste(_:)), "v")
-            m.add("Paste into Selected Cells", #selector(TabulaActions.pasteIntoSelectedCells(_:)), "v", [.command, .shift])
+            m.add("Paste into Selected Cells", #selector(MoonrowActions.pasteIntoSelectedCells(_:)), "v", [.command, .shift])
             m.add("Select All", #selector(NSText.selectAll(_:)), "a")
             m.addItem(.separator())
-            m.add("Toggle Comment", #selector(TabulaActions.toggleLineComment(_:)), "/")
-            m.add("Toggle Block Comment", #selector(TabulaActions.toggleBlockComment(_:)), "/", [.command, .option])
-            m.add("Compact SQL", #selector(TabulaActions.compactSQL(_:)), "i", [.command, .shift])
+            m.add("Toggle Comment", #selector(MoonrowActions.toggleLineComment(_:)), "/")
+            m.add("Toggle Block Comment", #selector(MoonrowActions.toggleBlockComment(_:)), "/", [.command, .option])
+            m.add("Compact SQL", #selector(MoonrowActions.compactSQL(_:)), "i", [.command, .shift])
             let find = m.add("Find", nil)
             find.submenu = NSMenu(title: "Find")
             for (title, action, key, mods) in [
@@ -203,16 +203,16 @@ enum MainMenu {
                 find.submenu!.add(title, #selector(NSTextView.performFindPanelAction(_:)), key, mods).tag = action.rawValue
             }
             m.addItem(.separator())
-            m.add("Show Filters", #selector(TabulaActions.toggleFilters(_:)), "f")
-            m.add("Filter Items", #selector(TabulaActions.focusItemFilter(_:)), "f", [.command, .shift])
+            m.add("Show Filters", #selector(MoonrowActions.toggleFilters(_:)), "f")
+            m.add("Filter Items", #selector(MoonrowActions.focusItemFilter(_:)), "f", [.command, .shift])
         }
 
         main.addSubmenu("View") { m in
             let sidebars = m.add("Sidebars", nil)
             sidebars.submenu = NSMenu(title: "Sidebars")
             sidebars.submenu!.add("Left Sidebar", #selector(NSSplitViewController.toggleSidebar(_:)), "0")
-            sidebars.submenu!.add("Right Sidebar", #selector(TabulaActions.toggleRightSidebar(_:)), " ", [])
-            sidebars.submenu!.add("Query Log", #selector(TabulaActions.toggleQueryLog(_:)), "c", [.command, .control])
+            sidebars.submenu!.add("Right Sidebar", #selector(MoonrowActions.toggleRightSidebar(_:)), " ", [])
+            sidebars.submenu!.add("Query Log", #selector(MoonrowActions.toggleQueryLog(_:)), "c", [.command, .control])
             m.addItem(.separator())
             // Workspace windows can share one window's tabs (Window ▸ Merge All Windows).
             m.add("Show Tab Bar", #selector(NSWindow.toggleTabBar(_:)))
@@ -223,51 +223,51 @@ enum MainMenu {
         }
 
         main.addSubmenu("Connection") { m in
-            m.add("Reload", #selector(TabulaActions.reloadWorkspace(_:)), "r")
-            m.add("Reload Table", #selector(TabulaActions.reloadCurrentTab(_:)), "r", [.command, .option])
+            m.add("Reload", #selector(MoonrowActions.reloadWorkspace(_:)), "r")
+            m.add("Reload Table", #selector(MoonrowActions.reloadCurrentTab(_:)), "r", [.command, .option])
             m.addItem(.separator())
             // ⌘↩: in a grid, the cell editor, which answers it under its own title.
-            m.add("Run Current Statement", #selector(TabulaActions.runCurrentQuery(_:)), "\r")
-            m.add("Run All Statements", #selector(TabulaActions.runAllQueries(_:)), "\r", [.command, .shift])
-            m.add("Stop Query", #selector(TabulaActions.cancelQuery(_:)), ".")
-            m.add("Running Queries…", #selector(TabulaActions.showRunningQueries(_:)))
+            m.add("Run Current Statement", #selector(MoonrowActions.runCurrentQuery(_:)), "\r")
+            m.add("Run All Statements", #selector(MoonrowActions.runAllQueries(_:)), "\r", [.command, .shift])
+            m.add("Stop Query", #selector(MoonrowActions.cancelQuery(_:)), ".")
+            m.add("Running Queries…", #selector(MoonrowActions.showRunningQueries(_:)))
             m.addItem(.separator())
-            m.add("Search in Database…", #selector(TabulaActions.searchInDatabase(_:)))
-            m.add("Show Diagram", #selector(TabulaActions.showDiagram(_:)))
+            m.add("Search in Database…", #selector(MoonrowActions.searchInDatabase(_:)))
+            m.add("Show Diagram", #selector(MoonrowActions.showDiagram(_:)))
             m.addItem(.separator())
-            m.add("Open Connection…", #selector(TabulaActions.showConnections(_:)), "k", [.command, .shift])
+            m.add("Open Connection…", #selector(MoonrowActions.showConnections(_:)), "k", [.command, .shift])
         }
 
         main.addSubmenu("Navigate") { m in
-            m.add("Quick Open…", #selector(TabulaActions.quickOpen(_:)), "p")
-            m.add("Open Database…", #selector(TabulaActions.openDatabase(_:)), "k")
-            m.add("Back", #selector(TabulaActions.goBack(_:)), "\u{F702}", [.command, .control])
-            m.add("Forward", #selector(TabulaActions.goForward(_:)), "\u{F703}", [.command, .control])
+            m.add("Quick Open…", #selector(MoonrowActions.quickOpen(_:)), "p")
+            m.add("Open Database…", #selector(MoonrowActions.openDatabase(_:)), "k")
+            m.add("Back", #selector(MoonrowActions.goBack(_:)), "\u{F702}", [.command, .control])
+            m.add("Forward", #selector(MoonrowActions.goForward(_:)), "\u{F703}", [.command, .control])
             m.addItem(.separator())
-            m.add("Show Table Data", #selector(TabulaActions.showTableData(_:)), "[", [.command, .control])
-            m.add("Show Table Structure", #selector(TabulaActions.showTableStructure(_:)), "]", [.command, .control])
-            m.add("Show Definition", #selector(TabulaActions.showTableDefinition(_:)))
+            m.add("Show Table Data", #selector(MoonrowActions.showTableData(_:)), "[", [.command, .control])
+            m.add("Show Table Structure", #selector(MoonrowActions.showTableStructure(_:)), "]", [.command, .control])
+            m.add("Show Definition", #selector(MoonrowActions.showTableDefinition(_:)))
             m.addItem(.separator())
-            m.add("Previous Page", #selector(TabulaActions.previousPage(_:)), "\u{F702}")
-            m.add("Next Page", #selector(TabulaActions.nextPage(_:)), "\u{F703}")
+            m.add("Previous Page", #selector(MoonrowActions.previousPage(_:)), "\u{F702}")
+            m.add("Next Page", #selector(MoonrowActions.nextPage(_:)), "\u{F703}")
             m.addItem(.separator())
-            m.add("Select Next Tab", #selector(TabulaActions.selectNextTab(_:)), "]")
-            m.add("Select Previous Tab", #selector(TabulaActions.selectPreviousTab(_:)), "[")
+            m.add("Select Next Tab", #selector(MoonrowActions.selectNextTab(_:)), "]")
+            m.add("Select Previous Tab", #selector(MoonrowActions.selectPreviousTab(_:)), "[")
             let tabs = m.add("Select Tab", nil)
             tabs.submenu = NSMenu(title: "Select Tab")
             for i in 1...9 {
-                tabs.submenu!.add(i == 9 ? "Last Tab" : "Tab \(i)", #selector(TabulaActions.selectTabByNumber(_:)), String(i)).tag = i
+                tabs.submenu!.add(i == 9 ? "Last Tab" : "Tab \(i)", #selector(MoonrowActions.selectTabByNumber(_:)), String(i)).tag = i
             }
             m.addItem(.separator())
-            m.add("Split Pane Right", #selector(TabulaActions.splitPaneRight(_:)), "d", [.command, .shift])
-            m.add("Select Next Pane", #selector(TabulaActions.selectNextPane(_:)), "]", [.command, .option])
-            m.add("Select Previous Pane", #selector(TabulaActions.selectPreviousPane(_:)), "[", [.command, .option])
+            m.add("Split Pane Right", #selector(MoonrowActions.splitPaneRight(_:)), "d", [.command, .shift])
+            m.add("Select Next Pane", #selector(MoonrowActions.selectNextPane(_:)), "]", [.command, .option])
+            m.add("Select Previous Pane", #selector(MoonrowActions.selectPreviousPane(_:)), "[", [.command, .option])
             m.addItem(.separator())
-            m.add("Select Next Workspace", #selector(TabulaActions.selectNextWorkspace(_:)), "]", [.command, .shift])
-            m.add("Select Previous Workspace", #selector(TabulaActions.selectPreviousWorkspace(_:)), "[", [.command, .shift])
+            m.add("Select Next Workspace", #selector(MoonrowActions.selectNextWorkspace(_:)), "]", [.command, .shift])
+            m.add("Select Previous Workspace", #selector(MoonrowActions.selectPreviousWorkspace(_:)), "[", [.command, .shift])
             m.addItem(.separator())
-            m.add("Saved Queries", #selector(TabulaActions.showSavedQueries(_:)))
-            m.add("Query History", #selector(TabulaActions.showQueryHistory(_:)), "y", [.command, .shift])
+            m.add("Saved Queries", #selector(MoonrowActions.showSavedQueries(_:)))
+            m.add("Query History", #selector(MoonrowActions.showQueryHistory(_:)), "y", [.command, .shift])
         }
 
         let window = main.addSubmenu("Window") { m in

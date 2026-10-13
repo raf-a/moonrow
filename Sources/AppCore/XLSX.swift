@@ -249,13 +249,13 @@ public struct XLSXWorkbook {
         + "</Relationships>"
 
     private static let app = header
-        + #"<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><Application>Tabula</Application></Properties>"#
+        + #"<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><Application>Moonrow</Application></Properties>"#
 
     private var core: String {
         let stamp = date.ISO8601Format()
         return Self.header
             + #"<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">"#
-            + "<dc:creator>Tabula</dc:creator>"
+            + "<dc:creator>Moonrow</dc:creator>"
             + "<dcterms:created xsi:type=\"dcterms:W3CDTF\">\(stamp)</dcterms:created>"
             + "<dcterms:modified xsi:type=\"dcterms:W3CDTF\">\(stamp)</dcterms:modified>"
             + "</cp:coreProperties>"

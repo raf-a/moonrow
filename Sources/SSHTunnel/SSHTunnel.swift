@@ -30,7 +30,7 @@ public struct SSHTunnelConfiguration: Sendable, Hashable {
     /// False keeps ssh away from the agent (tests).
     public var useAgent: Bool
     public var sshPath: String
-    /// The SSH_ASKPASS helper (`tabula-ssh-helper`).
+    /// The SSH_ASKPASS helper (`moonrow-ssh-helper`).
     public var helperPath: String
     public var connectTimeout: Int
     /// Seconds between keepalive probes; the tunnel drops after 3 unanswered ones.
@@ -99,7 +99,7 @@ public struct SSHTunnelConfiguration: Sendable, Hashable {
     static func streamArguments(controlPath: String, host: String, port: Int) -> [String] {
         let target = host.contains(":") ? "[\(host)]:\(port)" : "\(host):\(port)"
         return ["-F", "none", "-S", controlPath, "-o", "ControlMaster=no", "-o", "BatchMode=yes",
-                "-o", "ProxyCommand=/usr/bin/false", "-W", target, "tabula-tunnel"]
+                "-o", "ProxyCommand=/usr/bin/false", "-W", target, "moonrow-tunnel"]
     }
 
     /// ssh_config quoting for a value that may hold spaces (Application Support).
@@ -146,7 +146,7 @@ public actor SSHTunnel {
         password = configuration.password
         keyPassphrase = configuration.keyPassphrase
         // Short, private and ours: the control socket path must fit in sun_path (104 bytes).
-        var template = Array("/tmp/tabula-ssh.XXXXXX".utf8CString)
+        var template = Array("/tmp/moonrow-ssh.XXXXXX".utf8CString)
         guard let made = mkdtemp(&template) else {
             throw SSHTunnelError("Can't create a folder for the SSH tunnel: \(String(cString: strerror(errno)))")
         }
@@ -160,11 +160,11 @@ public actor SSHTunnel {
         try? FileManager.default.removeItem(atPath: directory)
     }
 
-    /// The default helper: `tabula-ssh-helper` next to the running executable (inside the app
+    /// The default helper: `moonrow-ssh-helper` next to the running executable (inside the app
     /// bundle, or the build folder).
     public static var defaultHelperPath: String {
         let executable = Bundle.main.executableURL ?? URL(filePath: CommandLine.arguments[0])
-        return executable.deletingLastPathComponent().appending(path: "tabula-ssh-helper").path
+        return executable.deletingLastPathComponent().appending(path: "moonrow-ssh-helper").path
     }
 
     /// An endpoint for the drivers: every socket they open to it is a new channel through this
@@ -239,7 +239,7 @@ public actor SSHTunnel {
         return master.isRunning && isSocket(controlPath)
     }
 
-    /// The master's guard process (`tabula-ssh-helper --guard`; ssh is its child) while it runs.
+    /// The master's guard process (`moonrow-ssh-helper --guard`; ssh is its child) while it runs.
     public var masterProcessID: pid_t? { master?.isRunning == true ? master?.pid : nil }
 
     /// Process ids of everything this tunnel started that's still running.
@@ -276,7 +276,7 @@ public actor SSHTunnel {
             }
         }
         guard FileManager.default.isExecutableFile(atPath: configuration.helperPath) else {
-            throw SSHTunnelError("Tabula's SSH helper is missing (\(configuration.helperPath)).")
+            throw SSHTunnelError("Moonrow's SSH helper is missing (\(configuration.helperPath)).")
         }
         var env = baseEnvironment.merging(askpass!.environment) { $1 }
         env["SSH_ASKPASS"] = configuration.helperPath

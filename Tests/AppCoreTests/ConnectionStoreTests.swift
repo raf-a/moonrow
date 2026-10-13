@@ -5,12 +5,29 @@ import WireSupport
 
 private func tempFile() -> URL {
     FileManager.default.temporaryDirectory
-        .appending(path: "tabula-tests-\(UUID().uuidString)", directoryHint: .isDirectory)
+        .appending(path: "moonrow-tests-\(UUID().uuidString)", directoryHint: .isDirectory)
         .appending(path: "connections.json")
 }
 
 @MainActor
 @Suite struct ConnectionStoreTests {
+    @Test func adoptsTheTabulaFolderOnce() throws {
+        let fm = FileManager.default
+        let base = tempFile().deletingLastPathComponent()
+        let legacy = base.appending(path: "Tabula", directoryHint: .isDirectory)
+        try fm.createDirectory(at: legacy, withIntermediateDirectories: true)
+        try Data("{}".utf8).write(to: legacy.appending(path: "connections.json"))
+
+        #expect(ConnectionStore.adoptLegacyDirectory(in: base))
+        #expect(fm.fileExists(atPath: ConnectionStore.defaultFileURL(in: base).path))
+        #expect(!fm.fileExists(atPath: legacy.path))
+
+        // An existing Moonrow folder wins; the old one stays where it is.
+        try fm.createDirectory(at: legacy, withIntermediateDirectories: true)
+        #expect(!ConnectionStore.adoptLegacyDirectory(in: base))
+        #expect(fm.fileExists(atPath: legacy.path))
+    }
+
     @Test func missingFileIsEmpty() throws {
         let store = ConnectionStore(fileURL: tempFile())
         try store.load()

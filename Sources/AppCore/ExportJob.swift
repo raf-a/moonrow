@@ -69,7 +69,7 @@ public struct PendingFile: Sendable {
     public init(_ destination: URL) {
         self.destination = destination
         temporary = destination.deletingLastPathComponent()
-            .appending(path: ".\(destination.lastPathComponent).tabula-\(UUID().uuidString.prefix(8))")
+            .appending(path: ".\(destination.lastPathComponent).moonrow-\(UUID().uuidString.prefix(8))")
     }
 
     public func commit() throws {

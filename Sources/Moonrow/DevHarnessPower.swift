@@ -3,7 +3,7 @@ import AppKit
 import DBKit
 
 extension DevHarness {
-    /// `TABULA_POWER=<table>`: M9's grid and query features through the real controls, with the
+    /// `MOONROW_POWER=<table>`: M9's grid and query features through the real controls, with the
     /// shortcuts sent as key events (so the menu bar's shared-shortcut routing is exercised).
     /// Every edit it stages is discarded; it never commits. Use a table with at least three
     /// rows, an integer `id` key and a text column.
@@ -43,13 +43,13 @@ extension DevHarness {
         try check(grid.selectedColumnSpan == 1...2, "⇧→ stretches the cursor over two columns")
         snap("power-01-cells.png", window)
 
-        try await key(#selector(TabulaActions.copySelectedCells(_:)))
+        try await key(#selector(MoonrowActions.copySelectedCells(_:)))
         let copied = pasteboard().components(separatedBy: "\n")
         try check(copied.count == 2 && copied.allSatisfy { $0.components(separatedBy: "\t").count == 2 }, "⇧⌘C copies 2 × 2 cells: \(copied)")
 
         // Paste into the selected cells: one value fills all four, as one undo step.
         setPasteboard("pasted")
-        try await key(#selector(TabulaActions.pasteIntoSelectedCells(_:)))
+        try await key(#selector(MoonrowActions.pasteIntoSelectedCells(_:)))
         try check(changes.edits(for: data.table)?.updatedRowCount == 2, "⇧⌘V stages two rows")
         try check(changes.undoManager.undoActionName == "Paste", "undo step “Paste”")
         snap("power-02-pasted.png", window)
@@ -131,7 +131,7 @@ extension DevHarness {
         let textColumn = try require(reopened.browser?.columns.firstIndex { $0.typeName.uppercased().contains("TEXT") || $0.typeName.uppercased().contains("CHAR") },
                                      "a text column")
         reopened.grid.focusedColumn = NSUserInterfaceItemIdentifier(String(textColumn))
-        try await key(#selector(TabulaActions.runCurrentQuery(_:)))
+        try await key(#selector(MoonrowActions.runCurrentQuery(_:)))
         let editor = try await waitFor("cell editor") { reopened.shownCellEditor }
         print("cell editor modes: \(editor.modeTitles), text: \(editor.shownText.prefix(40))")
         editor.type(#"{"b": [1, 2], "a": "x"}"#)
@@ -140,7 +140,7 @@ extension DevHarness {
         try check(changes.edits(for: reopened.table)?.updatedRowCount == 1, "Save in the cell editor stages the value")
         try check(changes.undoManager.undoActionName == "Edit Cell", "one undo step")
         // Opened again, the JSON shows laid out.
-        try await key(#selector(TabulaActions.runCurrentQuery(_:)))
+        try await key(#selector(MoonrowActions.runCurrentQuery(_:)))
         let again = try await waitFor("cell editor again") { reopened.shownCellEditor }
         again.select(mode: "JSON")
         try check(again.shownText.contains("\n  \"b\": ["), "JSON mode lays the value out")
@@ -159,31 +159,31 @@ extension DevHarness {
         // MARK: Query editor
         // A query tab must leave the main menu's shortcuts alone (AppKit keeps one item per shortcut).
         let query = workspace.newQuery(text: "select   id ,  count(*) from \(table) where id = :id group by id")
-        for action in [#selector(TabulaActions.addRow(_:)), #selector(TabulaActions.runCurrentQuery(_:)), #selector(TabulaActions.runAllQueries(_:)),
-                       #selector(TabulaActions.deleteRows(_:)), #selector(TabulaActions.truncateTable(_:)), #selector(TabulaActions.saveSQLAs(_:))] {
+        for action in [#selector(MoonrowActions.addRow(_:)), #selector(MoonrowActions.runCurrentQuery(_:)), #selector(MoonrowActions.runAllQueries(_:)),
+                       #selector(MoonrowActions.deleteRows(_:)), #selector(MoonrowActions.truncateTable(_:)), #selector(MoonrowActions.saveSQLAs(_:))] {
             try check(menuItem(NSApp.mainMenu, action: action)?.keyEquivalent.isEmpty == false, "\(action) keeps its shortcut")
         }
         window.makeFirstResponder(query.editor)
         _ = try await waitFor("editor focused") { window.firstResponder === query.editor ? true : nil }
-        try await key(#selector(TabulaActions.addRow(_:)))
+        try await key(#selector(MoonrowActions.addRow(_:)))
         try check(query.editor.string.contains("\nFROM\n") && query.editor.string.hasPrefix("SELECT"), "⌘I beautifies (Add Row's shortcut, answered by the editor)")
-        let addRowItem = try require(menuItem(NSApp.mainMenu, action: #selector(TabulaActions.addRow(_:))), "Add Row item")
+        let addRowItem = try require(menuItem(NSApp.mainMenu, action: #selector(MoonrowActions.addRow(_:))), "Add Row item")
         addRowItem.menu?.update()
         try check(addRowItem.title == "Beautify SQL", "Edit ▸ Add Row reads Beautify SQL in a query tab")
         print(query.editor.string)
-        try await key(#selector(TabulaActions.compactSQL(_:)))
+        try await key(#selector(MoonrowActions.compactSQL(_:)))
         try check(!query.editor.string.contains("\n"), "⇧⌘I compacts")
         query.editor.setSelectedRange(NSRange(location: 0, length: 0))
-        try await key(#selector(TabulaActions.toggleBlockComment(_:)))
+        try await key(#selector(MoonrowActions.toggleBlockComment(_:)))
         try check(query.editor.string.hasPrefix("/* SELECT") && query.editor.string.hasSuffix(" */"), "⌥⌘/ comments the line out")
-        try await key(#selector(TabulaActions.toggleBlockComment(_:)))
+        try await key(#selector(MoonrowActions.toggleBlockComment(_:)))
         try check(query.editor.string.hasPrefix("SELECT"), "and back in")
-        try await key(#selector(TabulaActions.addRow(_:)))
+        try await key(#selector(MoonrowActions.addRow(_:)))
         snap("power-08-beautified.png", window)
 
         // Parameters: :id asks for a value.
         window.makeFirstResponder(query.editor)
-        try await key(#selector(TabulaActions.runCurrentQuery(_:)))
+        try await key(#selector(MoonrowActions.runCurrentQuery(_:)))
         let params = try await waitFor("parameters sheet") { query.parameterSheet }
         params.fill(":id", "1")
         snap("power-09-parameters.png", params.window)
@@ -198,7 +198,7 @@ extension DevHarness {
         query.results.togglePin(nil)
         query.setText("select id from \(table) order by id")
         window.makeFirstResponder(query.editor)
-        try await key(#selector(TabulaActions.runCurrentQuery(_:)))
+        try await key(#selector(MoonrowActions.runCurrentQuery(_:)))
         _ = try await waitFor("second run") { query.results.results.count == 2 && query.results.results.last?.outcome != nil ? true : nil }
         try check(query.results.results.first?.isPinned == true, "the pinned result stays")
         query.results.toggleChart(nil)
@@ -219,18 +219,18 @@ extension DevHarness {
         _ = runCurrentItem.target?.perform(runCurrentItem.action, with: runCurrentItem)
 
         // The query log (⌃⌘C) has every statement, the grid's too.
-        try await key(#selector(TabulaActions.toggleQueryLog(_:)))
+        try await key(#selector(MoonrowActions.toggleQueryLog(_:)))
         try check(workspace.center.isLogVisible, "⌃⌘C shows the query log")
         _ = try await waitFor("logged statements") { workspace.center.log.shownText.contains("order by id") ? true : nil }
         try check(workspace.queryLog.entries.contains { $0.sql.uppercased().hasPrefix("SELECT") && $0.sql.contains("LIMIT") }, "grid paging is logged")
         try await Task.sleep(for: .milliseconds(600))
         print("log frame: \(workspace.center.log.view.frame), center: \(workspace.center.view.frame)")
         snap("power-12-query-log.png", window)
-        try await key(#selector(TabulaActions.toggleQueryLog(_:)))
+        try await key(#selector(MoonrowActions.toggleQueryLog(_:)))
         try check(!workspace.center.isLogVisible, "and hides it")
 
         // Dragging its divider to the bottom closes it, like a sidebar; it reopens at its old height.
-        try await key(#selector(TabulaActions.toggleQueryLog(_:)))
+        try await key(#selector(MoonrowActions.toggleQueryLog(_:)))
         window.layoutIfNeeded()
         let center: WorkspaceCenterController = workspace.center
         let logHeight = center.log.view.frame.height
@@ -250,11 +250,11 @@ extension DevHarness {
         try await Task.sleep(for: .milliseconds(100))
         try check(!center.isLogVisible && !UserDefaults.standard.bool(forKey: WorkspaceCenterController.logVisibleKey),
                   "dragging the divider to the bottom closes the query log")
-        try await key(#selector(TabulaActions.toggleQueryLog(_:)))
+        try await key(#selector(MoonrowActions.toggleQueryLog(_:)))
         window.layoutIfNeeded()
         try check(center.isLogVisible && abs(center.log.view.frame.height - logHeight) < 2,
                   "⌃⌘C reopens it at its height from before the drag (\(center.log.view.frame.height) vs \(logHeight))")
-        try await key(#selector(TabulaActions.toggleQueryLog(_:)))
+        try await key(#selector(MoonrowActions.toggleQueryLog(_:)))
 
         // MARK: Sidebar
         let store = workspace.environment.savedQueries

@@ -5,7 +5,7 @@ import Testing
 @testable import AppCore
 
 private func tempDir() -> URL {
-    FileManager.default.temporaryDirectory.appending(path: "tabula-tests-\(UUID().uuidString)", directoryHint: .isDirectory)
+    FileManager.default.temporaryDirectory.appending(path: "moonrow-tests-\(UUID().uuidString)", directoryHint: .isDirectory)
 }
 
 @MainActor

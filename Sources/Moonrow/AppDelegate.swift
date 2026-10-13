@@ -4,18 +4,18 @@ import DBKit
 import UniformTypeIdentifiers
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, TabulaActions {
-    /// `TABULA_STORE` points at another connections file, for development.
-    let store = ConnectionStore(fileURL: ProcessInfo.processInfo.environment["TABULA_STORE"]
+final class AppDelegate: NSObject, NSApplicationDelegate, MoonrowActions {
+    /// `MOONROW_STORE` points at another connections file, for development.
+    let store = ConnectionStore(fileURL: ProcessInfo.processInfo.environment["MOONROW_STORE"]
         .map { URL(filePath: ($0 as NSString).expandingTildeInPath) } ?? ConnectionStore.defaultFileURL())
 
-    /// History and saved queries live next to the connections file, so `TABULA_STORE` moves them too.
+    /// History and saved queries live next to the connections file, so `MOONROW_STORE` moves them too.
     var dataRoot: URL { store.fileURL.deletingLastPathComponent() }
     lazy var settings = SettingsStore(fileURL: SettingsStore.fileURL(root: dataRoot))
     private var preferences: PreferencesWindowController?
-    /// Passwords: the login Keychain, or with `TABULA_STORE` a plain file next to it, so
+    /// Passwords: the login Keychain, or with `MOONROW_STORE` a plain file next to it, so
     /// development runs never touch real credentials.
-    lazy var secrets: any SecretStore = ProcessInfo.processInfo.environment["TABULA_STORE"] == nil
+    lazy var secrets: any SecretStore = ProcessInfo.processInfo.environment["MOONROW_STORE"] == nil
         ? KeychainSecretStore() : FileSecretStore(url: dataRoot.appending(path: "secrets.json"))
     /// Shared by every workspace open on the same connection.
     private var histories: [UUID: QueryHistory] = [:]
@@ -37,6 +37,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TabulaActions {
     private(set) var workspaces: [WorkspaceWindowController] = []
 
     func applicationWillFinishLaunching(_ notification: Notification) {
+        if ProcessInfo.processInfo.environment["MOONROW_STORE"] == nil { adoptTabulaData() }
         let settingsError = settings.load()
         AppStyle.settings = settings.settings
         AppStyle.apply()
@@ -45,6 +46,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TabulaActions {
         if let settingsError {
             present(settingsError, title: "Your preferences couldn't be read, so the defaults are used. The old file was kept as settings.json.bak.", in: nil)
         }
+    }
+
+    /// Moves what the app kept under its working name, Tabula: the data folder and the
+    /// defaults. Keychain items move one by one as they're read.
+    private func adoptTabulaData() {
+        ConnectionStore.adoptLegacyDirectory()
+        let legacy = "dev.tabula.Tabula"
+        let defaults = UserDefaults.standard
+        guard let id = Bundle.main.bundleIdentifier, id != legacy,
+              let old = defaults.persistentDomain(forName: legacy) else { return }
+        defaults.setPersistentDomain((defaults.persistentDomain(forName: id) ?? [:]).merging(old) { current, _ in current },
+                                     forName: id)
+        defaults.removePersistentDomain(forName: legacy)
     }
 
     @objc private func settingsChanged() {

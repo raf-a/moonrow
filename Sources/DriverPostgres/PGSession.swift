@@ -22,7 +22,7 @@ public struct PostgresConfiguration: Sendable, Hashable {
     public init(
         endpoint: Endpoint, user: String, password: String? = nil, database: String? = nil,
         tls: TLSSettings = TLSSettings(), directTLS: Bool = false, readOnly: Bool = false,
-        applicationName: String = "Tabula", connectTimeout: Int64 = 15
+        applicationName: String = "Moonrow", connectTimeout: Int64 = 15
     ) {
         self.endpoint = endpoint
         self.user = user

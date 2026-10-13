@@ -313,7 +313,7 @@ extension Dialect {
             }
             return DDLPlan(statements: [drop] + statements, isAtomic: transactionalDDL, notes: notes)
         case .checkThenDrop:
-            let scratch = String(("tabula_check_" + head.name.name).prefix(64))
+            let scratch = String(("moonrow_check_" + head.name.name).prefix(64))
             let check = DefinitionText.renaming(statements[main], head, to: scratch, quote: quoteIdentifier)
             let dropCheck = try dropStatement(DefinedObject(kind: object.kind, ref: TableRef(schema: head.name.schema, scratch)))
             return DDLPlan(

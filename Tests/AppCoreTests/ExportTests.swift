@@ -122,7 +122,7 @@ struct CopyFormatTests {
 
 struct ExportJobTests {
     private func sampleDB() async throws -> (SQLiteConnection, URL) {
-        let url = FileManager.default.temporaryDirectory.appending(path: "tabula-export-\(UUID().uuidString).db")
+        let url = FileManager.default.temporaryDirectory.appending(path: "moonrow-export-\(UUID().uuidString).db")
         let db = try SQLiteConnection(path: url.path)
         _ = try await db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT NOT NULL, score REAL, data BLOB, note TEXT)")
         _ = try await db.execute("INSERT INTO t VALUES (1, 'it''s', 1.25, X'00FF10', NULL), (2, 'two\nlines', NULL, NULL, ''), (3, 'c', -3.5e10, X'', 'x')")
@@ -137,7 +137,7 @@ struct ExportJobTests {
         let sink = StringSink()
         let n = try await job.write(to: sink)
         #expect(n == 3)
-        #expect(sink.text.hasPrefix("-- Exported by Tabula\n"))
+        #expect(sink.text.hasPrefix("-- Exported by Moonrow\n"))
         #expect(sink.text.contains("DROP TABLE IF EXISTS \"t\";"))
         #expect(sink.text.components(separatedBy: "INSERT INTO").count == 3)
 
@@ -155,7 +155,7 @@ struct ExportJobTests {
     @Test func fileIsReplacedOnlyOnSuccess() async throws {
         let (db, url) = try await sampleDB()
         defer { try? FileManager.default.removeItem(at: url) }
-        let dir = FileManager.default.temporaryDirectory.appending(path: "tabula-export-\(UUID().uuidString)")
+        let dir = FileManager.default.temporaryDirectory.appending(path: "moonrow-export-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         let out = dir.appending(path: "t.csv")

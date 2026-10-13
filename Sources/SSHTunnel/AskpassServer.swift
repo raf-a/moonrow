@@ -2,13 +2,13 @@ import Foundation
 import NIOCore
 import NIOPosix
 
-/// The app's end of SSH_ASKPASS: a Unix socket `tabula-ssh-helper` connects to with
+/// The app's end of SSH_ASKPASS: a Unix socket `moonrow-ssh-helper` connects to with
 /// one JSON line `{"token", "prompt"}`; the reply is one line `{"answer"}`, or `{}` to cancel.
 /// The token (passed to ssh in the environment, along with the socket path) keeps other
 /// processes from asking.
 final class AskpassServer: Sendable {
-    static let socketVariable = "TABULA_ASKPASS_SOCKET"
-    static let tokenVariable = "TABULA_ASKPASS_TOKEN"
+    static let socketVariable = "MOONROW_ASKPASS_SOCKET"
+    static let tokenVariable = "MOONROW_ASKPASS_TOKEN"
 
     let path: String
     let token: String

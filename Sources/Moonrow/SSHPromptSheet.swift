@@ -27,7 +27,7 @@ enum SSHPromptSheet {
         switch request.prompt {
         case .hostKey(let message):
             alert.messageText = "Trust the SSH server \(request.server)?"
-            alert.informativeText = "Tabula hasn't connected to this server before, so it can't confirm the server is "
+            alert.informativeText = "Moonrow hasn't connected to this server before, so it can't confirm the server is "
                 + "the one you mean. Check the fingerprint with the server's administrator.\n\n"
                 + hostKeyDetails(message)
             alert.addButton(withTitle: "Trust and Connect")

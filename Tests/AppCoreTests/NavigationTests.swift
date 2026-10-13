@@ -5,7 +5,7 @@ import Testing
 
 private func tempFile(_ name: String) -> URL {
     FileManager.default.temporaryDirectory
-        .appending(path: "tabula-tests-\(UUID().uuidString)", directoryHint: .isDirectory)
+        .appending(path: "moonrow-tests-\(UUID().uuidString)", directoryHint: .isDirectory)
         .appending(path: name)
 }
 

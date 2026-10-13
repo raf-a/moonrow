@@ -3,18 +3,18 @@ import AppKit
 import DBKit
 
 extension DevHarness {
-    /// `TABULA_TRANSFER=<table>`: M11's export, import, backup and restore through the real
+    /// `MOONROW_TRANSFER=<table>`: M11's export, import, backup and restore through the real
     /// sheets and windows. It commits (new tables `m11_*`, rows in them; on servers a restored
     /// database it drops again): point it at a copy of a SQLite file or a scratch server
-    /// database. Files go to `TABULA_SNAPSHOTS`.
+    /// database. Files go to `MOONROW_SNAPSHOTS`.
     ///
     /// Steps: Export Tables… as Excel, CSV (a folder) and gzipped SQL; ⌘E as Excel; a CSV with a
     /// decimal comma into a new table (types guessed); JSON into that table; a large CSV stopped
     /// halfway (nothing imported); a SQL file run with progress; Settings ▸ Locations; and with
-    /// `TABULA_CONNECT` (Postgres, MySQL, MariaDB) Backup of the database and Restore into a new
+    /// `MOONROW_CONNECT` (Postgres, MySQL, MariaDB) Backup of the database and Restore into a new
     /// database.
     static func transferDemo(_ app: AppDelegate, table: String, snapshots: URL?) async throws {
-        let dir = try require(snapshots, "TABULA_SNAPSHOTS (the files are written there)")
+        let dir = try require(snapshots, "MOONROW_SNAPSHOTS (the files are written there)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         func snap(_ name: String, _ window: NSWindow?) {
             window?.layoutIfNeeded()
@@ -56,7 +56,7 @@ extension DevHarness {
         let other = try require(workspace.environment.catalog.objects.first { $0.kind == .table && $0.ref.name != table }, "a second table")
 
         // MARK: Export Tables…
-        send(#selector(TabulaActions.exportTables(_:)))
+        send(#selector(MoonrowActions.exportTables(_:)))
         let tables = try await sheet(ExportTablesSheetController.self)
         try check(tables.rows.filter(\.selected).map(\.object.ref.name) == [table], "Export Tables starts with the open table ticked")
         tables.select([table, other.ref.name])
@@ -84,13 +84,13 @@ extension DevHarness {
         let script = dir.appending(path: "m11-tables.sql.gz")
         _ = try await exportTables(2, to: script, "SQL")
         let text = String(decoding: try GzipReader.decompress(script), as: UTF8.self)
-        try check(text.hasPrefix("-- Exported by Tabula") && text.contains("INSERT INTO"), "one gzipped SQL script")
+        try check(text.hasPrefix("-- Exported by Moonrow") && text.contains("INSERT INTO"), "one gzipped SQL script")
         tables.options.setGzip(false)
         tables.close()
         try await sheetGone()
 
         // MARK: ⌘E as Excel
-        try await pressMenu(#selector(TabulaActions.exportData(_:)), in: window)
+        try await pressMenu(#selector(MoonrowActions.exportData(_:)), in: window)
         let single = try await sheet(ExportSheetController.self)
         single.selectFormat(3)
         try check(single.defaultFileName == "\(table).xlsx", "⌘E names the file from the pattern")
@@ -170,7 +170,7 @@ extension DevHarness {
         var body = "CREATE TABLE m11_script (id integer PRIMARY KEY, note varchar(40));\n"
         for i in 0..<500 { body += "INSERT INTO m11_script VALUES (\(i), 'note \(i); with a semicolon');\n" }
         try body.write(to: sql, atomically: true, encoding: .utf8)
-        send(#selector(TabulaActions.importSQLFile(_:)))
+        send(#selector(MoonrowActions.importSQLFile(_:)))
         // The menu path opens a panel; take the sheet behind it and give it the file instead.
         let runner: ImportSQLSheetController
         if let s = window.attachedSheet?.windowController as? ImportSQLSheetController {
