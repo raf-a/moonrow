@@ -3,12 +3,13 @@ import AppKit
 import DBKit
 
 /// The middle of a workspace window: the panes over the query log (⌃⌘C), which starts hidden.
-/// The log keeps its height when the window grows.
+/// The log keeps its height when the window grows; dragging its divider to the bottom closes it,
+/// as dragging a sidebar's edge does.
 @MainActor
 final class WorkspaceCenterController: NSViewController, NSSplitViewDelegate {
     let panes: WorkspacePanesController
     let log: QueryLogViewController
-    private let split = NSSplitView()
+    let split = CenterSplitView()
     static let logVisibleKey = "QueryLogVisible"
     private static let logHeightKey = "QueryLogHeight"
 
@@ -32,6 +33,13 @@ final class WorkspaceCenterController: NSViewController, NSSplitViewDelegate {
         split.setHoldingPriority(.init(250), forSubviewAt: 0)
         split.setHoldingPriority(.init(260), forSubviewAt: 1)
         log.view.isHidden = !UserDefaults.standard.bool(forKey: Self.logVisibleKey)
+        split.onDividerDrag = { [weak self] drag in
+            guard let self else { return drag() }
+            let before = isLogVisible ? log.view.frame.height : nil
+            drag()
+            // Dragged shut: it reopens at its height from before the drag, not the sliver it was dragged down to.
+            if let before, !isLogVisible { UserDefaults.standard.set(before, forKey: Self.logHeightKey) }
+        }
         view = split
     }
 
@@ -75,8 +83,27 @@ final class WorkspaceCenterController: NSViewController, NSSplitViewDelegate {
         min(proposed, splitView.bounds.height - 80)
     }
 
+    func splitView(_ splitView: NSSplitView, canCollapseSubview subview: NSView) -> Bool {
+        subview === log.view
+    }
+
     func splitViewDidResizeSubviews(_ notification: Notification) {
         if isLogVisible, log.view.frame.height >= 80 { UserDefaults.standard.set(log.view.frame.height, forKey: Self.logHeightKey) }
+        // A drag can close the log (the split view hides it) or pull it back out.
+        guard UserDefaults.standard.bool(forKey: Self.logVisibleKey) != isLogVisible else { return }
+        UserDefaults.standard.set(isLogVisible, forKey: Self.logVisibleKey)
+        if isLogVisible { log.scrollToEnd() }
+    }
+}
+
+/// Runs each divider drag inside `onDividerDrag`, so the log's height before the drag is known after it.
+final class CenterSplitView: NSSplitView {
+    var onDividerDrag: ((() -> Void) -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        // The split view tracks the drag in its own loop, so the drag is over when this returns.
+        guard let onDividerDrag else { return super.mouseDown(with: event) }
+        onDividerDrag { super.mouseDown(with: event) }
     }
 }
 

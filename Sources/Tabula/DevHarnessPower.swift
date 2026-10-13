@@ -229,6 +229,33 @@ extension DevHarness {
         try await key(#selector(TabulaActions.toggleQueryLog(_:)))
         try check(!workspace.center.isLogVisible, "and hides it")
 
+        // Dragging its divider to the bottom closes it, like a sidebar; it reopens at its old height.
+        try await key(#selector(TabulaActions.toggleQueryLog(_:)))
+        window.layoutIfNeeded()
+        let center: WorkspaceCenterController = workspace.center
+        let logHeight = center.log.view.frame.height
+        let split = center.split
+        func mouse(_ type: NSEvent.EventType, _ point: NSPoint) throws -> NSEvent {
+            try require(NSEvent.mouseEvent(
+                with: type, location: split.convert(point, to: nil), modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1), "mouse event")
+        }
+        let divider = NSPoint(x: split.bounds.midX, y: center.panes.view.frame.maxY + split.dividerThickness / 2)
+        // The split view's tracking loop takes the drags and the mouse-up from the queue.
+        for y in stride(from: divider.y + 20, through: split.bounds.maxY - 1, by: 20) + [split.bounds.maxY - 1] {
+            NSApp.postEvent(try mouse(.leftMouseDragged, NSPoint(x: divider.x, y: y)), atStart: false)
+        }
+        NSApp.postEvent(try mouse(.leftMouseUp, NSPoint(x: divider.x, y: split.bounds.maxY - 1)), atStart: false)
+        NSApp.sendEvent(try mouse(.leftMouseDown, divider))
+        try await Task.sleep(for: .milliseconds(100))
+        try check(!center.isLogVisible && !UserDefaults.standard.bool(forKey: WorkspaceCenterController.logVisibleKey),
+                  "dragging the divider to the bottom closes the query log")
+        try await key(#selector(TabulaActions.toggleQueryLog(_:)))
+        window.layoutIfNeeded()
+        try check(center.isLogVisible && abs(center.log.view.frame.height - logHeight) < 2,
+                  "⌃⌘C reopens it at its height from before the drag (\(center.log.view.frame.height) vs \(logHeight))")
+        try await key(#selector(TabulaActions.toggleQueryLog(_:)))
+
         // MARK: Sidebar
         let store = workspace.environment.savedQueries
         try store.addFolder("Reports")
