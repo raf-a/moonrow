@@ -370,6 +370,9 @@ final class LineNumberRuler: NSRulerView {
         self.textView = textView
         super.init(scrollView: scrollView, orientation: .verticalRuler)
         clientView = textView
+        // NSRulerView draws its edge line through the whole dirty rect; unclipped (the default
+        // since macOS 14) it shows above and below the scroll view.
+        clipsToBounds = true
         ruleThickness = 36
         textChanged()
     }
