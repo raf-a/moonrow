@@ -194,6 +194,8 @@ extension DevHarness {
         _ = try await waitFor("search results") { !search.isSearching && !search.results.isEmpty ? true : nil }
         try check(search.results.contains { $0.object.ref.name == table }, "“\(term)” is found in \(table)")
         try check(!search.results.contains { $0.object.kind != .table }, "All Tables leaves views out")
+        try check(workspace.queryLog.entries.contains { $0.sql.hasPrefix("SELECT COUNT(*) FROM") && $0.sql.contains("LIKE") },
+                  "the search's statements are in the query log")
         snap("objects-07-search.png", window)
         let hitRow = try require(search.results.firstIndex { $0.object.ref.name == table }, "a hit in \(table)")
         let hit = search.results[hitRow]

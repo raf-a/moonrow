@@ -573,8 +573,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         let search = leftSidebar.search
         search.tables = { [weak self] in self?.environment.catalog.objects ?? [] }
         search.openSession = { [weak self] in
-            guard let open = self?.openSession else { throw DatabaseError("No session can be opened.") }
-            return try await open()
+            guard let self else { throw CancellationError() }
+            return try await self.openLoggedSession()
         }
         search.onOpenRows = { [weak self] object, conditions, intent in
             guard let self else { return }
@@ -606,13 +606,25 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
             self?.open(object, intent: .regular)
         }
         let connection = connection
-        if let openSession {
-            controller.load(tables, on: openSession, closeAfter: true)
+        if openSession != nil {
+            controller.load(tables, on: { [weak self] in
+                guard let self else { throw CancellationError() }
+                return try await self.openLoggedSession()
+            }, closeAfter: true)
         } else {
             controller.load(tables, on: { connection }, closeAfter: false)
         }
         diagram = controller
         controller.showWindow(nil)
+    }
+
+    /// A session of its own (Search in Database, Show Diagram) whose statements go to the query
+    /// log with the workspace's.
+    func openLoggedSession() async throws -> any DatabaseConnection {
+        guard let openSession else { throw DatabaseError("No session can be opened.") }
+        let session = try await openSession()
+        queryLog.follow(session)
+        return session
     }
 
     /// Search in Database…: the sidebar's Search pane, ready to type.
