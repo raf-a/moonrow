@@ -57,6 +57,7 @@ final class DiagramWindowController: NSWindowController, NSToolbarDelegate, NSSe
         let toolbar = NSToolbar(identifier: "Diagram")
         toolbar.delegate = self
         toolbar.displayMode = .iconOnly
+        if #available(macOS 15.0, *) { toolbar.allowsDisplayModeCustomization = false }
         window.toolbar = toolbar
         window.toolbarStyle = .unified
         window.center()

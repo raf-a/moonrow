@@ -111,6 +111,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         let toolbar = NSToolbar(identifier: "Workspace")
         toolbar.delegate = self
         toolbar.displayMode = .iconOnly
+        // Icons only; no Icon and Text choice in the toolbar's menu.
+        if #available(macOS 15.0, *) { toolbar.allowsDisplayModeCustomization = false }
         window.toolbar = toolbar
         window.toolbarStyle = .unified
 
@@ -724,13 +726,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     private static let changesItem = NSToolbarItem.Identifier("changes")
     private static let safetyItem = NSToolbarItem.Identifier("safety")
     private static let titleItem = NSToolbarItem.Identifier("title")
-    /// Changes, Safe Mode and Reload, side by side as one group.
-    private static let actionsItem = NSToolbarItem.Identifier("actions")
     private static let inspectorToggleItem = NSToolbarItem.Identifier("rightSidebar")
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.toggleSidebar, .sidebarTrackingSeparator, Self.titleItem, .flexibleSpace, Self.actionsItem,
-                        .inspectorTrackingSeparator, .flexibleSpace, Self.inspectorToggleItem]
+        [.toggleSidebar, .sidebarTrackingSeparator, Self.titleItem, .flexibleSpace,
+         // Side by side, plain buttons share one piece of glass on macOS 26. (Not an
+         // NSToolbarItemGroup: items in a group lose their badge.)
+         Self.changesItem, Self.safetyItem, Self.reloadItem,
+         .inspectorTrackingSeparator, .flexibleSpace, Self.inspectorToggleItem]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -761,13 +764,6 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
             item.image = NSImage(systemSymbolName: "shield", accessibilityDescription: "Safe mode")
             item.label = "Safe Mode"
             return item
-        case Self.actionsItem:
-            let group = NSToolbarItemGroup(itemIdentifier: id)
-            group.subitems = [Self.changesItem, Self.safetyItem, Self.reloadItem].compactMap {
-                self.toolbar(toolbar, itemForItemIdentifier: $0, willBeInsertedIntoToolbar: flag)
-            }
-            group.label = "Actions"
-            return group
         case Self.titleItem:
             let item = NSToolbarItem(itemIdentifier: id)
             item.view = titleView
