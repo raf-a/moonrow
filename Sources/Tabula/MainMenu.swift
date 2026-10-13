@@ -135,9 +135,8 @@ enum MainMenu {
             m.add("New Window", #selector(TabulaActions.newWindow(_:)), "n", [.command, .option])
             m.add("New Query Tab", #selector(TabulaActions.newQueryTab(_:)), "t")
             m.add("New Table…", #selector(TabulaActions.newTable(_:)))
-            // ⌘O opens SQL files into query tabs; databases files have their own item.
+            // ⌘O opens SQL files into query tabs; databases open through connections.
             m.add("Open…", #selector(NSDocumentController.openDocument(_:)), "o")
-            m.add("Open Database File…", #selector(AppDelegate.openDatabaseFile(_:)))
             m.addItem(.separator())
             m.add("Close Tab", #selector(TabulaActions.closeTab(_:)), "w")
             m.add("Close Window", #selector(NSWindow.performClose(_:)), "w", [.command, .shift])

@@ -17,7 +17,6 @@ final class WelcomeWindowController: NSWindowController, NSWindowDelegate, NSSea
         self.store = store
         self.app = app
         list = ConnectionList(store: store)
-        list.emptyText = "No saved connections.\nClick + to add one, or drop a database file on the Dock icon."
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 680, height: 460),
             styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
@@ -51,7 +50,7 @@ final class WelcomeWindowController: NSWindowController, NSWindowDelegate, NSSea
     private func makeContent() -> NSView {
         let root = NSView()
 
-        // Left: identity and the two ways in.
+        // Left: identity, New Connection, Backup and Restore.
         let side = NSVisualEffectView()
         side.material = .sidebar
         side.blendingMode = .behindWindow
@@ -67,21 +66,15 @@ final class WelcomeWindowController: NSWindowController, NSWindowDelegate, NSSea
         version.font = .systemFont(ofSize: 12)
         version.textColor = .secondaryLabelColor
 
-        let newButton = NSButton(title: "New Connection…", target: nil, action: #selector(TabulaActions.newConnection(_:)))
-        let openButton = NSButton(title: "Open Database File…", target: nil, action: #selector(AppDelegate.openDatabaseFile(_:)))
-        let backupButton = NSButton(title: "Backup…", target: nil, action: #selector(TabulaActions.backupDatabases(_:)))
-        let restoreButton = NSButton(title: "Restore…", target: nil, action: #selector(TabulaActions.restoreDatabase(_:)))
-        for b in [newButton, openButton] {
+        let newButton = NSButton(title: "New Connection", target: nil, action: #selector(TabulaActions.newConnection(_:)))
+        let backupButton = NSButton(title: "Backup", target: nil, action: #selector(TabulaActions.backupDatabases(_:)))
+        let restoreButton = NSButton(title: "Restore", target: nil, action: #selector(TabulaActions.restoreDatabase(_:)))
+        for b in [newButton, backupButton, restoreButton] {
             b.controlSize = .large
             b.widthAnchor.constraint(equalToConstant: 190).isActive = true
         }
-        for b in [backupButton, restoreButton] {
-            b.widthAnchor.constraint(equalToConstant: 92).isActive = true
-        }
-        let toolButtons = NSStackView(views: [backupButton, restoreButton])
-        toolButtons.spacing = 6
 
-        let sideStack = NSStackView(views: [icon, name, version, NSView(), newButton, openButton, toolButtons])
+        let sideStack = NSStackView(views: [icon, name, version, NSView(), newButton, backupButton, restoreButton])
         sideStack.orientation = .vertical
         sideStack.alignment = .centerX
         sideStack.spacing = 8

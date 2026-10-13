@@ -38,11 +38,11 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>CFBundleDocumentTypes</key>
   <array>
     <dict>
-      <key>CFBundleTypeName</key><string>SQLite Database</string>
+      <key>CFBundleTypeName</key><string>SQL File</string>
       <key>CFBundleTypeRole</key><string>Editor</string>
       <key>LSHandlerRank</key><string>Alternate</string>
       <key>CFBundleTypeExtensions</key>
-      <array><string>sqlite</string><string>sqlite3</string><string>db</string><string>db3</string></array>
+      <array><string>sql</string></array>
     </dict>
   </array>
 </dict>

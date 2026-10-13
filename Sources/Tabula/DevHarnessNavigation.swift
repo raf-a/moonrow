@@ -152,7 +152,7 @@ extension DevHarness {
 
         // Workspaces: a second window on the same file, then ⇧⌘] / ⇧⌘[.
         let url = URL(filePath: workspace.config.expandedFilePath)
-        app.openFile(url)
+        app.connect(ConnectionConfig.sqliteFile(url), presentingErrorsIn: nil)
         let other = try await waitFor("second workspace") { app.workspaces.count == 2 ? app.workspaces[1] : nil }
         let otherWindow = try require(other.window, "second window")
         _ = try await waitFor("second window key") { otherWindow.isKeyWindow ? true : nil }
@@ -220,8 +220,8 @@ extension DevHarness {
         try check(currentTitle == "report.sql" && workspace.panes.allTabs.count == tabCount, "opening it again selects its tab")
         let fileMenu = NSApp.mainMenu?.items.first { $0.title == "File" }?.submenu?.items ?? []
         try check(fileMenu.contains { $0.title == "Open…" && $0.action == #selector(NSDocumentController.openDocument(_:)) }
-                  && fileMenu.contains { $0.action == #selector(AppDelegate.openDatabaseFile(_:)) },
-                  "File has Open… (SQL files) and Open Database File…")
+                  && !fileMenu.contains { $0.title.hasPrefix("Open Database File") },
+                  "File has Open… (SQL files) and no Open Database File…")
 
         // Leave a known layout for the relaunch check.
         app.saveSession()

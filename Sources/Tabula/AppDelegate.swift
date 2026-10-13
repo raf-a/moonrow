@@ -57,15 +57,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TabulaActions {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         loadStore()
-        // Database paths on the command line open directly: `Tabula ~/data/app.db`.
-        let files = CommandLine.arguments.dropFirst().filter { !$0.hasPrefix("-") }
-            .map { URL(filePath: ($0 as NSString).expandingTildeInPath) }
-            .filter { FileManager.default.fileExists(atPath: $0.path) }
-        for url in files { openFile(url) }
-        // The workspaces open at the last quit come back, unless files were named or a dev
-        // harness is running.
+        // The workspaces open at the last quit come back, unless a dev harness is running.
         var reopening = 0
-        if files.isEmpty, settings.settings.reopenWorkspaces, DevHarness.allowsSessionRestore {
+        if settings.settings.reopenWorkspaces, DevHarness.allowsSessionRestore {
             reopening = reopenWorkspaces()
         }
         if workspaces.isEmpty, reopening == 0 { showWelcome(nil) }
@@ -125,16 +119,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TabulaActions {
         do { try sessions.save(open) } catch { print("couldn't save the session: \(error)") }
     }
 
-    /// Files dropped on the Dock icon or opened from Finder: SQL files open in query tabs,
-    /// anything else as a SQLite database.
+    /// SQL files dropped on the Dock icon or opened from Finder open in query tabs. Databases
+    /// open through connections only.
     func application(_ application: NSApplication, open urls: [URL]) {
-        for url in urls {
-            if url.pathExtension.lowercased() == "sql" {
-                guard let workspace = frontmostWorkspace else { return needWorkspace(for: url) }
-                workspace.openSQLFile(url)
-            } else {
-                openFile(url)
-            }
+        for url in urls where url.pathExtension.lowercased() == "sql" {
+            guard let workspace = frontmostWorkspace else { return needWorkspace(for: url) }
+            workspace.openSQLFile(url)
         }
     }
 
@@ -300,17 +290,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TabulaActions {
         }
     }
 
-    /// File ▸ Open Database File…, and the welcome window's button: SQLite databases.
-    @objc func openDatabaseFile(_ sender: Any?) {
-        let panel = NSOpenPanel()
-        panel.message = "Choose a SQLite database"
-        panel.allowsMultipleSelection = true
-        panel.begin { [weak self] response in
-            guard response == .OK else { return }
-            for url in panel.urls { self?.openFile(url) }
-        }
-    }
-
     static let sqlTypes = [UTType(filenameExtension: "sql") ?? .plainText, .plainText]
 
     /// The workspace SQL files open in: the frontmost one, else the one opened last.
@@ -347,12 +326,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, TabulaActions {
         }
         forms.append(form)
         form.showWindow(nil)
-    }
-
-    func openFile(_ url: URL) {
-        var config = ConnectionConfig.sqliteFile(url)
-        config.safeMode = settings.settings.defaultSafeMode
-        connect(config, presentingErrorsIn: nil)
     }
 
     /// Opens a workspace window for the connection. Errors appear as a sheet on `window`,

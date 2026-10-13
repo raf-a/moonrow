@@ -54,6 +54,18 @@ enum DevHarness {
     static func runIfRequested(_ app: AppDelegate) {
         setvbuf(stdout, nil, _IOLBF, 0)
         let env = ProcessInfo.processInfo.environment
+        // The harnesses name their SQLite database on the command line. The app itself only
+        // opens databases through connections.
+        if !allowsSessionRestore {
+            let files = CommandLine.arguments.dropFirst().filter { !$0.hasPrefix("-") }
+                .map { URL(filePath: ($0 as NSString).expandingTildeInPath) }
+                .filter { FileManager.default.fileExists(atPath: $0.path) }
+            for url in files {
+                var config = ConnectionConfig.sqliteFile(url)
+                config.safeMode = app.settings.settings.defaultSafeMode
+                app.connect(config, presentingErrorsIn: nil)
+            }
+        }
         let snapshots = env["TABULA_SNAPSHOTS"].map { URL(filePath: $0, directoryHint: .isDirectory) }
         // `TABULA_CONNECT=postgres://user:pw@host:port/db` opens a server workspace without saving
         // the connection; `TABULA_FORM=postgres` opens a new connection form for that driver.
