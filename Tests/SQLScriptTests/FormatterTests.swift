@@ -490,4 +490,31 @@ private let caseSQL = """
             #expect(SQLFormatter.format(SQLFormatter.compact(formatted, dialect: dialect), dialect: dialect) == formatted)
         }
     }
+
+    /// `|` marks the cursor before and where it should be after.
+    private func mapped(_ marked: String, _ transform: (String) -> String) -> String {
+        let offset = marked.utf16.firstIndex(of: UInt16(UInt8(ascii: "|")))
+            .map { marked.utf16.distance(from: marked.utf16.startIndex, to: $0) }!
+        let old = marked.replacingOccurrences(of: "|", with: "")
+        let new = transform(old)
+        let at = SQLFormatter.mapOffset(offset, from: old, to: new, dialect: .postgres)
+        let i = new.utf16.index(new.utf16.startIndex, offsetBy: at)
+        return String(new[..<i]) + "|" + String(new[i...])
+    }
+
+    @Test func caretStaysOnTheSameToken() {
+        let format = { SQLFormatter.format($0, dialect: .postgres) }
+        let compact = { SQLFormatter.compact($0, dialect: .postgres) }
+        #expect(mapped("select 1;\nselect a, b fr|om t where x = 1;\n", format)
+                    == "SELECT\n    1;\n\nSELECT\n    a,\n    b\nFR|OM\n    t\nWHERE\n    x = 1;\n")
+        #expect(mapped("SELECT\n    1;\n\nSELECT\n    a,\n    |b\nFROM\n    t;", compact)
+                    == "SELECT 1; SELECT a, |b FROM t;")
+        // Between statements: the start of the next one.
+        #expect(mapped("select 1;\n|\nselect 2", compact) == "select 1; |select 2")
+        // Right after a terminator, and past the end.
+        #expect(mapped("select 1;| select 2", format) == "SELECT\n    1;|\n\nSELECT\n    2")
+        #expect(mapped("select 1;\n\n|", compact) == "select 1;|")
+        #expect(mapped("|select 1", format) == "|SELECT\n    1")
+        #expect(mapped("|", format) == "|")
+    }
 }

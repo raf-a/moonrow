@@ -122,4 +122,37 @@ private func names(_ marked: String, recent: [String] = []) -> [String] {
         let list = SQLCompletion.candidates(for: c, catalog: catalog, keywords: [])
         #expect(list.prefix(2).map(\.text) == ["recent", "big"])
     }
+
+    @Test func postgresQuotesNamesWithCapitals() {
+        #expect(SQLCompletion.quoteIfNeeded("Users", dialect: .postgres) == #""Users""#)
+        #expect(SQLCompletion.quoteIfNeeded("orderItems", dialect: .postgres) == #""orderItems""#)
+        #expect(SQLCompletion.quoteIfNeeded("order_items", dialect: .postgres) == "order_items")
+        // MySQL and SQLite read mixed case back as written.
+        #expect(SQLCompletion.quoteIfNeeded("Users", dialect: .mysql) == "Users")
+        #expect(SQLCompletion.quoteIfNeeded("orderItems", dialect: .sqlite) == "orderItems")
+    }
+
+    @Test func keywordsFollowTheTypedCase() {
+        let select = SQLCompletion.Item("SELECT", kind: .keyword)
+        #expect(SQLCompletion.insertion(for: select, typed: "sel", dialect: .sqlite) == "select")
+        #expect(SQLCompletion.insertion(for: select, typed: "SEL", dialect: .sqlite) == "SELECT")
+        #expect(SQLCompletion.insertion(for: select, typed: "Sel", dialect: .sqlite) == "SELECT")
+        #expect(SQLCompletion.insertion(for: select, typed: "", dialect: .sqlite) == "SELECT")
+        // Names keep their own case.
+        #expect(SQLCompletion.insertion(for: .init("Users", kind: .table), typed: "us", dialect: .mysql) == "Users")
+    }
+
+    @Test func returnEndsTheLineAfterACompleteWord() {
+        let and = SQLCompletion.Item("AND", kind: .keyword)
+        #expect(!SQLCompletion.returnAccepts(and, typed: "and", dialect: .sqlite, chosen: false))
+        #expect(!SQLCompletion.returnAccepts(and, typed: "AND", dialect: .sqlite, chosen: false))
+        #expect(SQLCompletion.returnAccepts(and, typed: "an", dialect: .sqlite, chosen: false))
+        #expect(SQLCompletion.returnAccepts(and, typed: "and", dialect: .sqlite, chosen: true))
+        let users = SQLCompletion.Item("users", kind: .table)
+        #expect(!SQLCompletion.returnAccepts(users, typed: "users", dialect: .sqlite, chosen: false))
+        #expect(!SQLCompletion.returnAccepts(users, typed: "USERS", dialect: .sqlite, chosen: false))
+        // Accepting would quote it.
+        let mixed = SQLCompletion.Item("Users", kind: .table)
+        #expect(SQLCompletion.returnAccepts(mixed, typed: "Users", dialect: .postgres, chosen: false))
+    }
 }
