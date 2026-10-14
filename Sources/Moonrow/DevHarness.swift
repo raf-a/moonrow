@@ -22,6 +22,7 @@ import Darwin
 ///     MOONROW_SESSION=check MOONROW_STORE=… MOONROW_SNAPSHOTS=… Moonrow        (after MOONROW_NAVIGATE)
 ///     MOONROW_CONNECT=postgres://… MOONROW_OPENDB=far_away MOONROW_STORE=… MOONROW_SNAPSHOTS=… Moonrow
 ///     MOONROW_WELCOME=1 MOONROW_STORE=<empty dir>/connections.json MOONROW_SNAPSHOTS=… Moonrow
+///     MOONROW_QUERIES=1 MOONROW_STORE=<empty dir>/connections.json MOONROW_SNAPSHOTS=… Moonrow build/sample.sqlite
 ///     MOONROW_OBJECTS=users MOONROW_STORE=… MOONROW_SNAPSHOTS=… Moonrow /tmp/copy-of-sample.sqlite   (or MOONROW_CONNECT to a scratch database)
 ///     MOONROW_TRANSFER=users MOONROW_STORE=… MOONROW_SNAPSHOTS=… Moonrow /tmp/copy-of-sample.sqlite  (or MOONROW_CONNECT to a scratch database)
 ///     MOONROW_FEED_URL=http://127.0.0.1:8000/appcast.xml MOONROW_STORE=… open build/copy/Moonrow.app
@@ -232,6 +233,20 @@ enum DevHarness {
                     try await openDatabaseDemo(app, table: table, snapshots: snapshots)
                 } catch {
                     print("open database demo failed: \(error)")
+                }
+                NSApp.terminate(nil)
+            }
+            return
+        }
+        // Saved queries on disk and the connection's queries folder. It writes connections and
+        // queries into MOONROW_STORE's folder.
+        if env["MOONROW_QUERIES"] != nil {
+            Task {
+                do {
+                    guard env["MOONROW_STORE"] != nil else { throw HarnessError("MOONROW_QUERIES needs MOONROW_STORE") }
+                    try await queriesFolderDemo(app, snapshots: snapshots)
+                } catch {
+                    print("queries folder demo failed: \(error)")
                 }
                 NSApp.terminate(nil)
             }

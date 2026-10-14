@@ -113,6 +113,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         safety.window = window
         NotificationCenter.default.addObserver(self, selector: #selector(safetyLevelChanged), name: SafetyGate.levelDidChange, object: safety)
         NotificationCenter.default.addObserver(self, selector: #selector(stagedChangesChanged), name: StagedChanges.didChange, object: changes)
+        // Any store: the connection's queries folder can change while it's open.
+        NotificationCenter.default.addObserver(self, selector: #selector(savedQueriesChanged(_:)), name: SavedQueries.didChange, object: nil)
 
         let toolbar = NSToolbar(identifier: "Workspace")
         toolbar.delegate = self
@@ -329,6 +331,37 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         for case let editor as QueryEditorViewController in panes.allTabs where editor.savedQuery?.url == old.url {
             editor.savedQueryChanged(to: new)
         }
+    }
+
+    /// A saved query changed on disk, outside the app: its tab shows the new text (unless it
+    /// has edits of its own), and a tab whose file went becomes an unsaved query.
+    @objc private func savedQueriesChanged(_ note: Notification) {
+        guard note.object as AnyObject? === environment.savedQueries, SavedQueries.isExternal(note) else { return }
+        for case let editor as QueryEditorViewController in panes.allTabs {
+            guard let saved = editor.savedQuery else { continue }
+            if let now = environment.savedQueries.queries.first(where: { $0.path == saved.path }) {
+                editor.savedQueryChangedOnDisk(now)
+            } else {
+                editor.savedQueryChanged(to: nil)
+            }
+        }
+    }
+
+    /// Writes what the saved-query tabs have typed but not yet saved.
+    func saveSavedQueries() {
+        for case let editor as QueryEditorViewController in panes.allTabs { editor.saveIfDirty() }
+    }
+
+    /// The connection's queries folder changed: the Queries pane and Quick Open use `store`.
+    /// Tabs on queries that were moved or copied (old `Query.path` to new) follow them; the
+    /// others keep their text as unsaved queries.
+    func useSavedQueries(_ store: SavedQueries, moved: [String: String]) {
+        for case let editor as QueryEditorViewController in panes.allTabs {
+            guard let saved = editor.savedQuery else { continue }
+            editor.savedQueryChanged(to: moved[saved.path].flatMap { path in store.queries.first { $0.path == path } })
+        }
+        environment.savedQueries = store
+        leftSidebar.queries.store = store
     }
 
     func tabChanged() {

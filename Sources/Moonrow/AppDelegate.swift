@@ -19,7 +19,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         ? KeychainSecretStore() : FileSecretStore(url: dataRoot.appending(path: "secrets.json"))
     /// Shared by every workspace open on the same connection.
     private var histories: [UUID: QueryHistory] = [:]
-    private var savedQueries: [UUID: SavedQueries] = [:]
+    /// By directory path: shared by every workspace whose connection uses that queries folder.
+    private var savedQueries: [String: SavedQueries] = [:]
     private var columnLayouts: [UUID: ColumnLayouts] = [:]
 
     /// Dev harness only: accept unknown SSH host keys without asking.
@@ -82,6 +83,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         loadStore()
+        do {
+            try SavedQueries.adoptLegacyFolders(store: store, root: dataRoot)
+        } catch {
+            present(error, title: "Couldn't record your connections' queries folders", in: nil)
+        }
         // The workspaces open at the last quit come back, unless a dev harness is running.
         var reopening = 0
         if settings.settings.reopenWorkspaces, DevHarness.allowsSessionRestore {
@@ -341,7 +347,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             open.showWindow(nil)
             return
         }
-        let form = ConnectionFormWindowController(config: config, isNew: isNew, store: store, secrets: secrets)
+        let form = ConnectionFormWindowController(config: config, isNew: isNew, store: store, secrets: secrets, dataRoot: dataRoot)
+        form.onQueriesFolderChange = { [weak self] config, change, transfer in
+            try self?.changeQueriesFolder(of: config, change, transfer)
+        }
         form.sshLogin = { [weak self, weak form] config, password, passphrase in
             self?.sshLogin(for: config, password: password, keyPassphrase: passphrase, in: form?.window) ?? SSHLogin()
         }
@@ -448,13 +457,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         secrets.copyAll(from: id, to: copy.id)
     }
 
+    /// The store for a queries folder, shared by every workspace using it.
+    private func savedQueries(at directory: URL) -> SavedQueries {
+        let key = directory.standardizedFileURL.path
+        if let store = savedQueries[key] { return store }
+        let store = SavedQueries(directory: directory)
+        savedQueries[key] = store
+        return store
+    }
+
+    /// A connection's queries folder changes: what's being edited in the old one is saved, its
+    /// queries are moved or copied (or left there, when `transfer` is nil), and the
+    /// connection's open workspaces switch to the new folder.
+    private func changeQueriesFolder(of config: ConnectionConfig, _ change: SavedQueries.FolderChange,
+                                     _ transfer: SavedQueries.Transfer?) throws {
+        let users = workspaces.filter { SavedQueries.sameDirectory($0.environment.savedQueries.directory, change.source) }
+        for w in users { w.saveSavedQueries() }
+        var moved: [String: String] = [:]
+        if let transfer {
+            // A folder under Queries that's left empty goes; one chosen elsewhere stays.
+            let inRoot = change.source.deletingLastPathComponent().standardizedFileURL.path
+                == SavedQueries.queriesRoot(dataRoot).standardizedFileURL.path
+            moved = try SavedQueries.transfer(transfer, from: change.source, to: change.destination,
+                                              removeSource: transfer == .move && inRoot)
+        }
+        let store = savedQueries(at: change.destination)
+        store.reload()
+        for w in workspaces where w.config.id == config.id { w.useSavedQueries(store, moved: moved) }
+    }
+
     @discardableResult
     private func openWorkspace(_ config: ConnectionConfig, _ connection: any DatabaseConnection, password: String?,
                                placement: WorkspacePlacement) -> WorkspaceWindowController {
         let history = histories[config.id] ?? QueryHistory(fileURL: QueryHistory.fileURL(root: dataRoot, connection: config.id))
-        let saved = savedQueries[config.id] ?? SavedQueries(directory: SavedQueries.directory(root: dataRoot, connection: config.id))
+        let saved = savedQueries(at: SavedQueries.directory(root: dataRoot, for: config))
         histories[config.id] = history
-        savedQueries[config.id] = saved
         let layouts = columnLayouts[config.id] ?? ColumnLayouts(fileURL: ColumnLayouts.fileURL(root: dataRoot, connection: config.id))
         columnLayouts[config.id] = layouts
         let workspace = WorkspaceWindowController(

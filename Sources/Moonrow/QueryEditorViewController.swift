@@ -9,7 +9,8 @@ final class QueryEnvironment {
     let connection: any DatabaseConnection
     let catalog: SchemaCatalog
     let history: QueryHistory
-    let savedQueries: SavedQueries
+    /// The connection's queries folder; replaced when that folder changes.
+    var savedQueries: SavedQueries
     /// Asks before statements go out, as the connection's safe mode says.
     let safety: SafetyGate
     /// Accepted completions, most recent first; ranks them higher next time.
@@ -626,10 +627,27 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
         }
     }
 
-    /// The saved query was renamed or deleted from the sidebar.
+    /// The saved query was renamed or deleted from the sidebar, or moved to another folder.
     func savedQueryChanged(to query: SavedQueries.Query?) {
         savedQuery = query
         onTabItemChange?()
+    }
+
+    /// The saved query's file changed outside the app. Without edits of its own, the tab shows
+    /// the file's text, as one undoable change.
+    func savedQueryChangedOnDisk(_ query: SavedQueries.Query) {
+        savedQuery = query
+        guard !isDirty, let text = try? environment.savedQueries.text(of: query), text != editor.string else { return }
+        let all = NSRange(location: 0, length: (editor.string as NSString).length)
+        let selection = editor.selectedRange()
+        guard editor.shouldChangeText(in: all, replacementString: text) else { return }
+        editor.textStorage?.replaceCharacters(in: all, with: text)
+        editor.didChangeText()
+        // The text is the file's: nothing to write back.
+        autosaveTask?.cancel()
+        isDirty = false
+        let length = (text as NSString).length
+        editor.setSelectedRange(NSRange(location: min(selection.location, length), length: 0))
     }
 
     private func presentError(_ error: any Error, title: String) {

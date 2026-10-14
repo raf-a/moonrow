@@ -152,6 +152,10 @@ public struct ConnectionConfig: Codable, Hashable, Sendable, Identifiable {
     public var tagID: UUID?
     /// The welcome window's group (`ConnectionStore.groups`); nil when ungrouped.
     public var groupID: UUID?
+    /// Where the saved queries live: a folder name inside the app's `Queries` folder, or a path
+    /// (starting with `/` or `~`) to any folder. Connections with the same folder share their
+    /// queries. Empty uses the connection's name (`SavedQueries.directory(root:for:)`).
+    public var queriesFolder: String
 
     public init(
         id: UUID = UUID(), name: String = "", driver: DriverKind = .sqlite,
@@ -161,7 +165,7 @@ public struct ConnectionConfig: Codable, Hashable, Sendable, Identifiable {
         readOnly: Bool = false, rowsPerPage: Int = Paging.defaultPageSize,
         overSSH: Bool = false, sshHost: String = "", sshPort: Int? = nil, sshUser: String = "",
         sshPasswordMode: PasswordMode = .keychain, sshKeyPath: String = "",
-        safeMode: SafeMode = .silent, tagID: UUID? = nil, groupID: UUID? = nil
+        safeMode: SafeMode = .silent, tagID: UUID? = nil, groupID: UUID? = nil, queriesFolder: String = ""
     ) {
         self.id = id
         self.name = name
@@ -187,13 +191,14 @@ public struct ConnectionConfig: Codable, Hashable, Sendable, Identifiable {
         self.safeMode = safeMode
         self.tagID = tagID
         self.groupID = groupID
+        self.queriesFolder = queriesFolder
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, name, driver, filePath, host, port, user, database, passwordMode
         case tlsMode, tlsCAPath, tlsCertPath, tlsKeyPath, readOnly, rowsPerPage
         case overSSH, sshHost, sshPort, sshUser, sshPasswordMode, sshKeyPath
-        case safeMode, groupID
+        case safeMode, groupID, queriesFolder
         case tagID = "tag"
     }
 
@@ -233,6 +238,7 @@ public struct ConnectionConfig: Codable, Hashable, Sendable, Identifiable {
             tagID = name.flatMap { n in ConnectionTag.defaults.first { $0.name.lowercased() == n.lowercased() }?.id }
         }
         groupID = try? c.decodeIfPresent(UUID.self, forKey: .groupID)
+        queriesFolder = try c.decodeIfPresent(String.self, forKey: .queriesFolder) ?? ""
     }
 
     /// Whether connecting goes through SSH (servers only).

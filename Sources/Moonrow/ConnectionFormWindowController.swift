@@ -9,12 +9,17 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
     private let isNew: Bool
     private let store: ConnectionStore
     private let secrets: any SecretStore
+    /// Where the app keeps its data; queries folders given by name are in its `Queries`.
+    private let dataRoot: URL
 
     /// Asked to connect with the saved config and the password typed in the form.
     var onConnect: ((ConnectionConfig, String?) -> Void)?
     /// How Test logs in to the SSH server, given the SSH password and key passphrase typed.
     var sshLogin: ((ConnectionConfig, String?, String?) -> SSHLogin)?
     var onClose: (() -> Void)?
+    /// Before an edited connection that uses another queries folder is saved: moves or copies
+    /// the old folder's queries (or leaves them, nil) and switches its open workspaces over.
+    var onQueriesFolderChange: ((ConnectionConfig, SavedQueries.FolderChange, SavedQueries.Transfer?) throws -> Void)?
 
     private let driverPopup = NSPopUpButton()
     private let nameField = NSTextField()
@@ -38,6 +43,7 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
     private let safeModeHint = NSTextField(wrappingLabelWithString: "")
     private let readOnlyBox = NSButton(checkboxWithTitle: "Read-only", target: nil, action: nil)
     private let pageSizeField = NSTextField()
+    let queriesField = NSTextField()
     private let sshBox = NSButton(checkboxWithTitle: "Connect through an SSH server", target: nil, action: nil)
     private let sshHostField = NSTextField()
     private let sshPortField = NSTextField()
@@ -56,11 +62,12 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
     private var sshKeyRows: [Int] = []
     private var testTask: Task<Void, Never>?
 
-    init(config: ConnectionConfig, isNew: Bool, store: ConnectionStore, secrets: any SecretStore) {
+    init(config: ConnectionConfig, isNew: Bool, store: ConnectionStore, secrets: any SecretStore, dataRoot: URL) {
         self.config = config
         self.isNew = isNew
         self.store = store
         self.secrets = secrets
+        self.dataRoot = dataRoot
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 540, height: 300),
             styleMask: [.titled, .closable], backing: .buffered, defer: true)
@@ -121,6 +128,8 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         sshKeyField.placeholderString = "~/.ssh/id_ed25519"
         sshKeyField.lineBreakMode = .byTruncatingMiddle
         sshPassphraseField.placeholderString = "Asked for when needed"
+        queriesField.placeholderString = "Same as the name"
+        queriesField.lineBreakMode = .byTruncatingMiddle
         let sshHint = NSTextField(wrappingLabelWithString:
             "Without a key file, ssh uses your ~/.ssh/config, the SSH agent and your default keys. "
             + "Host and port above are as the SSH server sees them.")
@@ -166,6 +175,7 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
             ("", safeModeHint, .both),
             ("", readOnlyBox, .both),
             ("Rows per page", pageSizeRow(), .both),
+            ("Queries folder", row(queriesField, button("Choose…", #selector(chooseQueriesFolder(_:)))), .both),
         ]
         for (i, (title, view, kind)) in rows.enumerated() {
             grid.addRow(with: [title.isEmpty ? NSGridCell.emptyContentView : NSTextField(labelWithString: title), view])
@@ -286,6 +296,7 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         safeModeHint.stringValue = c.safeMode.detail
         readOnlyBox.state = c.readOnly ? .on : .off
         pageSizeField.stringValue = c.rowsPerPage > 0 ? String(c.rowsPerPage) : ""
+        queriesField.stringValue = c.queriesFolder
         sshBox.state = c.overSSH ? .on : .off
         sshHostField.stringValue = c.sshHost
         sshPortField.stringValue = c.sshPort.map(String.init) ?? ""
@@ -327,6 +338,9 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         c.sshUser = text(sshUserField)
         c.sshPasswordMode = PasswordMode.allCases[max(0, sshPasswordModePopup.indexOfSelectedItem)]
         c.sshKeyPath = sshKeyBox.state == .on ? text(sshKeyField) : ""
+        // Named after the connection unless given; renaming the connection later keeps it.
+        c.queriesFolder = text(queriesField)
+        if c.queriesFolder.isEmpty { c.queriesFolder = SavedQueries.defaultFolder(for: c) }
         return c
     }
 
@@ -349,26 +363,63 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         status.textColor = ok ? .systemGreen : .systemRed
     }
 
-    @discardableResult
-    private func saveEdits() -> Bool {
+    /// Saves the edits, then calls `done`. When the queries folder changes and the old one has
+    /// queries, it first asks whether to move them (copy, when another connection uses that
+    /// folder) or leave them; Cancel saves nothing.
+    private func saveEdits(then done: @escaping () -> Void) {
         let c = edited()
         if !c.driver.isServer, c.filePath.isEmpty {
             setStatus("Choose a database file first.", ok: false)
-            return false
+            return
         }
+        let change = store.connection(id: c.id).flatMap {
+            SavedQueries.folderChange(from: $0, to: c, among: store.connections, root: dataRoot)
+        }
+        guard let change, change.count > 0, let window else { return commit(c, change, nil, then: done) }
+        let shared = !change.sharedWith.isEmpty
+        let verb = shared ? "Copy" : "Move"
+        let what = change.count == 1 ? "the query" : "the \(change.count) queries"
+        let alert = NSAlert()
+        alert.messageText = "\(verb) \(what) in “\(folderLabel(change.source))” to “\(folderLabel(change.destination))”?"
+        if shared {
+            let names = ListFormatter.localizedString(byJoining: change.sharedWith)
+            alert.informativeText = "“\(folderLabel(change.source))” is also the queries folder of \(names)."
+        }
+        alert.addButton(withTitle: "\(verb) Queries")
+        alert.addButton(withTitle: "Leave Them")
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            switch response {
+            case .alertFirstButtonReturn: self?.commit(c, change, shared ? .copy : .move, then: done)
+            case .alertSecondButtonReturn: self?.commit(c, change, nil, then: done)
+            default: break
+            }
+        }
+    }
+
+    private func commit(_ c: ConnectionConfig, _ change: SavedQueries.FolderChange?, _ transfer: SavedQueries.Transfer?,
+                        then done: () -> Void) {
         do {
             // Only a Keychain-mode password is kept; switching modes forgets it.
             let keep = c.driver.isServer && c.passwordMode == .keychain && !passwordField.stringValue.isEmpty
             try secrets.setPassword(keep ? passwordField.stringValue : nil, for: c.id)
             try secrets.setSecret(c.usesSSH ? typedSSHPassword : nil, .sshPassword, for: c.id)
             try secrets.setSecret(c.usesSSH ? typedPassphrase : nil, .sshKeyPassphrase, for: c.id)
+            if let change { try onQueriesFolderChange?(c, change, transfer) }
             try store.save(c)
             config = c
-            return true
+            queriesField.stringValue = c.queriesFolder
+            done()
         } catch {
             setStatus("Couldn't save: \(error)", ok: false)
-            return false
         }
+    }
+
+    /// A folder in the app's Queries folder by its name, any other by its path.
+    private func folderLabel(_ url: URL) -> String {
+        let root = SavedQueries.queriesRoot(dataRoot).standardizedFileURL.path
+        return url.deletingLastPathComponent().standardizedFileURL.path == root
+            ? url.lastPathComponent : (url.path as NSString).abbreviatingWithTildeInPath
     }
 
     // MARK: - Actions
@@ -440,6 +491,22 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         choose(into: pathField, message: "Choose a SQLite database")
     }
 
+    /// A folder in the app's Queries folder is kept by name, any other by its path.
+    @objc private func chooseQueriesFolder(_ sender: Any?) {
+        guard let window else { return }
+        let panel = NSOpenPanel()
+        panel.message = "Choose the folder for this connection's saved queries"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.directoryURL = SavedQueries.directory(root: dataRoot, for: edited()).deletingLastPathComponent()
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let url = panel.url, let self else { return }
+            self.queriesField.stringValue = self.folderLabel(url)
+            self.status.stringValue = ""
+        }
+    }
+
     @objc private func chooseCA(_ sender: Any?) { choose(into: caField, message: "Choose the CA certificate (PEM)") }
     @objc private func chooseCert(_ sender: Any?) { choose(into: certField, message: "Choose the client certificate (PEM)") }
     @objc private func chooseKey(_ sender: Any?) { choose(into: keyField, message: "Choose the client key (PEM)") }
@@ -483,15 +550,17 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         }
     }
 
-    @objc private func saveClicked(_ sender: Any?) {
-        if saveEdits() { close() }
+    @objc func saveClicked(_ sender: Any?) {
+        saveEdits { [weak self] in self?.close() }
     }
 
     /// Connect saves first, so a connection that worked is never lost.
     @objc private func connectClicked(_ sender: Any?) {
         let password = typedPassword
-        guard saveEdits() else { return }
-        onConnect?(config, password)
+        saveEdits { [weak self] in
+            guard let self else { return }
+            self.onConnect?(self.config, password)
+        }
     }
 
     @objc private func cancelClicked(_ sender: Any?) {

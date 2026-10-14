@@ -146,6 +146,142 @@ private func tempDir() -> URL {
 }
 
 @MainActor
+private final class ChangeCounter: NSObject {
+    var own = 0
+    var external = 0
+    @objc func changed(_ note: Notification) {
+        if SavedQueries.isExternal(note) { external += 1 } else { own += 1 }
+    }
+}
+
+@MainActor
+@Suite struct SavedQueriesFolderTests {
+    private func write(_ text: String, _ path: String, in dir: URL) throws {
+        let url = dir.appending(path: path)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(text.utf8).write(to: url)
+    }
+
+    private func files(in dir: URL) -> [String] {
+        SavedQueries.contents(of: dir).queries.map { $0.folder.isEmpty ? $0.url.lastPathComponent : $0.folder + "/" + $0.url.lastPathComponent }.sorted()
+    }
+
+    @Test func directories() {
+        let root = URL(filePath: "/data", directoryHint: .isDirectory)
+        var c = ConnectionConfig(name: "Shop: prod", driver: .postgres)
+        #expect(SavedQueries.directory(root: root, for: c).path == "/data/Queries/Shop- prod")
+        c.queriesFolder = "Shared"
+        #expect(SavedQueries.directory(root: root, for: c).path == "/data/Queries/Shared")
+        c.queriesFolder = "/work/repo/sql/"
+        #expect(SavedQueries.directory(root: root, for: c).path == "/work/repo/sql")
+        c.queriesFolder = "~/sql"
+        #expect(SavedQueries.directory(root: root, for: c).path == NSHomeDirectory() + "/sql")
+        #expect(SavedQueries.defaultFolder(for: ConnectionConfig(driver: .postgres, host: "db")) == "db")
+    }
+
+    @Test func folderChangeCountsQueriesAndOtherUsers() throws {
+        let root = tempDir()
+        let staging = ConnectionConfig(name: "Staging", queriesFolder: "Staging")
+        let twin = ConnectionConfig(name: "Staging 2", queriesFolder: "Staging")
+        let queries = SavedQueries.queriesRoot(root)
+        try write("select 1", "Staging/a.sql", in: queries)
+        try write("select 2", "Staging/Reports/b.sql", in: queries)
+        var moved = staging
+        moved.name = "Staging renamed"
+        #expect(SavedQueries.folderChange(from: staging, to: moved, among: [staging], root: root) == nil)
+        moved.queriesFolder = "Shared"
+        let change = try #require(SavedQueries.folderChange(from: staging, to: moved, among: [staging, twin], root: root))
+        #expect(change.count == 2)
+        #expect(change.sharedWith == ["Staging 2"])
+        #expect(change.destination.lastPathComponent == "Shared")
+        #expect(SavedQueries.folderChange(from: staging, to: moved, among: [staging], root: root)?.sharedWith == [])
+    }
+
+    @Test func moveMergesFoldersAndNumbersTakenNames() throws {
+        let root = tempDir()
+        let source = root.appending(path: "Queries/Staging", directoryHint: .isDirectory)
+        let destination = root.appending(path: "Queries/Shared", directoryHint: .isDirectory)
+        try write("staging top", "top.sql", in: source)
+        try write("staging report", "Reports/report.sql", in: source)
+        try FileManager.default.createDirectory(at: source.appending(path: "Empty"), withIntermediateDirectories: true)
+        try write("shared report", "Reports/report.sql", in: destination)
+        try write("not a query", "notes.txt", in: source)
+
+        let moved = try SavedQueries.transfer(.move, from: source, to: destination, removeSource: true)
+        #expect(files(in: destination) == ["Reports/report 2.sql", "Reports/report.sql", "top.sql"])
+        #expect(SavedQueries.contents(of: destination).folders == ["Empty", "Reports"])
+        #expect(try String(contentsOf: destination.appending(path: "Reports/report.sql"), encoding: .utf8) == "shared report")
+        #expect(try String(contentsOf: destination.appending(path: "Reports/report 2.sql"), encoding: .utf8) == "staging report")
+        #expect(moved == ["top": "top", "Reports/report": "Reports/report 2"])
+        // The emptied folders go; the source stays for the file that isn't a query.
+        #expect(files(in: source).isEmpty)
+        #expect(SavedQueries.contents(of: source).folders.isEmpty)
+        #expect(FileManager.default.fileExists(atPath: source.appending(path: "notes.txt").path))
+    }
+
+    @Test func copyLeavesTheSourceAndAMoveCanRemoveIt() throws {
+        let root = tempDir()
+        let source = root.appending(path: "a", directoryHint: .isDirectory)
+        let destination = root.appending(path: "b", directoryHint: .isDirectory)
+        try write("select 1", "q.sql", in: source)
+        let copied = try SavedQueries.transfer(.copy, from: source, to: destination)
+        #expect(copied.count == 1)
+        #expect(files(in: source) == ["q.sql"] && files(in: destination) == ["q.sql"])
+
+        let other = root.appending(path: "c", directoryHint: .isDirectory)
+        try SavedQueries.transfer(.move, from: source, to: other)
+        #expect(FileManager.default.fileExists(atPath: source.path))
+        try write("select 2", "r.sql", in: source)
+        try SavedQueries.transfer(.move, from: source, to: other, removeSource: true)
+        #expect(!FileManager.default.fileExists(atPath: source.path))
+        #expect(files(in: other) == ["q.sql", "r.sql"])
+    }
+
+    @Test func aDestinationInsideTheSourceIsNotOneOfItsFolders() throws {
+        let source = tempDir()
+        let destination = source.appending(path: "Inner", directoryHint: .isDirectory)
+        try write("select 1", "q.sql", in: source)
+        try write("select 2", "Inner/old.sql", in: source)
+        try SavedQueries.transfer(.move, from: source, to: destination)
+        #expect(files(in: destination) == ["old.sql", "q.sql"])
+    }
+
+    @Test func legacyFoldersAreKept() throws {
+        let root = tempDir()
+        let store = ConnectionStore(fileURL: root.appending(path: "connections.json"))
+        let old = ConnectionConfig(name: "Shop", driver: .postgres)
+        let new = ConnectionConfig(name: "Shop", driver: .mysql)
+        let chosen = ConnectionConfig(name: "Chosen", queriesFolder: "~/elsewhere")
+        for config in [old, new, chosen] { try store.save(config) }
+        let queries = SavedQueries.queriesRoot(root)
+        try write("select 1", "\(old.id.uuidString)/report.sql", in: queries)
+
+        try SavedQueries.adoptLegacyFolders(store: store, root: root)
+        #expect(store.connection(id: old.id)?.queriesFolder == old.id.uuidString)
+        #expect(store.connection(id: new.id)?.queriesFolder == "Shop")
+        #expect(store.connection(id: chosen.id)?.queriesFolder == "~/elsewhere")
+        #expect(files(in: SavedQueries.directory(root: root, for: store.connection(id: old.id)!)) == ["report.sql"])
+        #expect(SavedQueries.contents(of: queries).folders == [old.id.uuidString])
+    }
+
+    @Test func changesOnDiskAreNoticed() async throws {
+        let dir = tempDir()
+        let store = SavedQueries(directory: dir)
+        let counter = ChangeCounter()
+        NotificationCenter.default.addObserver(counter, selector: #selector(ChangeCounter.changed(_:)), name: SavedQueries.didChange, object: store)
+        // Its own writes aren't reported again by the watcher.
+        try store.save("select 1", as: "mine")
+        try await Task.sleep(for: .seconds(1))
+        #expect(counter.own == 1 && counter.external == 0)
+
+        try write("select 2", "Reports/theirs.sql", in: dir)
+        for _ in 0..<50 where counter.external == 0 { try await Task.sleep(for: .milliseconds(100)) }
+        #expect(counter.external == 1)
+        #expect(store.queries.map(\.path) == ["mine", "Reports/theirs"])
+    }
+}
+
+@MainActor
 @Suite struct SchemaCatalogTests {
     @Test func loadsColumnsOnDemand() async throws {
         let db = try SQLiteConnection(path: ":memory:")

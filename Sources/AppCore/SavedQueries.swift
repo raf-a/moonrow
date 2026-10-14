@@ -1,12 +1,17 @@
 import Foundation
 
-/// Queries the user saved by name, per connection: plain `.sql` files in
-/// `Queries/<connection-id>/`, so they can be edited outside the app too. One level of folders
-/// groups them: a folder is a subdirectory, and names are unique within a folder.
+/// Queries the user saved by name: plain `.sql` files in a connection's queries folder
+/// (`ConnectionConfig.queriesFolder`), so they can be edited outside the app too. One level of
+/// folders groups them: a folder is a subdirectory, and names are unique within a folder.
+/// Changes made outside the app are picked up as they happen.
 @MainActor
 public final class SavedQueries {
-    /// Posted (object: the store) after a query is saved, renamed or deleted.
+    /// Posted (object: the store) after a query is saved, renamed or deleted, here or on disk;
+    /// `isExternal` tells them apart.
     public static let didChange = Notification.Name("SavedQueries.didChange")
+
+    /// Whether a `didChange` came from a change made outside the app.
+    public static func isExternal(_ note: Notification) -> Bool { note.userInfo?["external"] as? Bool == true }
 
     public struct Query: Sendable, Hashable {
         public var name: String
@@ -44,39 +49,29 @@ public final class SavedQueries {
     /// Folder names, sorted; empty folders included.
     public private(set) var folders: [String] = []
 
+    private var watcher: DirectoryWatcher?
+
+    /// Creates the directory when it's missing, so it can be watched.
     public init(directory: URL) {
         self.directory = directory
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         reload()
-    }
-
-    /// `<root>/Queries/<id>/`.
-    public static func directory(root: URL, connection id: UUID) -> URL {
-        root.appending(path: "Queries", directoryHint: .isDirectory)
-            .appending(path: id.uuidString, directoryHint: .isDirectory)
+        watcher = DirectoryWatcher(directory) { [weak self] in self?.changedOnDisk() }
     }
 
     public func reload() {
-        let fm = FileManager.default
-        func list(_ dir: URL) -> [URL] {
-            (try? fm.contentsOfDirectory(
-                at: dir, includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey], options: [.skipsHiddenFiles])) ?? []
+        let (folders, files) = Self.contents(of: directory)
+        self.folders = folders
+        self.queries = files.map { folder, url in
+            let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+            return Query(name: url.deletingPathExtension().lastPathComponent, url: url, modified: modified ?? .distantPast, folder: folder)
         }
-        func queries(in dir: URL, folder: String) -> [Query] {
-            list(dir).filter { $0.pathExtension.lowercased() == "sql" }.map { url in
-                let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-                return Query(name: url.deletingPathExtension().lastPathComponent, url: url, modified: modified ?? .distantPast, folder: folder)
+        .sorted { a, b in
+            if a.folder != b.folder {
+                return a.folder.isEmpty || (!b.folder.isEmpty && a.folder.localizedStandardCompare(b.folder) == .orderedAscending)
             }
+            return a.name.localizedStandardCompare(b.name) == .orderedAscending
         }
-        let top = list(directory)
-        folders = top.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true }
-            .map(\.lastPathComponent).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
-        self.queries = (queries(in: directory, folder: "") + folders.flatMap { queries(in: folderURL($0), folder: $0) })
-            .sorted { a, b in
-                if a.folder != b.folder {
-                    return a.folder.isEmpty || (!b.folder.isEmpty && a.folder.localizedStandardCompare(b.folder) == .orderedAscending)
-                }
-                return a.name.localizedStandardCompare(b.name) == .orderedAscending
-            }
     }
 
     private func folderURL(_ folder: String) -> URL {
@@ -187,6 +182,31 @@ public final class SavedQueries {
     private func changed() {
         reload()
         NotificationCenter.default.post(name: Self.didChange, object: self)
+    }
+
+    /// The watcher saw something change. The app's own writes have reloaded already, so they
+    /// change nothing here.
+    private func changedOnDisk() {
+        let before = (queries, folders)
+        reload()
+        guard before != (queries, folders) else { return }
+        NotificationCenter.default.post(name: Self.didChange, object: self, userInfo: ["external": true])
+    }
+
+    /// The folders (sorted) in `directory`, and its queries with the folder each is in ("" at
+    /// the top level).
+    static func contents(of directory: URL) -> (folders: [String], queries: [(folder: String, url: URL)]) {
+        let fm = FileManager.default
+        func list(_ dir: URL) -> [URL] {
+            (try? fm.contentsOfDirectory(
+                at: dir, includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey], options: [.skipsHiddenFiles])) ?? []
+        }
+        func sql(in dir: URL) -> [URL] { list(dir).filter { $0.pathExtension.lowercased() == "sql" } }
+        let folders = list(directory).filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true }
+            .map(\.lastPathComponent).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        let queries = sql(in: directory).map { (folder: "", url: $0) }
+            + folders.flatMap { f in sql(in: directory.appending(path: f, directoryHint: .isDirectory)).map { (folder: f, url: $0) } }
+        return (folders, queries)
     }
 
     /// A file name for a query name: slashes and colons become dashes, leading dots and

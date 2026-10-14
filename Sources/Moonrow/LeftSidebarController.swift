@@ -259,7 +259,15 @@ class SidebarListController: NSViewController, NSTableViewDataSource, NSTableVie
 /// tab of its own; dragging a query onto a folder (or the empty area) files it there.
 @MainActor
 final class SavedQueriesViewController: SidebarListController, NSOutlineViewDataSource, NSOutlineViewDelegate, NSMenuDelegate {
-    let store: SavedQueries
+    /// Replaced when the connection's queries folder changes.
+    var store: SavedQueries {
+        didSet {
+            guard store !== oldValue, isViewLoaded else { return }
+            NotificationCenter.default.removeObserver(self, name: SavedQueries.didChange, object: oldValue)
+            NotificationCenter.default.addObserver(self, selector: #selector(storeChanged), name: SavedQueries.didChange, object: store)
+            reloadList()
+        }
+    }
     var onOpen: ((SavedQueries.Query) -> Void)?
     var onInsert: ((String) -> Void)?
     /// After a rename or move (new value) or delete (nil).
