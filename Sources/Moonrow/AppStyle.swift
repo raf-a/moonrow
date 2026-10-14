@@ -374,15 +374,6 @@ extension NSColor {
     }
 }
 
-/// A list row whose selection is grey whether or not the list has the focus, so coloured names
-/// stay as they are on a selected row.
-final class GreySelectionRowView: NSTableRowView {
-    override var isEmphasized: Bool {
-        get { false }
-        set {}
-    }
-}
-
 /// A staged change as a list shows it: the name in its colour and, when the Mac is set to
 /// differentiate without colour, a letter after it too (A, M, D, as source control marks files).
 enum StagedState {

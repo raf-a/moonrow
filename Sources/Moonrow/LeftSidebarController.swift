@@ -370,30 +370,22 @@ final class SavedQueriesViewController: SidebarListController, NSOutlineViewData
 
     /// Selects the saved query the selected tab shows, its folder expanded, or nothing for any
     /// other tab. Opens nothing.
-    func revealQuery(_ query: SavedQueries.Query?) {
+    func reveal(_ query: SavedQueries.Query?) {
         guard isViewLoaded, renaming == nil else { return }
         if let query, !query.folder.isEmpty, let folder = nodes["f:" + query.folder], !outline.isItemExpanded(folder) {
             outline.expandItem(folder)
         }
-        if let query, let n = nodes["q:" + query.path], outline.row(forItem: n) >= 0 {
-            select(n)
-        } else {
-            isSelectingInCode = true
-            outline.deselectAll(nil)
-            isSelectingInCode = false
-        }
+        let row = query.flatMap { nodes["q:" + $0.path] }.map { outline.row(forItem: $0) }
+        quiet.select(row.flatMap { $0 >= 0 ? $0 : nil }, in: outline)
     }
 
-    /// Selecting from code (a reload, a rename, an undo) opens nothing.
-    private var isSelectingInCode = false
+    /// Selection from code (a reload, a rename, an undo, the selected tab) opens nothing.
+    private let quiet = QuietSelection()
 
     private func select(_ n: Node) {
         let row = outline.row(forItem: n)
         guard row >= 0 else { return }
-        isSelectingInCode = true
-        defer { isSelectingInCode = false }
-        outline.selectRowIndexes([row], byExtendingSelection: false)
-        outline.scrollRowToVisible(row)
+        quiet.select(row, in: outline)
     }
 
     // MARK: - Outline
@@ -424,7 +416,7 @@ final class SavedQueriesViewController: SidebarListController, NSOutlineViewData
 
     /// Selecting a query opens it in the preview tab, so arrow keys browse queries one after another.
     func outlineViewSelectionDidChange(_ notification: Notification) {
-        guard !isSelectingInCode, renaming == nil, let query = item(at: outline.selectedRow)?.query else { return }
+        guard !quiet.isActive, renaming == nil, let query = item(at: outline.selectedRow)?.query else { return }
         onOpen?(query, .preview)
     }
 
@@ -433,54 +425,16 @@ final class SavedQueriesViewController: SidebarListController, NSOutlineViewData
         return n.query?.name ?? n.folder
     }
 
-    /// A query or folder. Its name isn't the cell's `textField`, which the list sets in
-    /// semibold on the selected row.
-    final class QueryCell: NSTableCellView {
-        let label: NSTextField
-
-        init(label: NSTextField) {
-            self.label = label
-            super.init(frame: .zero)
-        }
-
-        @available(*, unavailable)
-        required init?(coder: NSCoder) { fatalError() }
-
-        override func accessibilityLabel() -> String? { label.stringValue }
-    }
-
     func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
         guard let n = item as? Node else { return nil }
         let id = NSUserInterfaceItemIdentifier("Query")
-        let cell = outlineView.makeView(withIdentifier: id, owner: nil) as? QueryCell ?? {
-            let c = QueryCell(label: makeLabel(.systemFont(ofSize: NSFont.systemFontSize)))
-            c.identifier = id
-            let image = NSImageView()
-            image.contentTintColor = .secondaryLabelColor
-            let text = c.label
-            for v in [image, text] {
-                v.translatesAutoresizingMaskIntoConstraints = false
-                c.addSubview(v)
-            }
-            NSLayoutConstraint.activate([
-                image.leadingAnchor.constraint(equalTo: c.leadingAnchor, constant: 2),
-                image.centerYAnchor.constraint(equalTo: c.centerYAnchor),
-                image.widthAnchor.constraint(equalToConstant: 16),
-                text.leadingAnchor.constraint(equalTo: image.trailingAnchor, constant: 6),
-                text.trailingAnchor.constraint(lessThanOrEqualTo: c.trailingAnchor, constant: -4),
-                text.centerYAnchor.constraint(equalTo: c.centerYAnchor),
-            ])
-            c.imageView = image
-            return c
-        }()
+        let cell = outlineView.makeView(withIdentifier: id, owner: nil) as? SidebarCell ?? SidebarCell(identifier: id)
         if let query = n.query {
-            cell.label.stringValue = query.name
-            cell.imageView?.image = NSImage(systemSymbolName: "doc.text", accessibilityDescription: "Saved query")
+            cell.show(query.name, symbol: "doc.text", tint: .secondaryLabelColor, accessibilityDescription: "Saved query")
             cell.toolTip = "Modified \(query.modified.formatted(date: .abbreviated, time: .shortened))"
         } else {
             let count = store.queries(in: n.folder!).count
-            cell.label.stringValue = n.folder!
-            cell.imageView?.image = NSImage(systemSymbolName: "folder", accessibilityDescription: "Folder")
+            cell.show(n.folder!, symbol: "folder", tint: .secondaryLabelColor, accessibilityDescription: "Folder")
             cell.toolTip = count == 1 ? "1 query" : "\(count.formatted()) queries"
         }
         return cell
@@ -531,13 +485,13 @@ final class SavedQueriesViewController: SidebarListController, NSOutlineViewData
                     item.state = folder == query.folder ? .on : .off
                 }
             }
-            add("Show in Finder", #selector(reveal(_:)))
+            add("Show in Finder", #selector(showInFinder(_:)))
             menu.addItem(.separator())
             add("Move to Trash", #selector(moveToTrash(_:)))
             menu.addItem(.separator())
         } else if target?.folder != nil {
             add("Rename", #selector(rename(_:)))
-            add("Show in Finder", #selector(reveal(_:)))
+            add("Show in Finder", #selector(showInFinder(_:)))
             menu.addItem(.separator())
             add("Move to Trash", #selector(moveToTrash(_:)))
             menu.addItem(.separator())
@@ -567,7 +521,7 @@ final class SavedQueriesViewController: SidebarListController, NSOutlineViewData
         onInsert?(text)
     }
 
-    @objc private func reveal(_ sender: Any?) {
+    @objc private func showInFinder(_ sender: Any?) {
         guard let n = target else { return }
         let url = n.query?.url ?? store.url(ofFolder: n.folder ?? "")
         NSWorkspace.shared.activateFileViewerSelecting([url])
@@ -681,7 +635,7 @@ final class SavedQueriesViewController: SidebarListController, NSOutlineViewData
 
     private func beginRename(_ n: Node) {
         let row = outline.row(forItem: n)
-        guard row >= 0, let field = (outline.view(atColumn: 0, row: row, makeIfNecessary: true) as? QueryCell)?.label
+        guard row >= 0, let field = (outline.view(atColumn: 0, row: row, makeIfNecessary: true) as? SidebarCell)?.label
         else { return NSSound.beep() }
         select(n)
         field.isEditable = true

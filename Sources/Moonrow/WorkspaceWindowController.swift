@@ -418,7 +418,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         } else {
             sidebar.reveal(table)
         }
-        leftSidebar.queries.revealQuery(queryController?.savedQuery)
+        leftSidebar.queries.reveal(queryController?.savedQuery)
         revealSearchResult()
         if let object = definitionTab?.object {
             subtitle = "\(object.ref) — \(config.shortSummary)"

@@ -59,7 +59,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     var stagedNameFor: ((TableRef) -> String?)?
     var onOpenNewTable: ((UUID) -> Void)?
     /// Set while the selection follows the open tab, so it doesn't open anything.
-    private var isRevealing = false
+    /// Selection that follows the selected tab, which opens nothing.
+    private let quiet = QuietSelection()
     /// Selected (without opening) once the next list has loaded: Quick Open's choice in another schema.
     var revealAfterReload: TableRef?
     /// A schema to switch to once the schemas have loaded (restoring a session).
@@ -287,10 +288,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     /// Selects these items without opening them (after an undo, say).
     func reveal(_ refs: [TableRef]) {
         let rows = refs.compactMap { r in rowOfItem { !$0.isStaged && $0.object.ref == r } }
-        isRevealing = true
-        defer { isRevealing = false }
-        outline.selectRowIndexes(IndexSet(rows), byExtendingSelection: false)
-        if let first = rows.first { outline.scrollRowToVisible(first) }
+        quiet.select(IndexSet(rows), in: outline)
         view.window?.makeFirstResponder(outline)
     }
 
@@ -303,14 +301,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     }
 
     private func reveal(row: Int?) {
-        isRevealing = true
-        defer { isRevealing = false }
-        if let row {
-            outline.selectRowIndexes([row], byExtendingSelection: false)
-            outline.scrollRowToVisible(row)
-        } else {
-            outline.deselectAll(nil)
-        }
+        quiet.select(row, in: outline)
     }
 
     /// The item a context-menu command applies to: the clicked row, else the selection.
@@ -698,11 +689,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                 return !item.isStaged && item.object == selected.object
             }
         }
-        if !rows.isEmpty {
-            isRevealing = true
-            outline.selectRowIndexes(IndexSet(rows), byExtendingSelection: false)
-            isRevealing = false
-        }
+        if !rows.isEmpty { quiet.select(IndexSet(rows), in: outline, scroll: false) }
         if objects.isEmpty && staged.isEmpty {
             showMessage(schema.map { "“\($0)” has no tables yet." } ?? "This database has no tables yet.")
         } else if groups.isEmpty {
@@ -785,29 +772,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         }
         guard let item = item as? Item else { return nil }
         let id = NSUserInterfaceItemIdentifier("Item")
-        let cell = outlineView.makeView(withIdentifier: id, owner: nil) as? ItemCell ?? {
-            let c = ItemCell()
-            c.identifier = id
-            let image = NSImageView()
-            let text = c.label
-            text.lineBreakMode = .byTruncatingTail
-            for v in [image, text, c.letter] {
-                v.translatesAutoresizingMaskIntoConstraints = false
-                c.addSubview(v)
-            }
-            NSLayoutConstraint.activate([
-                image.leadingAnchor.constraint(equalTo: c.leadingAnchor, constant: 2),
-                image.centerYAnchor.constraint(equalTo: c.centerYAnchor),
-                image.widthAnchor.constraint(equalToConstant: 16),
-                text.leadingAnchor.constraint(equalTo: image.trailingAnchor, constant: 6),
-                text.trailingAnchor.constraint(lessThanOrEqualTo: c.letter.leadingAnchor, constant: -4),
-                text.centerYAnchor.constraint(equalTo: c.centerYAnchor),
-                c.letter.trailingAnchor.constraint(equalTo: c.trailingAnchor, constant: -4),
-                c.letter.centerYAnchor.constraint(equalTo: c.centerYAnchor),
-            ])
-            c.imageView = image
-            return c
-        }()
+        let cell = outlineView.makeView(withIdentifier: id, owner: nil) as? SidebarCell ?? SidebarCell(identifier: id)
         let (symbol, tint): (String, NSColor) = switch item.object.kind {
         case .table: ("tablecells", .systemBlue)
         case .function, .sequence: ("function", .systemOrange)
@@ -846,20 +811,9 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         }
         if item.showsSignature { name = item.object.displayName }
         if item.object.kind.isRoutine, !item.isStaged, tip == nil { tip = item.object.displayName }
-        let font = Self.itemFont(outlineView.effectiveRowSizeStyle)
-        var attributes: [NSAttributedString.Key: Any] = [.font: font]
-        if let state { attributes[.foregroundColor] = state.color }
-        if state == .dropped { attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue }
-        // The field's own colour too: with the label colour it draws vibrant in the sidebar,
-        // which washes out the string's colour.
-        cell.label.textColor = state?.color ?? .labelColor
-        cell.label.attributedStringValue = NSAttributedString(string: name, attributes: attributes)
-        StagedState.show(state, in: cell.letter, size: font.pointSize)
-        cell.state = state
+        cell.show(name, symbol: symbol, tint: tint, accessibilityDescription: item.object.kind.rawValue,
+                  font: Self.itemFont(outlineView.effectiveRowSizeStyle), state: state)
         cell.toolTip = tip
-        cell.imageView?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: item.object.kind.rawValue)
-            ?? NSImage(systemSymbolName: "tablecells", accessibilityDescription: item.object.kind.rawValue)
-        cell.imageView?.contentTintColor = tint
         return cell
     }
 
@@ -875,22 +829,9 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     /// Selecting an item opens it, so arrow keys browse tables one after another. Selecting
     /// several opens nothing.
     func outlineViewSelectionDidChange(_ notification: Notification) {
-        guard !isRevealing, outline.selectedRowIndexes.count == 1,
+        guard !quiet.isActive, outline.selectedRowIndexes.count == 1,
               let item = outline.item(atRow: outline.selectedRow) as? Item else { return }
         open(item, intent: .preview)
-    }
-}
-
-/// A table, view or routine in the list. Its name isn't the cell's `textField`: the list sets the
-/// font of that field, which drops the name's colour and strikethrough.
-final class ItemCell: NSTableCellView {
-    let label = NSTextField(labelWithString: "")
-    /// A, M or D, when the Mac differentiates without colour.
-    let letter = StagedState.makeLetterLabel()
-    var state: StagedState?
-
-    override func accessibilityLabel() -> String? {
-        label.stringValue + (state.map { ", " + $0.spoken } ?? "")
     }
 }
 

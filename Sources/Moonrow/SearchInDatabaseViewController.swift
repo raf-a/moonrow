@@ -230,28 +230,11 @@ final class SearchInDatabaseViewController: NSViewController, NSTableViewDataSou
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let result = results[row]
-        let cell = NSTableCellView()
-        let icon = NSImageView(image: NSImage(systemSymbolName: result.object.kind == .table ? "tablecells" : "eye",
-                                              accessibilityDescription: nil) ?? NSImage())
-        icon.contentTintColor = result.object.kind == .table ? .systemBlue : .systemPurple
-        let name = NSTextField(labelWithString: result.object.ref.name)
-        name.lineBreakMode = .byTruncatingTail
-        name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let count = NSTextField(labelWithString: result.count.formatted())
-        count.textColor = .secondaryLabelColor
-        count.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-        count.setContentHuggingPriority(.required, for: .horizontal)
-        let stack = NSStackView(views: [icon, name, NSView(), count])
-        stack.spacing = 6
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        // Not the cell's `textField`, which the list sets in semibold on the selected row.
-        cell.addSubview(stack)
-        NSLayoutConstraint.activate([
-            icon.widthAnchor.constraint(equalToConstant: 16),
-            stack.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 2),
-            stack.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
-            stack.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-        ])
+        let id = NSUserInterfaceItemIdentifier("Result")
+        let cell = tableView.makeView(withIdentifier: id, owner: nil) as? SidebarCell ?? SidebarCell(identifier: id)
+        let isTable = result.object.kind == .table
+        cell.show(result.object.ref.name, symbol: isTable ? "tablecells" : "eye", tint: isTable ? .systemBlue : .systemPurple,
+                  detail: result.count.formatted())
         return cell
     }
 
@@ -261,8 +244,8 @@ final class SearchInDatabaseViewController: NSViewController, NSTableViewDataSou
         results[row].object.ref.name
     }
 
-    /// Selecting from code opens nothing.
-    private var isSelectingInCode = false
+    /// Selection that follows the selected tab, which opens nothing.
+    private let quiet = QuietSelection()
 
     /// Selects the result the selected tab shows: its table, filtered by the search. Any other
     /// tab clears the selection. Opens nothing.
@@ -271,20 +254,13 @@ final class SearchInDatabaseViewController: NSViewController, NSTableViewDataSou
         let row = request.flatMap { request in
             object.flatMap { o in conditions.contains(request.condition) ? results.firstIndex { $0.object == o } : nil }
         }
-        isSelectingInCode = true
-        defer { isSelectingInCode = false }
-        if let row {
-            list.selectRowIndexes([row], byExtendingSelection: false)
-            list.scrollRowToVisible(row)
-        } else {
-            list.deselectAll(nil)
-        }
+        quiet.select(row, in: list)
     }
 
     /// A click (or arrow key) shows the table's matching rows in the preview tab; the focus stays
     /// in the list, so arrows go through the results.
     func tableViewSelectionDidChange(_ notification: Notification) {
-        guard !isSelectingInCode, list.selectedRow >= 0 else { return }
+        guard !quiet.isActive, list.selectedRow >= 0 else { return }
         open(results[list.selectedRow], intent: .preview)
     }
 

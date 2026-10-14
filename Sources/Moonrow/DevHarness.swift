@@ -733,7 +733,7 @@ enum DevHarness {
         try await press("\u{7F}", code: 51)
         _ = try await waitFor("drop staged") { changes.mark(for: victim.ref) == .dropped ? true : nil }
         try check(undo.undoMenuItemTitle == "Undo Delete Table", "the step is “Delete Table”")
-        let markedCell = outline.view(atColumn: 0, row: outline.selectedRow, makeIfNecessary: true) as? ItemCell
+        let markedCell = outline.view(atColumn: 0, row: outline.selectedRow, makeIfNecessary: true) as? SidebarCell
         try check(markedCell?.accessibilityLabel() == "\(victim.ref.name), deleted", "VoiceOver reads the item as deleted")
         snap("1-marked.png", window)
         try await press("\u{7F}", code: 51)
