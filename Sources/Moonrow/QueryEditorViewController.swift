@@ -154,6 +154,7 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
         ])
 
         addChild(results)
+        results.onFetchAll = { [weak self] result in self?.fetchAll(into: result) }
         split.isVertical = false
         split.dividerStyle = .thin
         split.delegate = self
@@ -374,12 +375,30 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
         }
     }
 
-    private func start(_ statements: [SQLStatementRange]) {
+    /// Fetch All: the result's statement again, without the row limit, into the same result.
+    /// Safe mode asks as for any run; parameters keep the values the statement ran with.
+    func fetchAll(into result: ResultGridController) {
+        guard !isRunning, !isAwaitingApproval else { return NSSound.beep() }
+        let statements = [result.statement]
+        guard environment.safety.requirement(for: statements.map(\.text)) != .none else {
+            return start(statements, fetchingAllInto: result)
+        }
+        isAwaitingApproval = true
+        Task {
+            let approved = await environment.safety.approve(statements.map(\.text))
+            isAwaitingApproval = false
+            if approved { start(statements, fetchingAllInto: result) }
+        }
+    }
+
+    /// Runs `statements` into the results; with `target`, the one statement runs without the row
+    /// limit and its rows replace that result's.
+    private func start(_ statements: [SQLStatementRange], fetchingAllInto target: ResultGridController? = nil) {
         clearErrorHighlight()
         let textAtStart = editor.string
-        let options = ScriptRunner.Options(rowLimit: rowLimit, stopOnError: true)
+        let options = ScriptRunner.Options(rowLimit: target == nil ? rowLimit : nil, stopOnError: true)
         let events = ScriptRunner.run(statements, on: environment.connection, options: options)
-        results.beginRun(statements)
+        if let target { results.beginFetchAll(target) } else { results.beginRun(statements) }
         setRunning(true)
         runTask = Task { [weak self] in
             var current: Int?
@@ -394,10 +413,18 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
                     current = nil
                     self.environment.history.add(.init(sql: statements[i].text, ms: outcome.duration.milliseconds))
                     changedSchema = changedSchema || Self.changesSchema(statements[i].text, self.dialect)
-                case .failed(let i, _, let duration):
+                case .failed(let i, let failure):
                     current = nil
-                    self.environment.history.add(.init(sql: statements[i].text, ms: duration.milliseconds, ok: false))
-                    if self.editor.string == textAtStart { self.highlightError(statements[i].range) }
+                    self.environment.history.add(.init(sql: statements[i].text, ms: failure.duration.milliseconds, ok: false))
+                    guard self.editor.string == textAtStart else { break }
+                    let text = textAtStart as NSString
+                    let range = statements[i].range
+                    if range.upperBound <= text.length, text.substring(with: NSRange(location: range.lowerBound, length: range.count)) == statements[i].text {
+                        self.highlightError(failure.range(in: statements[i], dialect: self.dialect))
+                    } else if target == nil {
+                        // Parameters were filled in: the server's position is in other text.
+                        self.highlightError(range)
+                    }
                 default:
                     break
                 }
@@ -427,6 +454,8 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
 
     // MARK: - Highlights
 
+    /// Underlines what failed (the token the server points at, or the statement) and scrolls it
+    /// into view.
     private func highlightError(_ range: Range<Int>) {
         guard let layout = editor.layoutManager, range.upperBound <= (editor.string as NSString).length else { return }
         let r = NSRange(location: range.lowerBound, length: range.count)
@@ -434,14 +463,20 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
             .underlineStyle: NSUnderlineStyle.thick.rawValue | NSUnderlineStyle.patternDot.rawValue,
             .underlineColor: NSColor.systemRed,
         ], forCharacterRange: r)
+        errorHighlight = r
+        editor.scrollRangeToVisible(r)
     }
 
     private func clearErrorHighlight() {
+        errorHighlight = nil
         guard let layout = editor.layoutManager else { return }
         let all = NSRange(location: 0, length: (editor.string as NSString).length)
         layout.removeTemporaryAttribute(.underlineStyle, forCharacterRange: all)
         layout.removeTemporaryAttribute(.underlineColor, forCharacterRange: all)
     }
+
+    /// For the dev harness: the range underlined after a failed run.
+    private(set) var errorHighlight: NSRange?
 
     /// Tints the statement ⌘↩ would run.
     private func updateStatementHighlight() {

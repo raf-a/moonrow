@@ -42,10 +42,15 @@ public final class QueryLog {
         }
     }
 
+    /// Characters in front of each statement: the time and the duration.
+    public nonisolated static let prefixWidth = 24
+
     /// One line per entry: time, duration, rows or error, then the statement on one line with
-    /// bound values after it (`-- $1 = 'a', $2 = 3`).
-    public nonisolated static func line(_ e: StatementLogEntry, dialect: any Dialect) -> String {
-        var s = time.string(from: e.started) + "  " + duration(e.duration).padding(toLength: 8, withPad: " ", startingAt: 0) + "  "
+    /// bound values after it (`-- $1 = 'a', $2 = 3`). A statement its reader stopped (a row
+    /// limit, a closed tab, the Stop button) reads "Stopped".
+    public nonisolated static func line(_ e: StatementLogEntry, dialect: any Dialect, locale: Locale = .autoupdatingCurrent) -> String {
+        var s = time.string(from: e.started) + "  "
+            + DurationText.string(e.duration, locale: locale).padding(toLength: 8, withPad: " ", startingAt: 0) + "  "
         s += oneLine(e.sql)
         if !e.bindings.isEmpty {
             let values = e.bindings.enumerated().map { "\(dialect.placeholder($0.offset + 1)) = \(dialect.literal($0.element))" }
@@ -54,7 +59,7 @@ public final class QueryLog {
         if e.error == "Cancelled", let rows = e.rows {
             // Stopped by its reader (a row limit, a closed tab) after these rows.
             s += "  -- stopped after \(rows.formatted()) row\(rows == 1 ? "" : "s")"
-        } else if let error = e.error { s += "  -- " + (error == "Cancelled" ? error : "Error: " + oneLine(error)) }
+        } else if let error = e.error { s += "  -- " + (error == "Cancelled" ? "Stopped" : "Error: " + oneLine(error)) }
         else if let rows = e.rows { s += "  -- \(rows.formatted()) row\(rows == 1 ? "" : "s")" }
         return s
     }
@@ -66,12 +71,6 @@ public final class QueryLog {
 
     nonisolated static func oneLine(_ sql: String) -> String {
         sql.split(whereSeparator: \.isWhitespace).joined(separator: " ")
-    }
-
-    nonisolated static func duration(_ d: Duration) -> String {
-        let ms = Double(d.components.seconds) * 1000 + Double(d.components.attoseconds) / 1e15
-        if ms < 10 { return String(format: "%.1f ms", ms) }
-        return ms < 1000 ? String(format: "%.0f ms", ms) : String(format: "%.2f s", ms / 1000)
     }
 
     private nonisolated static let time: DateFormatter = {

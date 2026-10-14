@@ -23,7 +23,7 @@ extension WorkspaceWindowController {
         if let tab = tableTab, !tab.table.name.isEmpty {
             export(DatabaseObject(tab.table, kind: tab.kind))
         } else if let editor = queryController, let result = editor.results.shownResult {
-            presentExport(.result(name: "Result \(result.number)", columns: result.columns.map(\.name), rows: result.rows))
+            presentExport(result.exportSubject)
         } else {
             NSSound.beep()
         }
