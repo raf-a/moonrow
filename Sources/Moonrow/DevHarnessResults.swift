@@ -141,7 +141,10 @@ extension DevHarness {
         try check(!results.statusText.contains("statements"), "the pinned one doesn't: “\(results.statusText)”")
         snap("results-05-pinned.png")
         results.togglePin(nil)
+        // The query was never saved: closing asks, and Delete closes it.
         workspace.closeTab(nil)
+        if let sheet = window.attachedSheet { window.endSheet(sheet, returnCode: .alertSecondButtonReturn) }
+        _ = try await waitFor("query tab closed") { workspace.panes.pane(of: query) == nil ? true : nil }
     }
 
     /// Every label's text under `view`.
