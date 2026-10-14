@@ -191,10 +191,14 @@ final class QueryLogViewController: NSViewController {
         let atEnd = scroll.contentView.bounds.maxY >= text.bounds.maxY - 4
         let new = log.entries.suffix(min(total - written, log.entries.count))
         let out = NSMutableAttributedString()
+        // Long statements wrap under the statement, clear of the time and duration.
+        let font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        let style = NSMutableParagraphStyle()
+        style.headIndent = ("0" as NSString).size(withAttributes: [.font: font]).width * CGFloat(QueryLog.prefixWidth)
         for entry in new {
             let color: NSColor = entry.error == nil ? .labelColor : entry.error == "Cancelled" ? .systemOrange : .systemRed
             out.append(NSAttributedString(string: QueryLog.line(entry, dialect: dialect) + "\n", attributes: [
-                .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular), .foregroundColor: color,
+                .font: font, .foregroundColor: color, .paragraphStyle: style,
             ]))
         }
         storage.append(out)

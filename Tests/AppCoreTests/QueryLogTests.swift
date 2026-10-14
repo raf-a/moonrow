@@ -48,14 +48,15 @@ import Testing
         let started = Date(timeIntervalSince1970: 0)
         var e = StatementLogEntry(sql: "SELECT *\n  FROM t WHERE a = $1", bindings: [.text("x")], started: started,
                                   duration: .milliseconds(4), rows: 1)
-        let line = QueryLog.line(e, dialect: PostgresDialect())
+        let line = QueryLog.line(e, dialect: PostgresDialect(), locale: Locale(identifier: "en_US"))
         #expect(line.hasSuffix("4.0 ms    SELECT * FROM t WHERE a = $1  -- $1 = 'x'  -- 1 row"))
+        #expect(line.distance(from: line.startIndex, to: line.range(of: "SELECT")!.lowerBound) == QueryLog.prefixWidth)
         e.error = "relation \"t\" does not exist"
         e.bindings = []
         #expect(QueryLog.line(e, dialect: PostgresDialect()).hasSuffix(#"-- Error: relation "t" does not exist"#))
         e.error = "Cancelled"
         e.rows = nil
-        #expect(QueryLog.line(e, dialect: PostgresDialect()).hasSuffix("-- Cancelled"))
+        #expect(QueryLog.line(e, dialect: PostgresDialect()).hasSuffix("-- Stopped"))
         e.rows = 300
         #expect(QueryLog.line(e, dialect: PostgresDialect()).hasSuffix("-- stopped after 300 rows"))
     }

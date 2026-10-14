@@ -33,13 +33,42 @@ public enum ScriptRunner {
         public var duration: Duration
     }
 
+    /// How a statement failed.
+    public struct Failure: Sendable, Hashable {
+        /// The error's text; may run over several lines (Postgres' DETAIL and HINT).
+        public var message: String
+        /// Where in the statement's text the error is, as a UTF-16 offset, when the server says.
+        public var position: Int?
+        public var duration: Duration
+
+        public init(message: String, position: Int? = nil, duration: Duration) {
+            self.message = message
+            self.position = position
+            self.duration = duration
+        }
+
+        /// The message's first line.
+        public var headline: String {
+            message.split(whereSeparator: \.isNewline).first.map(String.init) ?? message
+        }
+
+        /// What to mark in the editor, as UTF-16 offsets into its text: the token at the error's
+        /// position (the next one when the position falls between tokens), else the statement.
+        public func range(in statement: SQLStatementRange, dialect: LexerDialect) -> Range<Int> {
+            guard let position, position >= 0, position < statement.text.utf16.count else { return statement.range }
+            let token = SQLLexer(statement.text, dialect: dialect).tokens().first { !$0.kind.isTrivia && $0.range.upperBound > position }
+            guard let local = token?.range else { return statement.range }
+            return (statement.range.lowerBound + local.lowerBound)..<(statement.range.lowerBound + local.upperBound)
+        }
+    }
+
     public enum Event: Sendable {
         case started(index: Int)
         /// The statement returns rows with these columns. Sent once, before any rows.
         case columns(index: Int, [ResultColumn])
         case rows(index: Int, [[DBValue]])
         case finished(index: Int, Outcome)
-        case failed(index: Int, message: String, duration: Duration)
+        case failed(index: Int, Failure)
         /// Every statement ran, or the run stopped at an error. Not sent when cancelled.
         case done
     }
@@ -84,7 +113,9 @@ public enum ScriptRunner {
                             duration: clock.now - start)))
                     } catch {
                         if Task.isCancelled || error is CancellationError { break }
-                        continuation.yield(.failed(index: index, message: message(error), duration: clock.now - start))
+                        let position = (error as? DatabaseError).flatMap { $0.sql == statement.text ? $0.position : nil }
+                        continuation.yield(.failed(index: index, Failure(
+                            message: message(error), position: position, duration: clock.now - start)))
                         if options.stopOnError {
                             continuation.yield(.done)
                             continuation.finish()
@@ -100,7 +131,7 @@ public enum ScriptRunner {
     }
 
     static func message(_ error: any Error) -> String {
-        (error as? DatabaseError)?.message ?? "\(error)"
+        (error as? DatabaseError)?.message ?? error.localizedDescription
     }
 }
 

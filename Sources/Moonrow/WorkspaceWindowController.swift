@@ -368,7 +368,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     }
 
     func tabChanged() {
-        inspector.source = tableTab?.active as? InspectorSource
+        inspector.source = tableTab?.active as? InspectorSource ?? queryController?.results
         let table = tableTab?.table
         let definitionTab = content.current as? DefinitionTabViewController
         if let id = tableTab?.newTableID {

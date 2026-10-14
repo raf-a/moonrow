@@ -153,7 +153,20 @@ struct PGNotice {
         var text = message
         if let detail { text += "\nDETAIL: \(detail)" }
         if let hint { text += "\nHINT: \(hint)" }
-        return DatabaseError(text, state: sqlState, sql: sql)
+        let offset = sql.flatMap { sql in position.flatMap { Self.utf16Offset(ofCharacter: $0, in: sql) } }
+        return DatabaseError(text, state: sqlState, sql: sql, position: offset, detail: detail, hint: hint)
+    }
+
+    /// The server counts characters (code points) from 1; the editor counts UTF-16 units from 0.
+    static func utf16Offset(ofCharacter position: Int, in sql: String) -> Int? {
+        guard position >= 1 else { return nil }
+        var offset = 0
+        var scalars = sql.unicodeScalars.makeIterator()
+        for _ in 1..<position {
+            guard let scalar = scalars.next() else { return nil }
+            offset += scalar.utf16.count
+        }
+        return offset < sql.utf16.count ? offset : nil
     }
 }
 

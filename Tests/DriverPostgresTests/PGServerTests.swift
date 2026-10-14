@@ -135,6 +135,15 @@ struct PGServerTests {
         await #expect { try await db.execute("SELEC 1") } throws: { ($0 as? DatabaseError)?.state == "42601" }
         await #expect { try await db.execute("SELECT 1/0") } throws: { ($0 as? DatabaseError)?.state == "22012" }
         #expect(try await db.execute("SELECT 2").rows == [[.integer(2)]])
+        // The server says where the error is, and adds a hint.
+        await #expect { try await db.execute("SELECT 'é', nope_column") } throws: { error in
+            let e = error as? DatabaseError
+            return e?.position == 12 && e?.state == "42703" && e?.sql == "SELECT 'é', nope_column"
+        }
+        await #expect { try await db.execute("SELECT length(1, 2, 3)") } throws: { error in
+            let e = error as? DatabaseError
+            return e?.position == 7 && e?.hint != nil && e?.message.contains("\nHINT: ") == true
+        }
     }
 
     @Test func streamsLargeResultsInBatches() async throws {

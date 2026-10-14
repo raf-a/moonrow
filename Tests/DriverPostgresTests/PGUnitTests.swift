@@ -62,4 +62,23 @@ import Testing
         #expect(PGSession.rowCount("UPDATE 2") == 2)
         #expect(PGSession.rowCount("CREATE TABLE") == 0)
     }
+
+    /// ErrorResponse's position counts characters from 1; the error carries a UTF-16 offset.
+    @Test func errorFieldsAndPosition() {
+        var body = ByteBuffer()
+        for (code, value) in [("S", "ERROR"), ("C", "42703"), ("M", "column \"nope\" does not exist"), ("H", "Check the name."), ("P", "13")] {
+            body.writeInteger(UInt8(ascii: Unicode.Scalar(code)!))
+            body.writeCString(value)
+        }
+        body.writeInteger(UInt8(0))
+        let sql = "SELECT '😀', nope"
+        let error = PGNotice(body).error(sql: sql)
+        #expect(error.message == "column \"nope\" does not exist\nHINT: Check the name.")
+        #expect(error.hint == "Check the name." && error.detail == nil && error.state == "42703")
+        #expect(error.position == (sql as NSString).range(of: "nope").location)
+        #expect(error.localizedDescription == error.message)
+        #expect(PGNotice.utf16Offset(ofCharacter: 1, in: "x") == 0)
+        #expect(PGNotice.utf16Offset(ofCharacter: 2, in: "x") == nil)
+        #expect(PGNotice.utf16Offset(ofCharacter: 0, in: "x") == nil)
+    }
 }

@@ -25,7 +25,7 @@ private func trace(_ script: String, on db: SQLiteConnection, _ options: ScriptR
         case .rows(let i, let r): rows[i, default: 0] += r.count
         case .finished(let i, let o):
             out.append("finish \(i) rows=\(rows[i] ?? 0)/\(o.rowCount) affected=\(o.rowsAffected.map(String.init) ?? "-")\(o.truncated ? " truncated" : "")")
-        case .failed(let i, let message, _): out.append("fail \(i) \(message)")
+        case .failed(let i, let failure): out.append("fail \(i) \(failure.message)")
         case .done: out.append("done")
         }
     }
@@ -102,6 +102,84 @@ private func trace(_ script: String, on db: SQLiteConnection, _ options: ScriptR
         // The connection is usable afterwards.
         let n = try await db.execute("select count(*) from t")
         #expect(n.rows == [[.integer(1200)]])
+    }
+
+    /// Postgres says where in the statement the error is; the failure carries it as a UTF-16
+    /// offset into the statement's text. MySQL, MariaDB and SQLite don't say.
+    @Test(arguments: Backend.all) func failuresCarryTheErrorPosition(_ backend: Backend) async throws {
+        let f = try await Fixture(backend)
+        defer { Task { await f.tearDown() } }
+        // Two characters outside the BMP before the error: code points and UTF-16 units differ.
+        let script = "select 1 as a;\nselect '😀😀' as s, nope from items"
+        let statements = SQLSplitter.split(script, dialect: f.db.dialect.lexer)
+        var failure: ScriptRunner.Failure?
+        for await event in ScriptRunner.run(statements, on: f.db) {
+            if case .failed(let i, let fail) = event {
+                #expect(i == 1)
+                failure = fail
+            }
+        }
+        let fail = try #require(failure)
+        #expect(!fail.message.isEmpty && !fail.headline.contains("\n"))
+        if backend.kind == .postgres {
+            let text = statements[1].text as NSString
+            #expect(fail.position == text.range(of: "nope").location, "\(fail.position.map(String.init) ?? "nil")")
+        } else {
+            #expect(fail.position == nil)
+        }
+    }
+
+    @Test func failuresMarkTheTokenAtTheirPosition() {
+        let text = "select 1;\nselect a,  nope from t"
+        let statement = SQLSplitter.split(text, dialect: .sqlite)[1]
+        let ns = text as NSString
+        func marked(_ position: Int?) -> String {
+            let r = ScriptRunner.Failure(message: "x", position: position, duration: .zero).range(in: statement, dialect: .sqlite)
+            return ns.substring(with: NSRange(location: r.lowerBound, length: r.count))
+        }
+        #expect(marked(12) == "nope")
+        #expect(marked(13) == "nope")
+        // Between tokens: the next one.
+        #expect(marked(10) == "nope")
+        // Unknown or past the end: the whole statement.
+        #expect(marked(nil) == "select a,  nope from t")
+        #expect(marked(99) == "select a,  nope from t")
+    }
+
+    @Test func sortingIsStableWithNullsFirst() {
+        let rows: [[DBValue]] = [[.text("b")], [.null], [.integer(10)], [.text("2.5")], [.text("a")], [.null], [.double(-1)], [.text("b")]]
+        let up = ResultSort.order(rows, column: 0, ascending: true)
+        #expect(up == [1, 5, 6, 3, 2, 4, 0, 7])
+        let down = ResultSort.order(rows, column: 0, ascending: false)
+        // Reversed, but equal values keep the server's order.
+        #expect(down == [0, 7, 4, 2, 3, 6, 1, 5])
+        #expect(ResultSort.compare(.text("item 2"), .text("item 10")) == .orderedAscending)
+    }
+
+    @Test func summaryCountsTheStatementsThatRan() {
+        let en = Locale(identifier: "en_US")
+        #expect(ScriptRunner.Summary(total: 5, ran: 5, duration: .milliseconds(12)).text(locale: en) == "5 statements · 12 ms")
+        #expect(ScriptRunner.Summary(total: 5, ran: 3, failed: 2, duration: .milliseconds(12)).text(locale: en)
+            == "3 of 5 statements ran · statement 3 failed · 12 ms")
+        #expect(ScriptRunner.Summary(total: 5, ran: 5, failed: 4, duration: .milliseconds(12)).text(locale: en)
+            == "5 statements · statement 5 failed · 12 ms")
+        #expect(ScriptRunner.Summary(total: 4, ran: 2, stopped: true, duration: .seconds(2)).text(locale: en)
+            == "2 of 4 statements ran · stopped · 2.00 s")
+        #expect(ScriptRunner.Summary(total: 1, ran: 1, duration: .microseconds(300)).text(locale: en) == "1 statement · 0.3 ms")
+    }
+
+    @Test func durationsNeverReadZero() {
+        let en = Locale(identifier: "en_US"), fr = Locale(identifier: "fr_FR")
+        #expect(DurationText.string(.microseconds(10), locale: en) == "< 0.1 ms")
+        #expect(DurationText.string(.microseconds(400), locale: en) == "0.4 ms")
+        #expect(DurationText.string(.microseconds(400), locale: fr) == "0,4 ms")
+        #expect(DurationText.string(.milliseconds(4), locale: en) == "4.0 ms")
+        #expect(DurationText.string(.microseconds(9_990), locale: en) == "10 ms")
+        #expect(DurationText.string(.milliseconds(250), locale: en) == "250 ms")
+        #expect(DurationText.string(.milliseconds(1_234), locale: en) == "1.23 s")
+        #expect(DurationText.string(.milliseconds(1_234), locale: fr) == "1,23 s")
+        #expect(DurationText.string(.seconds(65), locale: en) == "1:05")
+        #expect(DurationText.string(.seconds(3_725), locale: en) == "1:02:05")
     }
 
     @Test func selectionPicksStatements() {
