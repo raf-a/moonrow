@@ -3,8 +3,9 @@ import AppKit
 import DBKit
 
 /// Connection ▸ Running Queries…: the server's sessions on a session of the sheet's own, with
-/// Refresh and Kill. Kill stops the selected session's statement; with ⌥ it ends the session.
-/// The workspace's own session is marked. Idle sessions are hidden unless asked for.
+/// Refresh, Stop Query (the selected session's statement ends with an error) and End Session
+/// (the session disconnects). The window's own session is marked. Idle sessions are hidden
+/// unless asked for.
 @MainActor
 final class RunningQueriesSheet: NSWindowController, NSTableViewDataSource, NSTableViewDelegate {
     private let open: () async throws -> any DatabaseConnection
@@ -15,13 +16,13 @@ final class RunningQueriesSheet: NSWindowController, NSTableViewDataSource, NSTa
     private let table = NSTableView()
     private let status = NSTextField(labelWithString: "Connecting…")
     private let showIdle = NSButton(checkboxWithTitle: "Show idle sessions", target: nil, action: nil)
-    private let killButton = NSButton(title: "Kill", target: nil, action: nil)
+    private let stopButton = NSButton(title: "Stop Query", target: nil, action: nil)
+    private let endButton = NSButton(title: "End Session", target: nil, action: nil)
     private let refreshButton = NSButton(title: "Refresh", target: nil, action: nil)
-    private var flagsMonitor: Any?
 
     private static let columns: [(id: String, title: String, width: CGFloat)] = [
-        ("id", "ID", 64), ("user", "User", 90), ("database", "Database", 100), ("client", "Client", 110),
-        ("state", "State", 110), ("time", "Time", 64), ("query", "Query", 360),
+        ("id", "ID", 130), ("user", "User", 90), ("database", "Database", 100), ("client", "Client", 110),
+        ("state", "State", 110), ("time", "Duration", 70), ("query", "Query", 360),
     ]
 
     init(open: @escaping () async throws -> any DatabaseConnection, workspaceID: Int64?) {
@@ -65,12 +66,15 @@ final class RunningQueriesSheet: NSWindowController, NSTableViewDataSource, NSTa
         refreshButton.action = #selector(refresh(_:))
         refreshButton.keyEquivalent = "r"
         refreshButton.keyEquivalentModifierMask = .command
-        killButton.target = self
-        killButton.action = #selector(kill(_:))
-        killButton.toolTip = "Stop the session's statement; with ⌥, end the session"
+        stopButton.target = self
+        stopButton.action = #selector(stopQuery(_:))
+        stopButton.toolTip = "End the selected session’s statement"
+        endButton.target = self
+        endButton.action = #selector(endSession(_:))
+        endButton.toolTip = "Disconnect the selected session"
         let dismiss = NSButton(title: "Done", target: self, action: #selector(dismiss(_:)))
         dismiss.keyEquivalent = "\u{1B}"
-        let bottom = NSStackView(views: [showIdle, status, NSView(), refreshButton, killButton, dismiss])
+        let bottom = NSStackView(views: [showIdle, status, NSView(), refreshButton, stopButton, endButton, dismiss])
         bottom.spacing = 8
 
         let root = NSView()
@@ -89,11 +93,6 @@ final class RunningQueriesSheet: NSWindowController, NSTableViewDataSource, NSTa
         ])
         window?.contentView = root
         updateButtons()
-        // Kill becomes "End Session" while ⌥ is down.
-        flagsMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
-            MainActor.assumeIsolated { self?.updateButtons(option: event.modifierFlags.contains(.option)) }
-            return event
-        }
     }
 
     func begin(on window: NSWindow) {
@@ -138,29 +137,32 @@ final class RunningQueriesSheet: NSWindowController, NSTableViewDataSource, NSTa
 
     private func show(_ error: any Error) {
         status.textColor = .systemRed
-        status.stringValue = (error as? DatabaseError)?.message ?? "\(error)"
+        status.stringValue = error.localizedDescription
         status.toolTip = status.stringValue
     }
 
-    private func updateButtons(option: Bool = NSEvent.modifierFlags.contains(.option)) {
-        killButton.title = option ? "End Session" : "Kill"
-        killButton.isEnabled = connection != nil && table.selectedRow >= 0
+    private func updateButtons() {
+        for b in [stopButton, endButton] { b.isEnabled = connection != nil && table.selectedRow >= 0 }
     }
 
     @objc private func filterChanged(_ sender: Any?) { applyFilter() }
 
     @objc func refresh(_ sender: Any?) { Task { await reload() } }
 
-    @objc private func kill(_ sender: Any?) {
+    @objc private func stopQuery(_ sender: Any?) { confirmKill(terminate: false) }
+
+    @objc private func endSession(_ sender: Any?) { confirmKill(terminate: true) }
+
+    private func confirmKill(terminate: Bool) {
         guard let connection, table.selectedRow >= 0, table.selectedRow < shown.count, let window else { return NSSound.beep() }
         let session = shown[table.selectedRow]
-        let terminate = NSEvent.modifierFlags.contains(.option)
         let alert = NSAlert()
-        alert.messageText = terminate ? "End session \(session.id)?" : "Stop the statement of session \(session.id)?"
-        var info = ServerSessions.killSQL(session.id, terminate: terminate, on: connection)
-        if session.id == workspaceID { info = "This is the workspace's own session.\n" + info }
+        alert.messageText = terminate ? "End session \(session.id)?" : "Stop the query running in session \(session.id)?"
+        var info = terminate ? "The session disconnects and any open transaction is rolled back."
+            : "The statement ends with an error. The session stays connected."
+        if session.id == workspaceID { info = "This is this window’s session. " + info }
         alert.informativeText = info
-        alert.addButton(withTitle: terminate ? "End Session" : "Kill")
+        alert.addButton(withTitle: terminate ? "End Session" : "Stop Query")
         alert.addButton(withTitle: "Cancel")
         alert.buttons[0].hasDestructiveAction = true
         alert.beginSheetModal(for: window) { [weak self] response in
@@ -178,8 +180,6 @@ final class RunningQueriesSheet: NSWindowController, NSTableViewDataSource, NSTa
     }
 
     @objc private func dismiss(_ sender: Any?) {
-        if let flagsMonitor { NSEvent.removeMonitor(flagsMonitor) }
-        flagsMonitor = nil
         if let sheet = window { sheet.sheetParent?.endSheet(sheet) }
         let connection = connection
         self.connection = nil
@@ -194,12 +194,12 @@ final class RunningQueriesSheet: NSWindowController, NSTableViewDataSource, NSTa
         guard let id = tableColumn?.identifier.rawValue else { return nil }
         let s = shown[row]
         let text: String = switch id {
-        case "id": s.id == workspaceID ? "\(s.id) (this)" : String(s.id)
+        case "id": s.id == workspaceID ? "\(s.id) (this window)" : String(s.id)
         case "user": s.user
         case "database": s.database
         case "client": s.client
         case "state": s.state
-        case "time": s.seconds.map { $0 < 60 ? String(format: "%.1f s", $0) : String(format: "%.0f min", $0 / 60) } ?? ""
+        case "time": s.seconds.map(Self.duration) ?? ""
         default: s.query.split(whereSeparator: \.isWhitespace).joined(separator: " ")
         }
         let field = NSTextField(labelWithString: text)
@@ -211,6 +211,12 @@ final class RunningQueriesSheet: NSWindowController, NSTableViewDataSource, NSTa
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) { updateButtons() }
+
+    /// m:ss, or h:mm:ss past an hour.
+    static func duration(_ seconds: Double) -> String {
+        let d = Duration.seconds(max(0, seconds).rounded(.down))
+        return d.formatted(.time(pattern: seconds < 3600 ? .minuteSecond : .hourMinuteSecond))
+    }
 
     // MARK: - For the dev harness
 
