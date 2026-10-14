@@ -132,8 +132,6 @@ public struct ConnectionConfig: Codable, Hashable, Sendable, Identifiable {
     public var tlsCertPath: String
     public var tlsKeyPath: String
     public var readOnly: Bool
-    /// Rows per page in table grids; 0 shows every row.
-    public var rowsPerPage: Int
     /// Servers: reach the database through an SSH server. `host` and `port` are then as that
     /// server sees them (127.0.0.1 is the SSH server itself).
     public var overSSH: Bool
@@ -162,7 +160,7 @@ public struct ConnectionConfig: Codable, Hashable, Sendable, Identifiable {
         filePath: String = "", host: String = "", port: Int? = nil, user: String = "", database: String = "",
         passwordMode: PasswordMode = .keychain, tlsMode: TLSMode? = nil,
         tlsCAPath: String = "", tlsCertPath: String = "", tlsKeyPath: String = "",
-        readOnly: Bool = false, rowsPerPage: Int = Paging.defaultPageSize,
+        readOnly: Bool = false,
         overSSH: Bool = false, sshHost: String = "", sshPort: Int? = nil, sshUser: String = "",
         sshPasswordMode: PasswordMode = .keychain, sshKeyPath: String = "",
         safeMode: SafeMode = .silent, tagID: UUID? = nil, groupID: UUID? = nil, queriesFolder: String = ""
@@ -181,7 +179,6 @@ public struct ConnectionConfig: Codable, Hashable, Sendable, Identifiable {
         self.tlsCertPath = tlsCertPath
         self.tlsKeyPath = tlsKeyPath
         self.readOnly = readOnly
-        self.rowsPerPage = max(0, rowsPerPage)
         self.overSSH = overSSH
         self.sshHost = sshHost
         self.sshPort = sshPort
@@ -196,7 +193,7 @@ public struct ConnectionConfig: Codable, Hashable, Sendable, Identifiable {
 
     private enum CodingKeys: String, CodingKey {
         case id, name, driver, filePath, host, port, user, database, passwordMode
-        case tlsMode, tlsCAPath, tlsCertPath, tlsKeyPath, readOnly, rowsPerPage
+        case tlsMode, tlsCAPath, tlsCertPath, tlsKeyPath, readOnly
         case overSSH, sshHost, sshPort, sshUser, sshPasswordMode, sshKeyPath
         case safeMode, groupID, queriesFolder
         case tagID = "tag"
@@ -219,7 +216,6 @@ public struct ConnectionConfig: Codable, Hashable, Sendable, Identifiable {
         tlsCertPath = try c.decodeIfPresent(String.self, forKey: .tlsCertPath) ?? ""
         tlsKeyPath = try c.decodeIfPresent(String.self, forKey: .tlsKeyPath) ?? ""
         readOnly = try c.decodeIfPresent(Bool.self, forKey: .readOnly) ?? false
-        rowsPerPage = max(0, try c.decodeIfPresent(Int.self, forKey: .rowsPerPage) ?? Paging.defaultPageSize)
         overSSH = try c.decodeIfPresent(Bool.self, forKey: .overSSH) ?? false
         sshHost = try c.decodeIfPresent(String.self, forKey: .sshHost) ?? ""
         sshPort = try c.decodeIfPresent(Int.self, forKey: .sshPort)
@@ -243,9 +239,6 @@ public struct ConnectionConfig: Codable, Hashable, Sendable, Identifiable {
 
     /// Whether connecting goes through SSH (servers only).
     public var usesSSH: Bool { driver.isServer && overSSH }
-
-    /// The grid's page size: nil for every row.
-    public var pageSize: Int? { rowsPerPage > 0 ? rowsPerPage : nil }
 
     public var expandedFilePath: String { (filePath as NSString).expandingTildeInPath }
 

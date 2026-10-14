@@ -261,7 +261,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
             }
         }
         content.add(configure(TableTabViewController(
-            connection: connection, changes: changes, newTable: id, schema: sidebar.schema, pageSize: config.pageSize)))
+            connection: connection, changes: changes, newTable: id, schema: sidebar.schema)))
     }
 
     /// `kept`: the text is kept elsewhere too (history, a saved query), so closing the tab
@@ -615,7 +615,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         } else if let tab = current as? TableTabViewController {
             if let id = tab.newTableID {
                 pane.add(configure(TableTabViewController(
-                    connection: connection, changes: changes, newTable: id, schema: tab.table.schema, pageSize: config.pageSize)))
+                    connection: connection, changes: changes, newTable: id, schema: tab.table.schema)))
             } else if let object = tab.object {
                 pane.add(makeTab(object, mode: tab.mode, preview: false))
             }

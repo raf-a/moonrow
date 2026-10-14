@@ -15,7 +15,6 @@ final class TableTabViewController: NSViewController, ObjectTab, NSMenuItemValid
     private let connection: any DatabaseConnection
     private let changes: StagedChanges
     private let readOnlyConnection: Bool
-    private let pageSize: Int?
     let tabID = UUID()
     var onTabItemChange: (() -> Void)?
     /// A preview tab (italic title) becomes a regular one once it's used: paging, sorting,
@@ -45,13 +44,12 @@ final class TableTabViewController: NSViewController, ObjectTab, NSMenuItemValid
     private var isNewTable: Bool { newTableID != nil }
 
     init(connection: any DatabaseConnection, changes: StagedChanges, object: DatabaseObject, readOnlyConnection: Bool,
-         pageSize: Int?, mode: Mode = .data) {
+         mode: Mode = .data) {
         self.connection = connection
         self.changes = changes
         self.table = object.ref
         self.kind = object.kind
         self.readOnlyConnection = readOnlyConnection
-        self.pageSize = pageSize
         self.mode = mode
         super.init(nibName: nil, bundle: nil)
         lastMark = changes.mark(for: table)
@@ -67,13 +65,12 @@ final class TableTabViewController: NSViewController, ObjectTab, NSMenuItemValid
     }
 
     /// A tab for a staged new table; it becomes a regular table tab once committed.
-    init(connection: any DatabaseConnection, changes: StagedChanges, newTable id: UUID, schema: String?, pageSize: Int?) {
+    init(connection: any DatabaseConnection, changes: StagedChanges, newTable id: UUID, schema: String?) {
         self.connection = connection
         self.changes = changes
         self.table = TableRef(schema: schema, changes.newTable(id)?.name ?? "")
         self.kind = .table
         self.readOnlyConnection = false
-        self.pageSize = pageSize
         self.mode = .structure
         self.newTableID = id
         super.init(nibName: nil, bundle: nil)
@@ -143,7 +140,7 @@ final class TableTabViewController: NSViewController, ObjectTab, NSMenuItemValid
             if data == nil {
                 let d = TableDataViewController(
                     connection: connection, changes: changes, object: DatabaseObject(table, kind: kind),
-                    readOnlyConnection: readOnlyConnection, pageSize: pageSize)
+                    readOnlyConnection: readOnlyConnection)
                 d.leadingAccessory = makeSwitch()
                 d.safety = safety
                 d.columnLayouts = columnLayouts

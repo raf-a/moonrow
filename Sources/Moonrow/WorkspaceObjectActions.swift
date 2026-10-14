@@ -333,7 +333,7 @@ extension WorkspaceWindowController {
         let mode = mode == .definition && !(object.kind == .view || object.kind == .materializedView) ? .data : mode
         let tab = configure(TableTabViewController(
             connection: connection, changes: changes, object: object, readOnlyConnection: config.readOnly,
-            pageSize: config.pageSize, mode: mode))
+            mode: mode))
         tab.isPreview = preview
         return tab
     }

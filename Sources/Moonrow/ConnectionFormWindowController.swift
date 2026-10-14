@@ -42,7 +42,6 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
     private let safeModePopup = NSPopUpButton()
     private let safeModeHint = NSTextField(wrappingLabelWithString: "")
     private let readOnlyBox = NSButton(checkboxWithTitle: "Read-only", target: nil, action: nil)
-    private let pageSizeField = NSTextField()
     let queriesField = NSTextField()
     private let sshBox = NSButton(checkboxWithTitle: "Connect through an SSH server", target: nil, action: nil)
     private let sshHostField = NSTextField()
@@ -174,7 +173,6 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
             ("Safe mode", safeModePopup, .both),
             ("", safeModeHint, .both),
             ("", readOnlyBox, .both),
-            ("Rows per page", pageSizeRow(), .both),
             ("Queries folder", row(queriesField, button("Choose…", #selector(chooseQueriesFolder(_:)))), .both),
         ]
         for (i, (title, view, kind)) in rows.enumerated() {
@@ -235,16 +233,6 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         NSButton(title: title, target: self, action: action)
     }
 
-    private func pageSizeRow() -> NSView {
-        pageSizeField.placeholderString = "All"
-        pageSizeField.alignment = .right
-        pageSizeField.widthAnchor.constraint(equalToConstant: 80).isActive = true
-        let hint = NSTextField(labelWithString: "Empty or 0 shows every row")
-        hint.textColor = .secondaryLabelColor
-        hint.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        return row(pageSizeField, hint)
-    }
-
     /// Shows the fields the driver uses and fits the window to them.
     private func layoutForDriver() {
         let d = driver
@@ -295,7 +283,6 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         safeModePopup.selectItem(at: SafeMode.allCases.firstIndex(of: c.safeMode) ?? 0)
         safeModeHint.stringValue = c.safeMode.detail
         readOnlyBox.state = c.readOnly ? .on : .off
-        pageSizeField.stringValue = c.rowsPerPage > 0 ? String(c.rowsPerPage) : ""
         queriesField.stringValue = c.queriesFolder
         sshBox.state = c.overSSH ? .on : .off
         sshHostField.stringValue = c.sshHost
@@ -331,7 +318,6 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         c.tagID = tagID
         c.safeMode = SafeMode.allCases[max(0, safeModePopup.indexOfSelectedItem)]
         c.readOnly = readOnlyBox.state == .on
-        c.rowsPerPage = Int(pageSizeField.stringValue.filter(\.isNumber)) ?? 0
         c.overSSH = sshBox.state == .on
         c.sshHost = text(sshHostField)
         c.sshPort = Int(text(sshPortField))

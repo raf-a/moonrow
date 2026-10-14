@@ -62,14 +62,14 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
     private static let copyLimit = 100_000
 
     init(connection: any DatabaseConnection, changes: StagedChanges, object: DatabaseObject,
-         readOnlyConnection: Bool, pageSize: Int?) {
+         readOnlyConnection: Bool) {
         self.connection = connection
         self.changes = changes
         self.table = object.ref
         self.kind = object.kind
         self.readOnlyReason = readOnlyConnection ? "The connection is read-only."
             : object.kind == .table ? nil : "Only tables can be edited."
-        self.query = GridQuery(page: Paging(pageSize: pageSize))
+        self.query = GridQuery(page: Paging())
         super.init(nibName: nil, bundle: nil)
         NotificationCenter.default.addObserver(
             self, selector: #selector(stagedChangesChanged), name: StagedChanges.didChange, object: changes)
