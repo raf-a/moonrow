@@ -33,7 +33,8 @@ extension WorkspaceWindowController {
             return .table(object, isPreview: routine.isPreview)
         }
         if let query = tab as? QueryEditorViewController {
-            return .query(text: query.editor.string, savedQuery: query.savedQuery?.path, file: query.fileURL?.path)
+            return .query(text: query.editor.string, savedQuery: query.savedQuery?.path, file: query.fileURL?.path,
+                          isPreview: query.isPreview)
         }
         return nil
     }
@@ -53,7 +54,7 @@ extension WorkspaceWindowController {
                 case .query:
                     if let name = tab.savedQuery, let query = environment.savedQueries.query(path: name),
                        let text = try? environment.savedQueries.text(of: query) {
-                        newQuery(text: text, saved: query)
+                        newQuery(text: text, saved: query).isPreview = tab.isPreview
                     } else {
                         // A file's tab comes back with its text as it was, edits included.
                         newQuery(text: tab.text ?? "", file: tab.file.map { URL(filePath: $0) })

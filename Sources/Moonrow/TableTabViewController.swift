@@ -245,7 +245,7 @@ final class TableTabViewController: NSViewController, ObjectTab, NSMenuItemValid
     // MARK: - WorkspaceTab
 
     var tabItem: TabStrip.Item {
-        let symbol = isNewTable ? "plus.rectangle" : kind == .table ? "tablecells" : DefinitionKind(kind)?.symbol ?? "eye"
+        let symbol = kind == .table ? "tablecells" : DefinitionKind(kind)?.symbol ?? "eye"
         let staged = newTableID.flatMap { changes.newTable($0)?.name }
         let title = isNewTable ? staged.map { $0.isEmpty ? "New table" : $0 } ?? "New table" : table.name
         let tip = isPreview ? "\(table) — preview tab; double-click to keep it" : table.description

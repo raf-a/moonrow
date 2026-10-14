@@ -212,6 +212,19 @@ extension DevHarness {
         print("ok: the tab shows the \(hit.count) rows the list counted")
         _ = try await waitFor("the rows drawn") { filtered.cache.flatMap { visibleLoaded(filtered.grid, $0) ? true : nil } }
         snap("objects-08-hit.png", window)
+        // The list follows the selected tab: another tab clears the selection, the hit's tab
+        // brings it back, and neither opens anything.
+        try check(search.list.selectedRow == hitRow, "the clicked result stays selected")
+        let hitTab = try require(workspace.content.current, "the hit's tab")
+        let tabCount = workspace.content.tabs.count
+        workspace.newQueryTab(nil)
+        try check(search.list.selectedRow == -1, "a query tab clears the result's selection")
+        let queryTab = try require(workspace.content.current, "query tab")
+        workspace.content.select(try require(workspace.content.index(of: hitTab), "the hit's tab index"))
+        try check(search.list.selectedRow == hitRow && workspace.content.tabs.count == tabCount + 1,
+                  "the hit's tab selects its result again, opening nothing")
+        workspace.content.close(try require(workspace.content.index(of: queryTab), "query tab index"))
+        workspace.content.select(try require(workspace.content.index(of: hitTab), "the hit's tab index"))
 
         // MARK: Diagram
         workspace.showDiagram(nil)

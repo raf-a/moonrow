@@ -232,6 +232,7 @@ class SidebarListController: NSViewController, NSTableViewDataSource, NSTableVie
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int { 0 }
+    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? { GreySelectionRowView() }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? { nil }
     @objc private func searchChanged(_ sender: Any?) { reloadList() }
     func reloadList() {}
@@ -255,8 +256,9 @@ class SidebarListController: NSViewController, NSTableViewDataSource, NSTableVie
     }
 }
 
-/// Saved queries, in folders (one level) then those in no folder. Double-click or Return opens
-/// one in a tab of its own; dragging a query onto a folder (or the empty area) files it there.
+/// Saved queries, in folders (one level) then those in no folder. A click opens one in the pane's
+/// preview tab, as tables open; double-click or Return opens it in a tab of its own. Dragging a
+/// query onto a folder (or the empty area) files it there.
 /// Renaming happens in the row; Delete moves to the Trash. The pane has its own undo.
 @MainActor
 final class SavedQueriesViewController: SidebarListController, NSOutlineViewDataSource, NSOutlineViewDelegate,
@@ -273,7 +275,7 @@ final class SavedQueriesViewController: SidebarListController, NSOutlineViewData
             reloadList()
         }
     }
-    var onOpen: ((SavedQueries.Query) -> Void)?
+    var onOpen: ((SavedQueries.Query, TabPlacement.Intent) -> Void)?
     var onInsert: ((String) -> Void)?
     /// After a rename or move (new value) or a move to the Trash (nil).
     var onChange: ((SavedQueries.Query, SavedQueries.Query?) -> Void)?
@@ -366,9 +368,30 @@ final class SavedQueriesViewController: SidebarListController, NSOutlineViewData
 
     private func key(_ n: Node) -> String { n.query.map { "q:" + $0.path } ?? "f:" + (n.folder ?? "") }
 
+    /// Selects the saved query the selected tab shows, its folder expanded, or nothing for any
+    /// other tab. Opens nothing.
+    func revealQuery(_ query: SavedQueries.Query?) {
+        guard isViewLoaded, renaming == nil else { return }
+        if let query, !query.folder.isEmpty, let folder = nodes["f:" + query.folder], !outline.isItemExpanded(folder) {
+            outline.expandItem(folder)
+        }
+        if let query, let n = nodes["q:" + query.path], outline.row(forItem: n) >= 0 {
+            select(n)
+        } else {
+            isSelectingInCode = true
+            outline.deselectAll(nil)
+            isSelectingInCode = false
+        }
+    }
+
+    /// Selecting from code (a reload, a rename, an undo) opens nothing.
+    private var isSelectingInCode = false
+
     private func select(_ n: Node) {
         let row = outline.row(forItem: n)
         guard row >= 0 else { return }
+        isSelectingInCode = true
+        defer { isSelectingInCode = false }
         outline.selectRowIndexes([row], byExtendingSelection: false)
         outline.scrollRowToVisible(row)
     }
@@ -397,15 +420,44 @@ final class SavedQueriesViewController: SidebarListController, NSOutlineViewData
         if let n = notification.userInfo?["NSObject"] as? Node, let f = n.folder { collapsed.remove(f) }
     }
 
+    func outlineView(_ outlineView: NSOutlineView, rowViewForItem item: Any) -> NSTableRowView? { GreySelectionRowView() }
+
+    /// Selecting a query opens it in the preview tab, so arrow keys browse queries one after another.
+    func outlineViewSelectionDidChange(_ notification: Notification) {
+        guard !isSelectingInCode, renaming == nil, let query = item(at: outline.selectedRow)?.query else { return }
+        onOpen?(query, .preview)
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, typeSelectStringFor tableColumn: NSTableColumn?, item: Any) -> String? {
+        guard let n = item as? Node else { return nil }
+        return n.query?.name ?? n.folder
+    }
+
+    /// A query or folder. Its name isn't the cell's `textField`, which the list sets in
+    /// semibold on the selected row.
+    final class QueryCell: NSTableCellView {
+        let label: NSTextField
+
+        init(label: NSTextField) {
+            self.label = label
+            super.init(frame: .zero)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { fatalError() }
+
+        override func accessibilityLabel() -> String? { label.stringValue }
+    }
+
     func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
         guard let n = item as? Node else { return nil }
         let id = NSUserInterfaceItemIdentifier("Query")
-        let cell = outlineView.makeView(withIdentifier: id, owner: nil) as? NSTableCellView ?? {
-            let c = NSTableCellView()
+        let cell = outlineView.makeView(withIdentifier: id, owner: nil) as? QueryCell ?? {
+            let c = QueryCell(label: makeLabel(.systemFont(ofSize: NSFont.systemFontSize)))
             c.identifier = id
             let image = NSImageView()
             image.contentTintColor = .secondaryLabelColor
-            let text = makeLabel(.systemFont(ofSize: NSFont.systemFontSize))
+            let text = c.label
             for v in [image, text] {
                 v.translatesAutoresizingMaskIntoConstraints = false
                 c.addSubview(v)
@@ -418,17 +470,16 @@ final class SavedQueriesViewController: SidebarListController, NSOutlineViewData
                 text.trailingAnchor.constraint(lessThanOrEqualTo: c.trailingAnchor, constant: -4),
                 text.centerYAnchor.constraint(equalTo: c.centerYAnchor),
             ])
-            c.textField = text
             c.imageView = image
             return c
         }()
         if let query = n.query {
-            cell.textField?.stringValue = query.name
+            cell.label.stringValue = query.name
             cell.imageView?.image = NSImage(systemSymbolName: "doc.text", accessibilityDescription: "Saved query")
             cell.toolTip = "Modified \(query.modified.formatted(date: .abbreviated, time: .shortened))"
         } else {
             let count = store.queries(in: n.folder!).count
-            cell.textField?.stringValue = n.folder!
+            cell.label.stringValue = n.folder!
             cell.imageView?.image = NSImage(systemSymbolName: "folder", accessibilityDescription: "Folder")
             cell.toolTip = count == 1 ? "1 query" : "\(count.formatted()) queries"
         }
@@ -446,12 +497,12 @@ final class SavedQueriesViewController: SidebarListController, NSOutlineViewData
 
     override func doubleClicked(_ sender: Any?) {
         guard let n = item(at: outline.clickedRow) else { return }
-        if let query = n.query { onOpen?(query) } else { toggle(n) }
+        if let query = n.query { onOpen?(query, .regular) } else { toggle(n) }
     }
 
     private func openSelected() {
         guard let n = item(at: outline.selectedRow) else { return NSSound.beep() }
-        if let query = n.query { onOpen?(query) } else { toggle(n) }
+        if let query = n.query { onOpen?(query, .regular) } else { toggle(n) }
     }
 
     private func toggle(_ n: Node) {
@@ -508,7 +559,7 @@ final class SavedQueriesViewController: SidebarListController, NSOutlineViewData
     }
 
     @objc private func open(_ sender: Any?) {
-        if let query = target?.query { onOpen?(query) }
+        if let query = target?.query { onOpen?(query, .regular) }
     }
 
     @objc private func insert(_ sender: Any?) {
@@ -630,7 +681,7 @@ final class SavedQueriesViewController: SidebarListController, NSOutlineViewData
 
     private func beginRename(_ n: Node) {
         let row = outline.row(forItem: n)
-        guard row >= 0, let field = (outline.view(atColumn: 0, row: row, makeIfNecessary: true) as? NSTableCellView)?.textField
+        guard row >= 0, let field = (outline.view(atColumn: 0, row: row, makeIfNecessary: true) as? QueryCell)?.label
         else { return NSSound.beep() }
         select(n)
         field.isEditable = true
@@ -716,6 +767,18 @@ final class SavedQueriesViewController: SidebarListController, NSOutlineViewData
         guard let n = nodes[key] else { return false }
         select(n)
         return outline.selectedRow >= 0
+    }
+
+    /// The path of the selected query, if a query is selected.
+    var selectedQueryPath: String? { item(at: outline.selectedRow)?.query?.path }
+
+    /// Selects a query's row as a click does, which opens it.
+    func clickRow(_ path: String) -> Bool {
+        guard let n = nodes["q:" + path] else { return false }
+        let row = outline.row(forItem: n)
+        guard row >= 0 else { return false }
+        outline.selectRowIndexes([row], byExtendingSelection: false)
+        return true
     }
 
     /// The text field of the row being renamed.

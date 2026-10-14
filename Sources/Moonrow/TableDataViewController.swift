@@ -572,6 +572,8 @@ final class TableDataViewController: NSViewController, NSTableViewDataSource, NS
 
     /// Conditions waiting for the columns to load.
     private var pendingConditions: (conditions: [FilterCondition], focus: Bool)?
+    /// The filter conditions checked, or those waiting for the table to load.
+    var shownConditions: [FilterCondition] { pendingConditions?.conditions ?? filterBar.checkedConditions }
 
     /// Shows the rows matching every condition (Search in Database's results), in the filter
     /// bar. `focus` moves the keyboard focus to the grid.

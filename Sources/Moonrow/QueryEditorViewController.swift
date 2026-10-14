@@ -102,6 +102,13 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
 
     var onTabItemChange: (() -> Void)?
     let tabID = UUID()
+    /// A saved query opened by a single click. Typing, running or the file going keeps the tab;
+    /// until then the text is the file's, so the next single click can replace it.
+    var isPreview = false {
+        didSet { if isPreview != oldValue { onTabItemChange?() } }
+    }
+    /// The text is being replaced by the file's, not edited.
+    private var isReloadingFromDisk = false
     /// After the text changes (the workspace saves its session).
     var onEdit: (() -> Void)?
 
@@ -330,8 +337,9 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
     /// Saved queries and files show a document with text; a query saved nowhere, an empty one.
     var tabItem: TabStrip.Item {
         if let url = savedQuery?.url ?? fileURL {
-            return TabStrip.Item(title: savedQuery?.name ?? url.lastPathComponent, symbol: "doc.text",
-                                 toolTip: (url.path as NSString).abbreviatingWithTildeInPath,
+            let title = savedQuery?.name ?? url.lastPathComponent
+            let tip = isPreview ? "\(title) — preview tab; double-click to keep it" : (url.path as NSString).abbreviatingWithTildeInPath
+            return TabStrip.Item(title: title, symbol: "doc.text", toolTip: tip, italic: isPreview,
                                  isEdited: isEdited, background: AppStyle.colors.background)
         }
         return TabStrip.Item(title: formerName ?? "Query \(number)", symbol: "doc", toolTip: "Not saved",
@@ -442,6 +450,7 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
         guard !isRunning, !isAwaitingApproval else { return NSSound.beep() }
         guard !statements.isEmpty else { return NSSound.beep() }
         completion.hide()
+        isPreview = false
         withParameters(statements) { [weak self] in self?.approve($0) }
     }
 
@@ -616,7 +625,10 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
         clearErrorHighlight()
         updatePosition()
         updateStatementHighlight()
-        if savedQuery != nil { scheduleAutosave() }
+        if savedQuery != nil, !isReloadingFromDisk {
+            isPreview = false
+            scheduleAutosave()
+        }
         if isEdited != shownEdited {
             shownEdited = isEdited
             onTabItemChange?()
@@ -775,6 +787,8 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
     func savedQueryChanged(to query: SavedQueries.Query?) {
         if query == nil, let savedQuery { formerName = savedQuery.name }
         savedQuery = query
+        // Its text is now kept nowhere else.
+        if query == nil { isPreview = false }
         shownEdited = isEdited
         onTabItemChange?()
     }
@@ -788,8 +802,10 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
         let selection = editor.selectedRange()
         guard editor.shouldChangeText(in: all, replacementString: text) else { return }
         editor.textStorage?.replaceCharacters(in: all, with: text)
+        // The text is the file's: nothing to write back, and a preview stays one.
+        isReloadingFromDisk = true
         editor.didChangeText()
-        // The text is the file's: nothing to write back.
+        isReloadingFromDisk = false
         autosaveTask?.cancel()
         isDirty = false
         let length = (text as NSString).length

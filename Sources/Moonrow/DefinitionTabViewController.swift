@@ -89,7 +89,9 @@ final class DefinitionTabViewController: NSViewController, ObjectTab {
 
     override func loadView() {
         icon.image = NSImage(systemSymbolName: kind.symbol, accessibilityDescription: kind.title)
-        icon.contentTintColor = newDefinitionID == nil ? .systemOrange : .systemGreen
+        icon.contentTintColor = .systemOrange
+        // A new object's name is green, as in the sidebar; the icon keeps its colour.
+        if newDefinitionID != nil { titleLabel.textColor = .stagedNew }
         titleLabel.font = .systemFont(ofSize: 12, weight: .medium)
         titleLabel.lineBreakMode = .byTruncatingMiddle
         titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -143,7 +145,7 @@ final class DefinitionTabViewController: NSViewController, ObjectTab {
     // MARK: - ObjectTab
 
     var tabItem: TabStrip.Item {
-        let symbol = newDefinitionID == nil ? kind.symbol : "plus.rectangle"
+        let symbol = kind.symbol
         let tip = isPreview ? "\(name) — preview tab; double-click to keep it" : databaseObject.map {
             ($0.ref.schema.map { $0 + "." } ?? "") + $0.displayName
         } ?? "New \(kind.title), created on Commit"

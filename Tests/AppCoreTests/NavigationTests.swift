@@ -58,6 +58,17 @@ private func table(_ name: String, schema: String? = nil) -> DatabaseObject {
         #expect(TabPlacement.place(users, intent: .preview, in: tabs, selected: 1) == .insert(at: 2, preview: true))
     }
 
+    @Test func savedQueriesShareThePreviewTabWithTables() {
+        let tabs = [Tab(object: users), Tab(object: orders, isPreview: true)]
+        #expect(TabPlacement.place(savedQuery: "a.sql", intent: .preview, in: tabs, selected: 0) == .replacePreview(1))
+        let withQuery = [Tab(object: nil, savedQuery: "a.sql", isPreview: true), Tab(object: nil, savedQuery: "b.sql")]
+        #expect(TabPlacement.place(savedQuery: "a.sql", intent: .preview, in: withQuery, selected: 1) == .select(0))
+        #expect(TabPlacement.place(savedQuery: "a.sql", intent: .regular, in: withQuery, selected: 1) == .promote(0))
+        #expect(TabPlacement.place(savedQuery: "b.sql", intent: .preview, in: withQuery, selected: 0) == .select(1))
+        #expect(TabPlacement.place(items, intent: .preview, in: withQuery, selected: 1) == .replacePreview(0))
+        #expect(TabPlacement.place(savedQuery: "c.sql", intent: .regular, in: withQuery, selected: 1) == .insert(at: 2, preview: false))
+    }
+
     @Test func sameNameInAnotherSchemaIsAnotherObject() {
         let tabs = [Tab(object: table("users", schema: "a"))]
         #expect(TabPlacement.place(table("users", schema: "b"), intent: .preview, in: tabs, selected: 0)

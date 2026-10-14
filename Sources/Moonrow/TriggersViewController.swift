@@ -53,6 +53,8 @@ final class TriggersViewController: NSViewController, NSTableViewDataSource, NST
         list.rowHeight = 34
         list.dataSource = self
         list.delegate = self
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(displayOptionsChanged),
+                                                          name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
         list.target = self
         let scroll = NSScrollView()
         scroll.documentView = list
@@ -178,33 +180,50 @@ final class TriggersViewController: NSViewController, NSTableViewDataSource, NST
 
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
 
+    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? { GreySelectionRowView() }
+
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let r = rows[row]
-        let cell = NSTableCellView()
+        let cell = TriggerCell()
         let name = NSTextField(labelWithString: r.name)
         let detail = NSTextField(labelWithString: r.detail)
         detail.font = .systemFont(ofSize: 10)
         detail.textColor = .secondaryLabelColor
-        var attributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 12)]
+        var state: StagedState?
         if r.newID != nil {
-            attributes[.foregroundColor] = NSColor.systemGreen
+            state = .new
         } else if let object = r.object, let staged = changes.definition(for: object) {
-            attributes[.foregroundColor] = staged.isDropped ? NSColor.systemRed : NSColor.systemOrange
-            if staged.isDropped { attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue }
+            state = staged.isDropped ? .dropped : .edited
         }
+        var attributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 12)]
+        if let state { attributes[.foregroundColor] = state.color }
+        if state == .dropped { attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue }
         name.attributedStringValue = NSAttributedString(string: r.name, attributes: attributes)
+        let letter = StagedState.makeLetterLabel()
+        StagedState.show(state, in: letter, size: 12)
+        cell.spoken = r.name + (state.map { ", " + $0.spoken } ?? "")
         let stack = NSStackView(views: [name, detail])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 1
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        cell.addSubview(stack)
+        for v in [stack, letter] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            cell.addSubview(v)
+        }
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 6),
-            stack.trailingAnchor.constraint(lessThanOrEqualTo: cell.trailingAnchor, constant: -4),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: letter.leadingAnchor, constant: -4),
             stack.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+            letter.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -6),
+            letter.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
         ])
         return cell
+    }
+
+    /// Differentiate without colour was switched: the state letters show or hide.
+    @objc private func displayOptionsChanged() {
+        guard isViewLoaded else { return }
+        list.reloadData(forRowIndexes: IndexSet(rows.indices), columnIndexes: [0])
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
@@ -283,4 +302,10 @@ final class TriggersViewController: NSViewController, NSTableViewDataSource, NST
         }
         editor?.reload()
     }
+}
+
+/// A trigger in the list; VoiceOver reads its name and staged state.
+private final class TriggerCell: NSTableCellView {
+    var spoken = ""
+    override func accessibilityLabel() -> String? { spoken }
 }

@@ -147,6 +147,9 @@ enum DevHarness {
         }
         // `MOONROW_SHOW=Sample:users,events,?;Other` opens saved connections by name and, in each,
         // the tables listed (`?` is a query tab), then leaves the app running to be looked at.
+        // `-users` marks a table for deletion, `~users` truncates it and `+` adds a new table, all
+        // staged; `=users` selects it in the list, `#report` a saved query in the Queries pane, and
+        // `/text` searches the database for text and clicks the first result.
         // With `MOONROW_SNAPSHOTS` it renders the windows instead and quits.
         if let spec = env["MOONROW_SHOW"] {
             Task {
@@ -376,6 +379,36 @@ enum DevHarness {
             for name in fields.count > 1 ? fields[1].split(separator: ",").map(String.init) : [] {
                 if name == "?" {
                     workspace.newQueryTab(nil)
+                } else if name == "+" {
+                    workspace.newTable(nil)
+                } else if name.hasPrefix("/") {
+                    _ = try await waitFor("tables") { workspace.environment.catalog.objects.isEmpty ? nil : true }
+                    workspace.searchInDatabase(nil)
+                    let search = workspace.leftSidebar.search
+                    search.field.stringValue = String(name.dropFirst())
+                    search.start(nil)
+                    _ = try await waitFor("search results") { !search.isSearching && !search.results.isEmpty ? true : nil }
+                    search.list.selectRowIndexes([0], byExtendingSelection: false)
+                } else if name.hasPrefix("#") {
+                    workspace.leftSidebar.show(.queries)
+                    guard workspace.leftSidebar.queries.selectRow(String(name.dropFirst())) else {
+                        throw HarnessError("no saved query \(name.dropFirst())")
+                    }
+                } else if let mark = name.first, "-~=".contains(mark) {
+                    let object = try await waitFor("table \(name)") { workspace.sidebar.object(named: String(name.dropFirst())) }
+                    switch mark {
+                    case "-":
+                        var deletion = SidebarViewController.Deletion()
+                        deletion.objects = [object]
+                        workspace.markForDeletion(deletion)
+                    case "~":
+                        let plan = try await ObjectActions.truncatePlan([object.ref], options: TruncateOptions(), on: workspace.connection)
+                        workspace.changes.perform("Truncate Table", at: EditPlace(side: .sidebar, objects: [object])) {
+                            workspace.changes.stage(StagedAction(.truncate, object, plan: plan))
+                        }
+                    default:
+                        workspace.sidebar.reveal([object.ref])
+                    }
                 } else {
                     let object = try await waitFor("table \(name)") { workspace.sidebar.object(named: name) }
                     workspace.open(object, intent: .newTab, focus: false)
@@ -700,6 +733,8 @@ enum DevHarness {
         try await press("\u{7F}", code: 51)
         _ = try await waitFor("drop staged") { changes.mark(for: victim.ref) == .dropped ? true : nil }
         try check(undo.undoMenuItemTitle == "Undo Delete Table", "the step is “Delete Table”")
+        let markedCell = outline.view(atColumn: 0, row: outline.selectedRow, makeIfNecessary: true) as? ItemCell
+        try check(markedCell?.accessibilityLabel() == "\(victim.ref.name), deleted", "VoiceOver reads the item as deleted")
         snap("1-marked.png", window)
         try await press("\u{7F}", code: 51)
         try await Task.sleep(for: .milliseconds(100))
@@ -721,17 +756,26 @@ enum DevHarness {
         try await undoKey()
         try check(changes.isEmpty, "⌘Z unmarks it again")
 
-        // A new table from the + button; ⌫ removes it and closes its tab; ⌘Z brings both back.
-        let plus = try require(descendant(of: workspace.sidebar.view, NSButton.self) { $0.toolTip == "New table" }, "+ button")
-        plus.performClick(nil)
+        // A new table; ⌫ removes it and closes its tab; ⌘Z brings both back.
+        workspace.newTable(nil)
         let newID = try await waitFor("new table tab") { workspace.tableTab?.newTableID }
-        try check(undo.undoMenuItemTitle == "Undo New Table", "the + button stages a new table")
+        try check(undo.undoMenuItemTitle == "Undo New Table", "New Table stages a new table")
         workspace.sidebar.reveal(newTable: newID)
         window.makeFirstResponder(outline)
         try await press("\u{7F}", code: 51)
         try check(changes.newTables.isEmpty && !workspace.tableTabs.contains { $0.newTableID != nil }, "⌫ removes the new table and closes its tab")
         try await undoKey()
         try check(changes.newTable(newID) != nil && workspace.tableTab?.newTableID == newID, "⌘Z brings back the table and its tab")
+        // The list's Delete removes it too, with no dialog.
+        workspace.sidebar.reveal(newTable: newID)
+        let menu = try require(outline.menu, "the list's menu")
+        let menuDelete = try require(menu.items.firstIndex { $0.action == NSSelectorFromString("deleteItem:") }, "Delete in the list's menu")
+        menu.update()
+        try check(menu.items[menuDelete].isEnabled && menu.items[menuDelete].title == "Delete", "the menu's Delete is enabled for a new table")
+        menu.performActionForItem(at: menuDelete)
+        _ = try await waitFor("new table removed by the menu") { changes.newTables.isEmpty ? true : nil }
+        try await undoKey()
+        try check(changes.newTable(newID) != nil, "⌘Z brings it back again")
         snap("2-new-table-back.png", window)
         // Its name can't be emptied or taken.
         let structure = try require(workspace.tableTab?.structure, "new table's structure")

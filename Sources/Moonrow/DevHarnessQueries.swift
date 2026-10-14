@@ -88,6 +88,43 @@ extension DevHarness {
         try check(queriesPane.shownRows == ["other"], "search finds a query by its SQL \(queriesPane.shownRows)")
         queriesPane.search.stringValue = ""
         queriesPane.reloadList()
+
+        // A click opens a query in the pane's preview tab and the next click replaces it. A query
+        // already open is selected; typing or opening it again keeps the preview.
+        let extra = try moved.save("select 4;", as: "extra", in: "")
+        queriesPane.reloadList()
+        let previewPane = workspace.content
+        let before = previewPane.tabs.count
+        try check(queriesPane.clickRow("other"), "a click on other")
+        let preview = try require(workspace.queryController, "preview tab")
+        try check(preview.savedQuery?.name == "other" && preview.isPreview && previewPane.tabs.count == before + 1,
+                  "a click opens the query in a preview tab")
+        try check(preview.tabItem.italic, "the preview tab's title is in italics")
+        try check(queriesPane.clickRow("extra"), "a click on extra")
+        let replaced = try require(workspace.queryController, "replaced preview")
+        try check(replaced !== preview && replaced.savedQuery?.name == "extra" && replaced.isPreview && previewPane.tabs.count == before + 1,
+                  "the next click replaces the preview")
+        try check(queriesPane.clickRow("Reports/report") && workspace.queryController === editor && previewPane.tabs.count == before + 1,
+                  "a click on an open query selects its tab")
+        try check(queriesPane.clickRow("extra") && workspace.queryController === replaced, "a click goes back to the preview")
+        previewPane.select(try require(previewPane.index(of: editor), "report's tab"))
+        try check(queriesPane.selectedQueryPath == "Reports/report" && previewPane.tabs.count == before + 1,
+                  "selecting a query's tab selects the query in the list \(queriesPane.selectedQueryPath ?? "nothing")")
+        previewPane.select(try require(previewPane.index(of: replaced), "extra's tab"))
+        try check(queriesPane.selectedQueryPath == "extra" && replaced.isPreview, "and the preview's query, which stays a preview")
+        replaced.editor.insertText("-- kept\n", replacementRange: NSRange(location: 0, length: 0))
+        try check(!replaced.isPreview, "typing keeps the preview tab")
+        try check(queriesPane.clickRow("other") && workspace.queryController?.isPreview == true && previewPane.tabs.count == before + 2,
+                  "the next click opens another preview")
+        workspace.openSavedQuery(try require(moved.query(named: "other"), "other"))
+        let kept = try require(workspace.queryController, "kept tab")
+        try check(!kept.isPreview && kept.savedQuery?.name == "other" && previewPane.tabs.count == before + 2, "opening it again keeps it")
+        for tab in [replaced, kept] { previewPane.close(try require(previewPane.index(of: tab), "tab to close")) }
+        try check(previewPane.tabs.count == before, "the two tabs close")
+        try FileManager.default.removeItem(at: extra.url)
+        moved.reload()
+        queriesPane.reloadList()
+
         try check(queriesPane.selectRow("other"), "the query is selectable")
         window.makeFirstResponder(queriesPane.outline)
         try check(window.undoManager === undo, "the pane has its own undo while it has the focus")

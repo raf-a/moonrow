@@ -244,8 +244,8 @@ final class SearchInDatabaseViewController: NSViewController, NSTableViewDataSou
         let stack = NSStackView(views: [icon, name, NSView(), count])
         stack.spacing = 6
         stack.translatesAutoresizingMaskIntoConstraints = false
+        // Not the cell's `textField`, which the list sets in semibold on the selected row.
         cell.addSubview(stack)
-        cell.textField = name
         NSLayoutConstraint.activate([
             icon.widthAnchor.constraint(equalToConstant: 16),
             stack.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 2),
@@ -255,10 +255,36 @@ final class SearchInDatabaseViewController: NSViewController, NSTableViewDataSou
         return cell
     }
 
+    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? { GreySelectionRowView() }
+
+    func tableView(_ tableView: NSTableView, typeSelectStringFor tableColumn: NSTableColumn?, row: Int) -> String? {
+        results[row].object.ref.name
+    }
+
+    /// Selecting from code opens nothing.
+    private var isSelectingInCode = false
+
+    /// Selects the result the selected tab shows: its table, filtered by the search. Any other
+    /// tab clears the selection. Opens nothing.
+    func reveal(_ object: DatabaseObject?, filteredBy conditions: [FilterCondition]) {
+        guard isViewLoaded else { return }
+        let row = request.flatMap { request in
+            object.flatMap { o in conditions.contains(request.condition) ? results.firstIndex { $0.object == o } : nil }
+        }
+        isSelectingInCode = true
+        defer { isSelectingInCode = false }
+        if let row {
+            list.selectRowIndexes([row], byExtendingSelection: false)
+            list.scrollRowToVisible(row)
+        } else {
+            list.deselectAll(nil)
+        }
+    }
+
     /// A click (or arrow key) shows the table's matching rows in the preview tab; the focus stays
     /// in the list, so arrows go through the results.
     func tableViewSelectionDidChange(_ notification: Notification) {
-        guard list.selectedRow >= 0 else { return }
+        guard !isSelectingInCode, list.selectedRow >= 0 else { return }
         open(results[list.selectedRow], intent: .preview)
     }
 

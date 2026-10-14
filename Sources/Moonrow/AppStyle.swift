@@ -349,3 +349,94 @@ final class SidebarSearchField: NSSearchField {
         }
     }
 }
+
+/// Names of objects with staged changes. In light mode, darker than the system colours: 3.5:1
+/// or better on a list, and with Increase Contrast 4.5:1 or better on its grey selection too.
+/// In dark mode, lighter, at 4.5:1 or better on the selection either way.
+extension NSColor {
+    static let stagedNew = staged(light: 0x28963F, lightHighContrast: 0x1B6E30, dark: 0x4CD964)
+    static let stagedEdited = staged(light: 0xCF5A00, lightHighContrast: 0x9A4400, dark: 0xFFA347)
+    static let stagedDropped = staged(light: 0xE5262E, lightHighContrast: 0xC4001A, dark: 0xFF9F99)
+
+    private static func staged(light: Int, lightHighContrast: Int, dark: Int) -> NSColor {
+        func rgb(_ v: Int) -> NSColor {
+            NSColor(srgbRed: CGFloat(v >> 16 & 0xFF) / 255, green: CGFloat(v >> 8 & 0xFF) / 255, blue: CGFloat(v & 0xFF) / 255, alpha: 1)
+        }
+        let (light, lightHighContrast, dark) = (rgb(light), rgb(lightHighContrast), rgb(dark))
+        return NSColor(name: nil) { appearance in
+            switch appearance.bestMatch(from: [.aqua, .darkAqua, .accessibilityHighContrastAqua, .accessibilityHighContrastDarkAqua]) {
+            case .darkAqua, .accessibilityHighContrastDarkAqua: dark
+            case .accessibilityHighContrastAqua: lightHighContrast
+            // Settings ▸ Appearance ▸ Light sets the plain appearance; the setting still counts.
+            default: NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast ? lightHighContrast : light
+            }
+        }
+    }
+}
+
+/// A list row whose selection is grey whether or not the list has the focus, so coloured names
+/// stay as they are on a selected row.
+final class GreySelectionRowView: NSTableRowView {
+    override var isEmphasized: Bool {
+        get { false }
+        set {}
+    }
+}
+
+/// A staged change as a list shows it: the name in its colour and, when the Mac is set to
+/// differentiate without colour, a letter after it too (A, M, D, as source control marks files).
+enum StagedState {
+    case new, edited, dropped
+
+    var color: NSColor {
+        switch self {
+        case .new: .stagedNew
+        case .edited: .stagedEdited
+        case .dropped: .stagedDropped
+        }
+    }
+
+    var letter: String {
+        switch self {
+        case .new: "A"
+        case .edited: "M"
+        case .dropped: "D"
+        }
+    }
+
+    /// What VoiceOver reads after the name.
+    var spoken: String {
+        switch self {
+        case .new: "new"
+        case .edited: "modified"
+        case .dropped: "deleted"
+        }
+    }
+
+    /// System Settings ▸ Accessibility ▸ Display ▸ Differentiate without colour, or
+    /// `MOONROW_LETTERS` for checking the letters without changing the setting.
+    @MainActor static var showsLetters: Bool {
+        NSWorkspace.shared.accessibilityDisplayShouldDifferentiateWithoutColor
+            || ProcessInfo.processInfo.environment["MOONROW_LETTERS"] != nil
+    }
+
+    /// The label the letter goes in, hidden until `show(_:in:)` gives it a state.
+    @MainActor static func makeLetterLabel() -> NSTextField {
+        let label = NSTextField(labelWithString: "")
+        label.alignment = .center
+        label.isHidden = true
+        label.setAccessibilityElement(false)  // the row's label says the state
+        label.setContentCompressionResistancePriority(.required, for: .horizontal)
+        label.setContentHuggingPriority(.required, for: .horizontal)
+        return label
+    }
+
+    /// Shows `state`'s letter in `label`, or hides it.
+    @MainActor static func show(_ state: StagedState?, in label: NSTextField, size: CGFloat) {
+        label.isHidden = state == nil || !showsLetters
+        guard let state else { return }
+        label.stringValue = state.letter
+        label.font = .systemFont(ofSize: size)
+        label.textColor = state.color
+    }
+}

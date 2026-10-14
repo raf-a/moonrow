@@ -137,7 +137,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         sidebar.onOpenNewTable = { [weak self] id in self?.openNewTable(id) }
         sidebar.stagedNameFor = { [weak self] table in self?.changes.stagedName(for: table) }
         changes.onRestore = { [weak self] place in self?.show(place) }
-        leftSidebar.queries.onOpen = { [weak self] query in self?.openSavedQuery(query) }
+        leftSidebar.queries.onOpen = { [weak self] query, intent in
+            self?.openSavedQuery(query, intent: intent, focus: intent != .preview)
+        }
         leftSidebar.queries.onInsert = { [weak self] text in self?.insertIntoEditor(text) }
         leftSidebar.queries.onChange = { [weak self] old, new in self?.savedQueryChanged(old, to: new) }
         environment.selectedQueriesFolder = { [weak self] in self?.leftSidebar.queries.selectedFolder }
@@ -183,6 +185,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         }
         pane.onDoubleClickTab = { [weak pane] i in
             (pane?.tabs[safe: i] as? any ObjectTab)?.isPreview = false
+            (pane?.tabs[safe: i] as? QueryEditorViewController)?.isPreview = false
         }
     }
 
@@ -196,8 +199,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     func open(_ object: DatabaseObject, intent: TabPlacement.Intent = .regular, mode: TableTabViewController.Mode? = nil,
               focus: Bool = true) {
         let pane = content
-        let tabs = pane.tabs.map { TabPlacement.Tab(object: ($0 as? any ObjectTab)?.object, isPreview: $0.isPreview) }
-        switch TabPlacement.place(object, intent: intent, in: tabs, selected: pane.selectedIndex) {
+        switch TabPlacement.place(object, intent: intent, in: placementTabs(pane), selected: pane.selectedIndex) {
         case .select(let i):
             pane.select(i, focus: focus)
             if let mode { tableTab?.switchTo(mode, focus: focus) }
@@ -268,13 +270,26 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     /// with it unchanged doesn't offer to save it.
     @discardableResult
     func newQuery(text: String = "", saved: SavedQueries.Query? = nil, file: URL? = nil, kept: Bool = false) -> QueryEditorViewController {
+        let editor = makeQuery(text: text, saved: saved, file: file, kept: kept)
+        content.add(editor)
+        return editor
+    }
+
+    private func makeQuery(text: String = "", saved: SavedQueries.Query? = nil, file: URL? = nil, kept: Bool = false) -> QueryEditorViewController {
         queryCount += 1
         let editor = QueryEditorViewController(environment: environment, number: queryCount, text: text, savedQuery: saved,
                                                file: file, kept: kept)
         editor.results.dialect = connection.dialect
         editor.onEdit = { [weak self] in self?.onSessionChange?() }
-        content.add(editor)
         return editor
+    }
+
+    /// What `TabPlacement` needs to know of a pane's tabs.
+    private func placementTabs(_ pane: WorkspaceTabsController) -> [TabPlacement.Tab] {
+        pane.tabs.map {
+            TabPlacement.Tab(object: ($0 as? any ObjectTab)?.object,
+                             savedQuery: ($0 as? QueryEditorViewController)?.savedQuery?.path, isPreview: $0.isPreview)
+        }
     }
 
     /// File ▸ Open…: the SQL file in a new query tab, or the tab that already has it. The text is
@@ -307,17 +322,42 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
 
     static let sqlFileLimit = 20 * 1024 * 1024
 
-    func openSavedQuery(_ query: SavedQueries.Query) {
-        for (n, pane) in panes.panes.enumerated() {
-            if let i = pane.tabs.firstIndex(where: { ($0 as? QueryEditorViewController)?.savedQuery?.url == query.url }) {
+    /// Opens a saved query by `TabPlacement`'s rules, as tables open: a single click uses the
+    /// pane's preview tab. A tab in another pane that already has it is selected instead.
+    func openSavedQuery(_ query: SavedQueries.Query, intent: TabPlacement.Intent = .regular, focus: Bool = true) {
+        func shows(_ tab: any WorkspaceTab) -> Bool { (tab as? QueryEditorViewController)?.savedQuery?.url == query.url }
+        if intent != .newTab, !content.tabs.contains(where: shows) {
+            for (n, pane) in panes.panes.enumerated() {
+                guard let i = pane.tabs.firstIndex(where: shows) else { continue }
+                if intent == .regular { (pane.tabs[i] as? QueryEditorViewController)?.isPreview = false }
                 panes.activate(n, focus: false)
-                return pane.select(i, force: true)
+                return pane.select(i, force: true, focus: focus)
             }
         }
-        do {
-            newQuery(text: try environment.savedQueries.text(of: query), saved: query)
-        } catch {
-            present(error, title: "Couldn’t open “\(query.name)”", in: window)
+        let pane = content
+        let decision = TabPlacement.place(savedQuery: query.path, intent: intent, in: placementTabs(pane), selected: pane.selectedIndex)
+        switch decision {
+        case .select(let i):
+            pane.select(i, force: true, focus: focus)
+        case .promote(let i):
+            (pane.tabs[i] as? QueryEditorViewController)?.isPreview = false
+            pane.select(i, force: true, focus: focus)
+        case .replacePreview, .insert:
+            let text: String
+            do {
+                text = try environment.savedQueries.text(of: query)
+            } catch {
+                return present(error, title: "Couldn’t open “\(query.name)”", in: window)
+            }
+            let editor = makeQuery(text: text, saved: query)
+            if case .replacePreview(let i) = decision {
+                (pane.tabs[i] as? any ObjectTab)?.endEditing()
+                editor.isPreview = true
+                pane.replace(at: i, with: editor, focus: focus)
+            } else if case .insert(let i, let preview) = decision {
+                editor.isPreview = preview
+                pane.add(editor, at: i, focus: focus)
+            }
         }
     }
 
@@ -378,6 +418,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         } else {
             sidebar.reveal(table)
         }
+        leftSidebar.queries.revealQuery(queryController?.savedQuery)
+        revealSearchResult()
         if let object = definitionTab?.object {
             subtitle = "\(object.ref) — \(config.shortSummary)"
         } else if let table, tableTab?.newTableID == nil {
@@ -389,6 +431,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         }
         if !isNavigating, let tab = content.current { history.visit(NavigationPlace(tab)) }
         onSessionChange?()
+    }
+
+    /// The Search pane selects the result the selected tab shows, if it shows one.
+    private func revealSearchResult() {
+        let object = tableTab?.newTableID == nil ? tableTab?.object : nil
+        leftSidebar.search.reveal(object, filteredBy: tableController?.shownConditions ?? [])
     }
 
     /// What the title shows under the connection's name: the open table or query, and the
@@ -701,6 +749,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
             guard let self else { return }
             self.open(object, intent: intent, mode: .data, focus: intent != .preview)
             self.tableTab?.data?.showRows(matching: conditions, focus: intent != .preview)
+            // Opening selected the tab before its filter was set.
+            self.revealSearchResult()
         }
         sidebar.onSearchInDatabase = { [weak self] in self?.searchInDatabase(nil) }
         sidebar.onShowDiagram = { [weak self] in self?.showDiagram(nil) }

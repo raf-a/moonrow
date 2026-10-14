@@ -32,8 +32,8 @@ public struct WorkspaceSession: Codable, Sendable, Hashable {
                 signature: object.signature, structure: structure, definition: definition, isPreview: isPreview)
         }
 
-        public static func query(text: String, savedQuery: String? = nil, file: String? = nil) -> Tab {
-            Tab(kind: .query, structure: false, isPreview: false, text: text, savedQuery: savedQuery, file: file)
+        public static func query(text: String, savedQuery: String? = nil, file: String? = nil, isPreview: Bool = false) -> Tab {
+            Tab(kind: .query, structure: false, isPreview: isPreview, text: text, savedQuery: savedQuery, file: file)
         }
 
         /// The table or view, for table tabs.

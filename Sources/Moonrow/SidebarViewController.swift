@@ -152,6 +152,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         outline.onTruncateKey = { [weak self] in self?.truncateTable(nil) }
         outline.target = self
         outline.doubleAction = #selector(doubleClicked(_:))
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(displayOptionsChanged),
+                                                          name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
         let menu = NSMenu()
         menu.addItem(withTitle: "Open in New Tab", action: #selector(openInNewTab(_:)), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Open Structure", action: #selector(openStructure(_:)), keyEquivalent: "").target = self
@@ -345,6 +347,11 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         }
     }
 
+    /// Differentiate without colour was switched: the state letters show or hide.
+    @objc private func displayOptionsChanged() {
+        outline.reloadData(forRowIndexes: IndexSet(integersIn: 0..<outline.numberOfRows), columnIndexes: [0])
+    }
+
     /// Redraws staged marks and the staged new tables.
     func stagedChangesChanged() {
         guard isViewLoaded else { return }
@@ -462,7 +469,10 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             item.isHidden = kind != .materializedView
             return kind == .materializedView && onRefreshMaterializedView != nil
         case #selector(deleteItem(_:)):
-            return kind != nil && kind != .sequence && onMarkForDeletion != nil
+            // A staged object goes at once, with no dialog: there's nothing to drop yet.
+            let isStaged = targetItem?.isStaged == true
+            item.title = isStaged ? "Delete" : "Delete…"
+            return (isStaged || kind != nil && kind != .sequence) && onMarkForDeletion != nil
         case #selector(truncateItem(_:)):
             return kind == .table
         case #selector(exportItem(_:)):
@@ -496,9 +506,11 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     @objc private func searchItem(_ sender: Any?) { onSearchInDatabase?() }
 
     /// The selected items ⌫ applies to: existing objects to mark, staged ones to remove.
-    private var deletionTargets: Deletion {
+    private var deletionTargets: Deletion { Self.deletion(of: targetItems) }
+
+    private static func deletion(of items: [Item]) -> Deletion {
         var d = Deletion()
-        for item in targetItems {
+        for item in items {
             if let id = item.newTableID { d.newTables.append(id) }
             else if let id = item.newDefinitionID { d.newDefinitions.append(id) }
             else if item.isClone { d.clones.append(item.object.ref.name) }
@@ -539,8 +551,14 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         onMarkForDeletion(deletion)
     }
 
+    /// Delete…: the drop dialog for an existing object; a new object or clone is removed.
     @objc private func deleteItem(_ sender: Any?) {
-        if let object = targetObject { onDelete?(object) }
+        guard let item = targetItem else { return }
+        if item.isStaged {
+            onMarkForDeletion?(Self.deletion(of: [item]))
+        } else {
+            onDelete?(item.object)
+        }
     }
 
     @objc private func exportItem(_ sender: Any?) {
@@ -746,6 +764,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     func outlineView(_ outlineView: NSOutlineView, shouldSelectItem item: Any) -> Bool { item is Item }
 
+    func outlineView(_ outlineView: NSOutlineView, rowViewForItem item: Any) -> NSTableRowView? { GreySelectionRowView() }
+
     func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
         if let group = item as? Group {
             let id = NSUserInterfaceItemIdentifier("Header")
@@ -765,13 +785,13 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         }
         guard let item = item as? Item else { return nil }
         let id = NSUserInterfaceItemIdentifier("Item")
-        let cell = outlineView.makeView(withIdentifier: id, owner: nil) as? NSTableCellView ?? {
-            let c = NSTableCellView()
+        let cell = outlineView.makeView(withIdentifier: id, owner: nil) as? ItemCell ?? {
+            let c = ItemCell()
             c.identifier = id
             let image = NSImageView()
-            let text = NSTextField(labelWithString: "")
+            let text = c.label
             text.lineBreakMode = .byTruncatingTail
-            for v in [image, text] {
+            for v in [image, text, c.letter] {
                 v.translatesAutoresizingMaskIntoConstraints = false
                 c.addSubview(v)
             }
@@ -780,58 +800,76 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
                 image.centerYAnchor.constraint(equalTo: c.centerYAnchor),
                 image.widthAnchor.constraint(equalToConstant: 16),
                 text.leadingAnchor.constraint(equalTo: image.trailingAnchor, constant: 6),
-                text.trailingAnchor.constraint(lessThanOrEqualTo: c.trailingAnchor, constant: -2),
+                text.trailingAnchor.constraint(lessThanOrEqualTo: c.letter.leadingAnchor, constant: -4),
                 text.centerYAnchor.constraint(equalTo: c.centerYAnchor),
+                c.letter.trailingAnchor.constraint(equalTo: c.trailingAnchor, constant: -4),
+                c.letter.centerYAnchor.constraint(equalTo: c.centerYAnchor),
             ])
             c.imageView = image
-            c.textField = text
             return c
         }()
-        var (symbol, tint): (String, NSColor) = switch item.object.kind {
+        let (symbol, tint): (String, NSColor) = switch item.object.kind {
         case .table: ("tablecells", .systemBlue)
         case .function, .sequence: ("function", .systemOrange)
         case .procedure: ("curlybraces", .systemOrange)
         case .materializedView: ("square.stack.3d.up", .systemPurple)
         case .view: ("eye", .systemPurple)
         }
-        // Staged changes: edited and truncated tables in orange, dropped ones struck out in
-        // red, new ones in green, until the workspace commits or discards them.
+        // Staged changes colour the name, never the icon: new objects in green, edited, renamed
+        // and truncated ones in orange, dropped ones struck out in red, until the workspace
+        // commits or discards them.
         let mark = item.isStaged ? nil : markFor?(item.object)
-        var attributes: [NSAttributedString.Key: Any] = [:]
+        var state: StagedState?
         var tip: String?
         if item.isStaged {
-            if item.newTableID != nil || item.isClone { symbol = "plus.rectangle" }
-            tint = .systemGreen
-            attributes[.foregroundColor] = NSColor.systemGreen
+            state = .new
             let what = item.isClone ? "Clone" : "New \(DefinitionKind(item.object.kind)?.title ?? "table")"
             tip = "\(what), created when you commit (⌘S)"
         } else if let mark {
             switch mark {
             case .edited:
-                attributes[.foregroundColor] = NSColor.systemOrange
+                state = .edited
                 tip = "Staged changes"
             case .truncated:
-                attributes[.foregroundColor] = NSColor.systemOrange
-                symbol = "tablecells.badge.ellipsis"
+                state = .edited
                 tip = "Truncate staged"
             case .dropped:
-                attributes[.foregroundColor] = NSColor.systemRed
-                attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
+                state = .dropped
                 tip = "Delete staged"
             }
-            tint = attributes[.foregroundColor] as? NSColor ?? tint
         }
         // A staged rename shows the new name; overloads show their arguments.
         var name = !item.isStaged && item.object.kind.isRelation ? stagedNameFor?(item.object.ref) ?? item.object.ref.name : item.object.ref.name
-        if name != item.object.ref.name { tip = "Rename staged (was \(item.object.ref.name))" }
+        if name != item.object.ref.name {
+            tip = "Rename staged (was \(item.object.ref.name))"
+            if state == nil { state = .edited }
+        }
         if item.showsSignature { name = item.object.displayName }
         if item.object.kind.isRoutine, !item.isStaged, tip == nil { tip = item.object.displayName }
-        cell.textField?.attributedStringValue = NSAttributedString(string: name, attributes: attributes)
+        let font = Self.itemFont(outlineView.effectiveRowSizeStyle)
+        var attributes: [NSAttributedString.Key: Any] = [.font: font]
+        if let state { attributes[.foregroundColor] = state.color }
+        if state == .dropped { attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue }
+        // The field's own colour too: with the label colour it draws vibrant in the sidebar,
+        // which washes out the string's colour.
+        cell.label.textColor = state?.color ?? .labelColor
+        cell.label.attributedStringValue = NSAttributedString(string: name, attributes: attributes)
+        StagedState.show(state, in: cell.letter, size: font.pointSize)
+        cell.state = state
         cell.toolTip = tip
         cell.imageView?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: item.object.kind.rawValue)
             ?? NSImage(systemSymbolName: "tablecells", accessibilityDescription: item.object.kind.rawValue)
         cell.imageView?.contentTintColor = tint
         return cell
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, typeSelectStringFor tableColumn: NSTableColumn?, item: Any) -> String? {
+        (item as? Item)?.object.ref.name
+    }
+
+    /// The source list's font for its row size (Settings ▸ Appearance ▸ Sidebar icon size).
+    private static func itemFont(_ size: NSTableView.RowSizeStyle) -> NSFont {
+        .systemFont(ofSize: size == .small ? 11 : size == .large ? 15 : 13)
     }
 
     /// Selecting an item opens it, so arrow keys browse tables one after another. Selecting
@@ -840,6 +878,19 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         guard !isRevealing, outline.selectedRowIndexes.count == 1,
               let item = outline.item(atRow: outline.selectedRow) as? Item else { return }
         open(item, intent: .preview)
+    }
+}
+
+/// A table, view or routine in the list. Its name isn't the cell's `textField`: the list sets the
+/// font of that field, which drops the name's colour and strikethrough.
+final class ItemCell: NSTableCellView {
+    let label = NSTextField(labelWithString: "")
+    /// A, M or D, when the Mac differentiates without colour.
+    let letter = StagedState.makeLetterLabel()
+    var state: StagedState?
+
+    override func accessibilityLabel() -> String? {
+        label.stringValue + (state.map { ", " + $0.spoken } ?? "")
     }
 }
 
