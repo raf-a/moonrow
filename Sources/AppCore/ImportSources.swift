@@ -427,7 +427,9 @@ public final class JSONRecordReader: ImportRecords {
     private func matches(_ word: String) -> Bool {
         let bytes = Array(word.utf8)
         guard position + bytes.count <= data.count else { return false }
-        return data.withUnsafeBytes { raw in bytes.indices.allSatisfy { raw[position + $0] == bytes[$0] } }
+        return data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            bytes.indices.allSatisfy { raw[position + $0] == bytes[$0] }
+        }
     }
 
     /// A string's text; `position` is on its opening quote.
