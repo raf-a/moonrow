@@ -39,11 +39,13 @@ final class LeftSidebarController: NSViewController {
             root.addSubview(v)
         }
         NSLayoutConstraint.activate([
-            picker.topAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor, constant: 4),
-            picker.heightAnchor.constraint(equalToConstant: 32),
+            // The capsule takes the place of the selected workspace tab's glass, 2 points inside the
+            // tab strip, so the two line up.
+            picker.topAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor, constant: 2),
+            picker.heightAnchor.constraint(equalToConstant: TabStrip.height - 5),
             picker.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 10),
             picker.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -10),
-            container.topAnchor.constraint(equalTo: picker.bottomAnchor, constant: 4),
+            container.topAnchor.constraint(equalTo: picker.bottomAnchor, constant: 6),
             container.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             container.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             container.bottomAnchor.constraint(equalTo: root.bottomAnchor),
@@ -71,7 +73,7 @@ final class LeftSidebarController: NSViewController {
 }
 
 /// The sidebar's pane picker, as in Xcode's navigators: outline symbols on a capsule (glass on
-/// macOS 26), the selected one on a grey circle that slides to it.
+/// macOS 26), the selected one on a grey pill that fills its slot and slides to it.
 @MainActor
 private final class NavigatorBar: NSView {
     struct Tab { let symbol, name, tip: String }
@@ -108,14 +110,14 @@ private final class NavigatorBar: NSView {
         track.addSubview(track.highlight)
         track.addSubview(stack)
         stack.pin(to: track)
-        let capsule = GlassCapsule(track, padding: 4)
+        let capsule = GlassCapsule(track, padding: 2)
         addSubview(capsule)
         capsule.pin(to: self)
         for (i, button) in buttons.enumerated() {
             button.tag = i
             button.target = self
             button.action = #selector(clicked(_:))
-            button.heightAnchor.constraint(equalToConstant: 24).isActive = true
+            button.heightAnchor.constraint(equalToConstant: TabStrip.height - 9).isActive = true
         }
         update(animated: false)
     }
@@ -149,12 +151,10 @@ private final class NavigatorBar: NSView {
         var count = 1
         var selected = 0
 
-        /// A circle centred in the selected tab's slot.
+        /// The selected tab's whole slot.
         var highlightFrame: NSRect {
             let slot = bounds.width / CGFloat(max(count, 1))
-            let side = min(slot, bounds.height)
-            return NSRect(x: slot * (CGFloat(selected) + 0.5) - side / 2, y: (bounds.height - side) / 2,
-                          width: side, height: side)
+            return NSRect(x: slot * CGFloat(selected), y: 0, width: slot, height: bounds.height)
         }
 
         override func layout() {
