@@ -175,7 +175,7 @@ extension DevHarness {
         try check(!query.editor.string.contains("\n"), "⇧⌘I compacts")
         query.editor.setSelectedRange(NSRange(location: 0, length: 0))
         try await key(#selector(MoonrowActions.toggleBlockComment(_:)))
-        try check(query.editor.string.hasPrefix("/* SELECT") && query.editor.string.hasSuffix(" */"), "⌥⌘/ comments the line out")
+        try check(query.editor.string.hasPrefix("/* SELECT") && query.editor.string.hasSuffix(" */"), "⌥⌘/ comments the line out (\(query.editor.string.debugDescription), selection \(query.editor.selectedRange()))")
         try await key(#selector(MoonrowActions.toggleBlockComment(_:)))
         try check(query.editor.string.hasPrefix("SELECT"), "and back in")
         try await key(#selector(MoonrowActions.addRow(_:)))
