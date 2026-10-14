@@ -14,7 +14,7 @@ Running the workflow by hand (Actions → Release → Run workflow) builds and p
 
 ## Signing and notarization
 
-Without secrets, the app is signed ad hoc and users have to approve it on first launch (see the README). To sign with a Developer ID and notarize, add these to the repository (Settings → Secrets and variables → Actions):
+Without these, the app is signed ad hoc, and macOS blocks it on first launch until the user approves it. To sign with a Developer ID and notarize, add these to the repository (Settings → Secrets and variables → Actions):
 
 | Name | Kind | Value |
 |---|---|---|

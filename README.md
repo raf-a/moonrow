@@ -15,12 +15,6 @@ A native macOS database client for SQLite, PostgreSQL, MySQL and MariaDB, writte
 
 Download the latest `Moonrow-<version>.dmg` from [Releases](../../releases) and drag Moonrow to Applications. It needs macOS 14 or later and runs natively on Apple silicon and Intel.
 
-Builds that aren't notarized are signed ad hoc, so macOS blocks them the first time. Right-click Moonrow and choose **Open**, or run:
-
-```bash
-xattr -dr com.apple.quarantine /Applications/Moonrow.app
-```
-
 ## Build from source
 
 You need Xcode 26 or later (Swift 6).
