@@ -223,20 +223,33 @@ public struct QueryResult: Sendable {
     }
 }
 
-public struct DatabaseError: Error, Sendable, CustomStringConvertible {
+public struct DatabaseError: Error, Sendable, CustomStringConvertible, LocalizedError {
+    /// What the user reads; Postgres' DETAIL and HINT follow on lines of their own.
     public var message: String
     public var code: Int?
     /// SQLSTATE, when the server reports one (Postgres, MySQL).
     public var state: String?
     /// The statement that failed, when known.
     public var sql: String?
+    /// Where in `sql` the error is, as a UTF-16 offset, when the server says (Postgres).
+    public var position: Int?
+    /// Postgres' DETAIL and HINT fields.
+    public var detail: String?
+    public var hint: String?
 
-    public init(_ message: String, code: Int? = nil, state: String? = nil, sql: String? = nil) {
+    public init(
+        _ message: String, code: Int? = nil, state: String? = nil, sql: String? = nil,
+        position: Int? = nil, detail: String? = nil, hint: String? = nil
+    ) {
         self.message = message
         self.code = code
         self.state = state
         self.sql = sql
+        self.position = position
+        self.detail = detail
+        self.hint = hint
     }
 
     public var description: String { message }
+    public var errorDescription: String? { message }
 }
