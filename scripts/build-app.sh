@@ -7,6 +7,8 @@
 #   MOONROW_BUILD          CFBundleVersion (default: 1)
 #   MOONROW_UNIVERSAL=1    build for arm64 and x86_64
 #   MOONROW_SIGN_IDENTITY  codesign identity, e.g. "Developer ID Application: …" (default: ad hoc)
+#   MOONROW_SPARKLE_KEY    SUPublicEDKey, the EdDSA public key updates are checked against
+#                          (default: the release key; tests set their own)
 set -eu
 config="${1:-release}"
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -23,8 +25,12 @@ bindir="$(swift build "$@" --show-bin-path)"
 
 app="build/Moonrow.app"
 rm -rf "$app"
-mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$app/Contents/Frameworks"
 cp "$bindir/Moonrow" "$app/Contents/MacOS/Moonrow"
+# Sparkle, for updates. The app isn't sandboxed, so it doesn't use the framework's XPC services.
+sparkle="$app/Contents/Frameworks/Sparkle.framework"
+ditto "$bindir/Sparkle.framework" "$sparkle"
+rm -rf "$sparkle/Versions/B/XPCServices" "$sparkle/XPCServices"
 # Runs ssh for the tunnels and answers its prompts; the app looks for it next to its executable.
 cp "$bindir/moonrow-ssh-helper" "$app/Contents/MacOS/moonrow-ssh-helper"
 iconutil -c icns -o "$app/Contents/Resources/AppIcon.icns" Assets/AppIcon.iconset
@@ -52,6 +58,7 @@ else
 fi
 version="${MOONROW_VERSION:-0.1 ($(git describe --tags --always --dirty 2>/dev/null || echo dev))}"
 build_number="${MOONROW_BUILD:-1}"
+sparkle_key="${MOONROW_SPARKLE_KEY:-SPARKLE_PUBLIC_KEY_PLACEHOLDER}"
 
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -72,6 +79,8 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>NSPrincipalClass</key><string>NSApplication</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSSupportsAutomaticTermination</key><false/>
+  <key>SUFeedURL</key><string>https://github.com/raf-a/moonrow/releases/latest/download/appcast.xml</string>
+  <key>SUPublicEDKey</key><string>$sparkle_key</string>
   <key>CFBundleDocumentTypes</key>
   <array>
     <dict>
@@ -86,14 +95,18 @@ cat > "$app/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# The helper is nested code: it's signed before the bundle that seals it. A real identity gets
-# the hardened runtime and a secure timestamp, which notarization requires.
+# Nested code is signed inside out, before the bundle that seals it: Sparkle's helpers, then its
+# framework, then the ssh helper and the app. A real identity gets the hardened runtime and a
+# secure timestamp, which notarization requires.
 identity="${MOONROW_SIGN_IDENTITY:--}"
 if [ "$identity" = "-" ]; then
   sign() { codesign --force --sign - "$@"; }
 else
   sign() { codesign --force --sign "$identity" --options runtime --timestamp "$@"; }
 fi
+sign "$sparkle/Versions/B/Autoupdate"
+sign "$sparkle/Versions/B/Updater.app"
+sign "$sparkle"
 sign "$app/Contents/MacOS/moonrow-ssh-helper"
 sign "$app"
 echo "Built $root/$app"

@@ -18,6 +18,7 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.104.0"),
         .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.37.5"),
+        .package(url: "https://github.com/sparkle-project/Sparkle.git", from: "2.10.0"),
     ],
     targets: [
         .target(name: "SQLScript"),
@@ -56,11 +57,15 @@ let package = Package(
         // The AppKit app. `scripts/build-app.sh` wraps it into Moonrow.app.
         .executableTarget(
             name: "Moonrow",
-            dependencies: ["AppCore"],
+            dependencies: ["AppCore", .product(name: "Sparkle", package: "Sparkle")],
             // SwiftPM links with `-platform_version macos 14.0 14.0`, which stamps the binary as
             // built against SDK 14, and AppKit then keeps the pre-macOS 26 look. Linking as built
             // against SDK 26 turns on Liquid Glass; macOS 14 is still the minimum.
-            linkerSettings: [.unsafeFlags(["-Xlinker", "-platform_version", "-Xlinker", "macos", "-Xlinker", "14.0", "-Xlinker", "26.0"])]
+            // `scripts/build-app.sh` copies Sparkle.framework into Contents/Frameworks.
+            linkerSettings: [.unsafeFlags([
+                "-Xlinker", "-platform_version", "-Xlinker", "macos", "-Xlinker", "14.0", "-Xlinker", "26.0",
+                "-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks",
+            ])]
         ),
         .testTarget(name: "SQLScriptTests", dependencies: ["SQLScript"]),
         .testTarget(name: "DBKitTests", dependencies: ["DBKit"]),

@@ -6,6 +6,7 @@ import AppKit
 @MainActor @objc protocol MoonrowActions {
     @objc optional func newConnection(_ sender: Any?)
     @objc optional func showPreferences(_ sender: Any?)
+    @objc optional func checkForUpdates(_ sender: Any?)
     @objc optional func showConnections(_ sender: Any?)
     @objc optional func newWindow(_ sender: Any?)
     @objc optional func reloadWorkspace(_ sender: Any?)
@@ -116,6 +117,7 @@ enum MainMenu {
 
         main.addSubmenu("") { m in
             m.add("About \(appName)", #selector(NSApplication.orderFrontStandardAboutPanel(_:)))
+            m.add("Check for Updates…", #selector(MoonrowActions.checkForUpdates(_:)))
             m.addItem(.separator())
             m.add("Settings…", #selector(MoonrowActions.showPreferences(_:)), ",")
             m.addItem(.separator())

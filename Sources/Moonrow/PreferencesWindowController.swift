@@ -1,5 +1,6 @@
 import AppCore
 import AppKit
+import Sparkle
 import SQLScript
 
 /// Settings (⌘,): General, Fonts & Colors, Keymap, Locations. Every change is saved and applied at once.
@@ -12,8 +13,8 @@ final class PreferencesWindowController: NSWindowController {
     let locations: LocationsPreferences
     static let locationsPane = 3
 
-    init(settings: SettingsStore) {
-        general = GeneralPreferences(settings: settings)
+    init(settings: SettingsStore, updater: SPUUpdater) {
+        general = GeneralPreferences(settings: settings, updater: updater)
         fonts = FontsPreferences(settings: settings)
         keymap = KeymapPreferences(settings: settings)
         locations = LocationsPreferences(settings: settings)
@@ -113,9 +114,13 @@ final class GeneralPreferences: NSViewController {
     private let safeModeHint = hint("")
     let reopenCheckbox = NSButton(checkboxWithTitle: "Reopen workspaces at launch", target: nil, action: nil)
     let parametersCheckbox = NSButton(checkboxWithTitle: "Ask for query parameters before running", target: nil, action: nil)
+    private let updater: SPUUpdater
+    let updatesCheckbox = NSButton(checkboxWithTitle: "Automatically check for updates", target: nil, action: nil)
+    private let lastCheckHint = hint("")
 
-    init(settings: SettingsStore) {
+    init(settings: SettingsStore, updater: SPUUpdater) {
         self.settings = settings
+        self.updater = updater
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -133,6 +138,8 @@ final class GeneralPreferences: NSViewController {
         reopenCheckbox.action = #selector(changed(_:))
         parametersCheckbox.target = self
         parametersCheckbox.action = #selector(changed(_:))
+        // Sparkle keeps this setting in the user defaults.
+        updatesCheckbox.bind(.value, to: updater, withKeyPath: #keyPath(SPUUpdater.automaticallyChecksForUpdates))
         let grid = formGrid([
             ("Appearance", appearancePopup),
             ("Startup", reopenCheckbox),
@@ -144,12 +151,20 @@ final class GeneralPreferences: NSViewController {
             ("Safe mode for new connections", safeModePopup),
             ("", safeModeHint),
             ("", hint("Each connection keeps its own level: set it in the connection's form, or from the shield in a workspace's toolbar.")),
+
+            ("Updates", updatesCheckbox),
+            ("", lastCheckHint),
         ])
         let root = NSView()
         root.addSubview(grid)
         pinTop(grid, in: root)
         root.widthAnchor.constraint(equalToConstant: 620).isActive = true
         view = root
+        refresh()
+    }
+
+    override func viewWillAppear() {
+        super.viewWillAppear()
         refresh()
     }
 
@@ -160,6 +175,9 @@ final class GeneralPreferences: NSViewController {
         safeModeHint.stringValue = s.defaultSafeMode.detail
         reopenCheckbox.state = s.reopenWorkspaces ? .on : .off
         parametersCheckbox.state = s.queryParameters ? .on : .off
+        lastCheckHint.stringValue = updater.lastUpdateCheckDate.map {
+            "Last checked \($0.formatted(date: .abbreviated, time: .shortened))."
+        } ?? "Not checked yet."
     }
 
     @objc private func changed(_ sender: Any?) {

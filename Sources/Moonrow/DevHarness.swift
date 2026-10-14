@@ -24,6 +24,8 @@ import Darwin
 ///     MOONROW_WELCOME=1 MOONROW_STORE=<empty dir>/connections.json MOONROW_SNAPSHOTS=… Moonrow
 ///     MOONROW_OBJECTS=users MOONROW_STORE=… MOONROW_SNAPSHOTS=… Moonrow /tmp/copy-of-sample.sqlite   (or MOONROW_CONNECT to a scratch database)
 ///     MOONROW_TRANSFER=users MOONROW_STORE=… MOONROW_SNAPSHOTS=… Moonrow /tmp/copy-of-sample.sqlite  (or MOONROW_CONNECT to a scratch database)
+///     MOONROW_FEED_URL=http://127.0.0.1:8000/appcast.xml MOONROW_STORE=… open build/copy/Moonrow.app
+///     MOONROW_UPDATE=install MOONROW_FEED_URL=… MOONROW_STORE=… MOONROW_SNAPSHOTS=… open build/copy/Moonrow.app
 ///
 /// The bench opens the table in the first workspace with every row in one page, scrolls it like
 /// a fast trackpad, jumps to far-apart rows, prints timings and quits. The demo drives the grid's
@@ -47,7 +49,7 @@ import Darwin
 enum DevHarness {
     /// Saved workspaces reopen at launch only outside the harnesses (and in the relaunch check).
     static var allowsSessionRestore: Bool {
-        let quiet: Set = ["MOONROW_STORE", "MOONROW_SNAPSHOTS", "MOONROW_SESSION"]
+        let quiet: Set = ["MOONROW_STORE", "MOONROW_SNAPSHOTS", "MOONROW_SESSION", "MOONROW_FEED_URL"]
         return !ProcessInfo.processInfo.environment.keys.contains { $0.hasPrefix("MOONROW_") && !quiet.contains($0) }
     }
 
@@ -127,6 +129,18 @@ enum DevHarness {
                     print("\(key) demo failed: \(error)")
                 }
                 NSApp.terminate(nil)
+            }
+            return
+        }
+        // `MOONROW_UPDATE=install` installs the update `MOONROW_FEED_URL` offers; Sparkle relaunches the app.
+        if env["MOONROW_UPDATE"] == "install" {
+            Task {
+                do {
+                    try await updateDemo(app, snapshots: snapshots)
+                } catch {
+                    print("update demo failed: \(error)")
+                    NSApp.terminate(nil)
+                }
             }
             return
         }
@@ -1249,8 +1263,8 @@ enum DevHarness {
         }
     }
 
-    static func waitFor<T>(_ what: String, _ probe: () -> T?) async throws -> T {
-        let deadline = Date().addingTimeInterval(15)
+    static func waitFor<T>(_ what: String, seconds: Double = 15, _ probe: () -> T?) async throws -> T {
+        let deadline = Date().addingTimeInterval(seconds)
         while true {
             if let value = probe() { return value }
             guard Date() < deadline else { throw HarnessError("timed out waiting for \(what)") }

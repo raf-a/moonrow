@@ -4,7 +4,7 @@ import DBKit
 import UniformTypeIdentifiers
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, MoonrowActions {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, MoonrowActions {
     /// `MOONROW_STORE` points at another connections file, for development.
     let store = ConnectionStore(fileURL: ProcessInfo.processInfo.environment["MOONROW_STORE"]
         .map { URL(filePath: ($0 as NSString).expandingTildeInPath) } ?? ConnectionStore.defaultFileURL())
@@ -236,7 +236,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MoonrowActions {
     }
 
     @objc func showPreferences(_ sender: Any?) {
-        if preferences == nil { preferences = PreferencesWindowController(settings: settings) }
+        if preferences == nil { preferences = PreferencesWindowController(settings: settings, updater: updates.updater) }
         preferences?.showWindow(nil)
     }
 
@@ -244,6 +244,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MoonrowActions {
     func showLocations() {
         showPreferences(nil)
         preferences?.show(pane: PreferencesWindowController.locationsPane)
+    }
+
+    // MARK: - Updates
+
+    let updates = Updates()
+
+    @objc func checkForUpdates(_ sender: Any?) {
+        updates.controller.checkForUpdates(sender)
+    }
+
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if item.action == #selector(checkForUpdates(_:)) { return updates.updater.canCheckForUpdates }
+        return true
     }
 
     // MARK: - Backup and restore
