@@ -9,3 +9,4 @@ DerivedData/
 __pycache__/
 build/
 .claude/worktrees/
+CLAUDE.local.md

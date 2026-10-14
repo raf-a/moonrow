@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v5
+
+      # The newest Xcode on the image, unless the XCODE_APP repository variable names one
+      # (e.g. /Applications/Xcode_27.0.app).
+      - name: Select Xcode
+        run: |
+          xcode="${{ vars.XCODE_APP }}"
+          [ -n "$xcode" ] || xcode="$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+          sudo xcode-select -s "$xcode"
+          xcodebuild -version
+          swift --version
+
+      - uses: actions/cache@v4
+        with:
+          path: .build
+          key: spm-${{ runner.os }}-${{ hashFiles('Package.resolved') }}-${{ hashFiles('Package.swift') }}
+          restore-keys: spm-${{ runner.os }}-
+
+      - name: Build
+        run: swift build
+
+      # Server tests (Postgres, MySQL, MariaDB, SSH) skip without their MOONROW_TEST_* variables.
+      - name: Test
+        run: swift test
+
+      - name: Bundle the app
+        run: scripts/build-app.sh debug

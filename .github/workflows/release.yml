@@ -1,0 +1,107 @@
+name: Release
+
+# Pushing a tag like v1.2.0 builds, packages and publishes a GitHub release. A tag with a
+# hyphen (v1.2.0-rc.1) publishes a prerelease. Running the workflow by hand builds and
+# packages without publishing; the files are kept as a workflow artifact.
+#
+# Signing and notarization are optional. With these repository secrets set, the app is signed
+# with a Developer ID and notarized; without them it is signed ad hoc:
+#   MACOS_CERTIFICATE           base64 of the Developer ID Application .p12
+#   MACOS_CERTIFICATE_PASSWORD  its password
+#   NOTARY_KEY                  base64 of an App Store Connect API key (.p8)
+#   NOTARY_KEY_ID, NOTARY_ISSUER_ID
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-26
+    env:
+      MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      NOTARY_KEY: ${{ secrets.NOTARY_KEY }}
+      NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+      NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Select Xcode
+        run: |
+          xcode="${{ vars.XCODE_APP }}"
+          [ -n "$xcode" ] || xcode="$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+          sudo xcode-select -s "$xcode"
+          xcodebuild -version
+
+      - name: Version
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="0.0.0-dev.$GITHUB_RUN_NUMBER"
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "Version $version"
+
+      - name: Test
+        run: swift test
+
+      - name: Import the signing certificate
+        if: env.MACOS_CERTIFICATE != ''
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password="$(uuidgen)"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          printf '%s' "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" -f pkcs12 -t cert \
+            -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/certificate.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          identity="$(security find-identity -v -p codesigning "$keychain" \
+            | sed -nE 's/.*"(Developer ID Application: [^"]*)".*/\1/p' | head -1)"
+          [ -n "$identity" ] || { echo "No Developer ID Application identity in the certificate" >&2; exit 1; }
+          echo "MOONROW_SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+
+      - name: Prepare the notary key
+        if: env.NOTARY_KEY != '' && env.MACOS_CERTIFICATE != ''
+        run: |
+          printf '%s' "$NOTARY_KEY" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+          echo "NOTARY_KEY_PATH=$RUNNER_TEMP/notary.p8" >> "$GITHUB_ENV"
+
+      - name: Build
+        env:
+          MOONROW_UNIVERSAL: '1'
+        run: MOONROW_VERSION="$VERSION" MOONROW_BUILD="$GITHUB_RUN_NUMBER" scripts/build-app.sh release
+
+      - name: Package
+        run: scripts/package-release.sh "$VERSION"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Moonrow-${{ env.VERSION }}
+          path: build/release/
+
+      - name: Publish the release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          flags=""
+          case "$VERSION" in *-*) flags="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" --title "Moonrow $VERSION" --generate-notes $flags \
+            build/release/Moonrow-"$VERSION".dmg build/release/Moonrow-"$VERSION".zip build/release/SHA256SUMS
+
+      - name: Remove the signing keychain
+        if: always() && env.MACOS_CERTIFICATE != ''
+        run: |
+          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true
+          rm -f "$RUNNER_TEMP/notary.p8"
