@@ -286,6 +286,8 @@ extension DevHarness {
             if let w = sheet.window { window.endSheet(w) }
         }
 
+        try await resultsChecks(workspace, window: window, table: table, snapshots: snapshots)
+
         changes.discardAll()
         print("power demo done")
     }
