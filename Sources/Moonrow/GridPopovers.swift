@@ -1,5 +1,6 @@
 import AppCore
 import AppKit
+import SQLScript
 
 /// Page size and offset for the grid, applied together with Go.
 @MainActor
@@ -61,12 +62,15 @@ final class ChangesPreviewController: NSViewController {
     private let statements: [String]
     private let note: String?
     private let summary: String?
+    private let text = SQLTextView.make()
+    private let highlighter: SQLHighlighter
 
     /// `summary` replaces the "N statements, run in one transaction" line.
-    init(statements: [String], note: String?, summary: String? = nil) {
+    init(statements: [String], note: String?, summary: String? = nil, dialect: LexerDialect) {
         self.statements = statements
         self.note = note
         self.summary = summary
+        highlighter = SQLHighlighter(dialect: dialect)
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -74,13 +78,12 @@ final class ChangesPreviewController: NSViewController {
     required init?(coder: NSCoder) { fatalError() }
 
     override func loadView() {
-        let scroll = NSTextView.scrollableTextView()
-        let text = scroll.documentView as! NSTextView
         text.isEditable = false
-        text.isSelectable = true
-        text.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-        text.textContainerInset = NSSize(width: 6, height: 6)
         text.string = statements.joined(separator: "\n")
+        let scroll = NSScrollView()
+        scroll.documentView = text
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
 
         let noteLabel = NSTextField(wrappingLabelWithString: note ?? "")
         noteLabel.font = .systemFont(ofSize: 11)
@@ -108,6 +111,13 @@ final class ChangesPreviewController: NSViewController {
         root.addSubview(stack)
         stack.pin(to: root, inset: 12)
         view = root
+        NotificationCenter.default.addObserver(self, selector: #selector(styleChanged), name: AppStyle.didChange, object: nil)
+        styleChanged()
+    }
+
+    @objc private func styleChanged() {
+        text.applyStyle()
+        highlighter.highlight(text.textStorage!, delta: 0, full: true)
     }
 
     @objc private func commit(_ sender: Any?) { onCommit?() }

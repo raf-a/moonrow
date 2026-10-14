@@ -155,7 +155,8 @@ extension WorkspaceWindowController: NSMenuItemValidation {
         } catch {
             return showCommitError(error, title: "Can't apply these changes", staged: true)
         }
-        let controller = ChangesPreviewController(statements: [plan.preview], note: nil, summary: plan.summary)
+        let controller = ChangesPreviewController(
+            statements: [plan.preview], note: nil, summary: plan.summary, dialect: connection.dialect.lexer)
         let sheet = NSWindow(contentViewController: controller)
         sheet.setContentSize(NSSize(width: 680, height: 380))
         let holder = NSWindowController(window: sheet)
