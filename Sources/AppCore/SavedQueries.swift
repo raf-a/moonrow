@@ -31,16 +31,20 @@ public final class SavedQueries {
         public var path: String { folder.isEmpty ? name : folder + "/" + name }
     }
 
-    public enum StoreError: Error, CustomStringConvertible {
+    public enum StoreError: LocalizedError, CustomStringConvertible {
         case invalidName
         case exists(String)
+        case folderExists(String)
 
-        public var description: String {
+        public var errorDescription: String? {
             switch self {
-            case .invalidName: "A query needs a name."
+            case .invalidName: "The name can’t be empty."
             case .exists(let name): "A query named “\(name)” already exists."
+            case .folderExists(let name): "A folder named “\(name)” already exists."
             }
         }
+
+        public var description: String { errorDescription ?? "" }
     }
 
     public let directory: URL
@@ -50,6 +54,8 @@ public final class SavedQueries {
     public private(set) var folders: [String] = []
 
     private var watcher: DirectoryWatcher?
+    /// Each query's text as of its modification date, for searching.
+    private var searchTexts: [URL: (modified: Date, text: String)] = [:]
 
     /// Creates the directory when it's missing, so it can be watched.
     public init(directory: URL) {
@@ -106,6 +112,16 @@ public final class SavedQueries {
         try String(contentsOf: query.url, encoding: .utf8)
     }
 
+    /// Whether the query's name or its SQL contains `search`, ignoring case. An empty search
+    /// matches everything.
+    public func matches(_ query: Query, _ search: String) -> Bool {
+        guard !search.isEmpty, !query.name.localizedCaseInsensitiveContains(search) else { return true }
+        if searchTexts[query.url]?.modified != query.modified {
+            searchTexts[query.url] = (query.modified, (try? text(of: query)) ?? "")
+        }
+        return searchTexts[query.url]?.text.localizedCaseInsensitiveContains(search) ?? false
+    }
+
     /// Writes `sql` under `name` in `folder`, replacing a query with that name only when
     /// `overwrite` is set. A folder that doesn't exist is created.
     @discardableResult
@@ -152,8 +168,24 @@ public final class SavedQueries {
         return queries.first { $0.folder == folder && $0.url.lastPathComponent == url.lastPathComponent } ?? query
     }
 
-    public func delete(_ query: Query) throws {
-        try FileManager.default.removeItem(at: query.url)
+    /// Moves the query's file to the Trash (deletes it when `trash` is off); returns where it
+    /// went, for `putBack`.
+    @discardableResult
+    public func delete(_ query: Query, trash: Bool = true) throws -> URL? {
+        var trashed: NSURL?
+        if trash { try FileManager.default.trashItem(at: query.url, resultingItemURL: &trashed) }
+        else { try FileManager.default.removeItem(at: query.url) }
+        changed()
+        return trashed as URL?
+    }
+
+    /// Moves a query or folder out of the Trash back to `original` (undoing `delete` or
+    /// `deleteFolder`). Nothing is overwritten.
+    public func putBack(_ trashed: URL, to original: URL) throws {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: original.path) { throw CocoaError(.fileWriteFileExists, userInfo: [NSFilePathErrorKey: original.path]) }
+        try fm.createDirectory(at: original.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try fm.moveItem(at: trashed, to: original)
         changed()
     }
 
@@ -162,7 +194,7 @@ public final class SavedQueries {
     public func addFolder(_ name: String) throws -> String {
         let folder = Self.fileName(for: name)
         guard !folder.isEmpty else { throw StoreError.invalidName }
-        guard !folders.contains(where: { $0.lowercased() == folder.lowercased() }) else { throw StoreError.exists(folder) }
+        guard !folders.contains(where: { $0.lowercased() == folder.lowercased() }) else { throw StoreError.folderExists(folder) }
         try FileManager.default.createDirectory(at: folderURL(folder), withIntermediateDirectories: true)
         changed()
         return folder
@@ -174,21 +206,27 @@ public final class SavedQueries {
         guard !new.isEmpty else { throw StoreError.invalidName }
         guard new != folder else { return folder }
         if new.lowercased() != folder.lowercased(), folders.contains(where: { $0.lowercased() == new.lowercased() }) {
-            throw StoreError.exists(new)
+            throw StoreError.folderExists(new)
         }
         try FileManager.default.moveItem(at: folderURL(folder), to: folderURL(new))
         changed()
         return new
     }
 
-    /// The folder's directory, queries and all; `trash` moves it to the Trash instead of
-    /// deleting it.
-    public func deleteFolder(_ folder: String, trash: Bool = true) throws {
-        guard !folder.isEmpty else { return }
-        if trash { try FileManager.default.trashItem(at: folderURL(folder), resultingItemURL: nil) }
+    /// Moves the folder, queries and all, to the Trash (deletes it when `trash` is off);
+    /// returns where it went, for `putBack`.
+    @discardableResult
+    public func deleteFolder(_ folder: String, trash: Bool = true) throws -> URL? {
+        guard !folder.isEmpty else { return nil }
+        var trashed: NSURL?
+        if trash { try FileManager.default.trashItem(at: folderURL(folder), resultingItemURL: &trashed) }
         else { try FileManager.default.removeItem(at: folderURL(folder)) }
         changed()
+        return trashed as URL?
     }
+
+    /// Where the folder's directory is.
+    public func url(ofFolder folder: String) -> URL { folderURL(folder) }
 
     private func changed() {
         reload()

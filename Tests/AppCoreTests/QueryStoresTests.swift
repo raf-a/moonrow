@@ -105,7 +105,7 @@ private func tempDir() -> URL {
         try store.rename(renamed, to: "totals by day")
         #expect(store.queries.map(\.name) == ["active users", "totals by day"])
 
-        try store.delete(store.queries[0])
+        try store.delete(store.queries[0], trash: false)
         #expect(store.queries.map(\.name) == ["totals by day"])
     }
 
@@ -135,6 +135,26 @@ private func tempDir() -> URL {
         #expect(store.queries.map(\.path) == ["monthly"])
         // A reopened store reads the same.
         #expect(SavedQueries(directory: dir).folders == ["Empty"])
+    }
+
+    @Test func putBackAndSearch() throws {
+        let store = SavedQueries(directory: tempDir())
+        let q = try store.save("select * from orders", as: "daily")
+        try store.save("select 1", as: "other")
+        #expect(store.queries.filter { store.matches($0, "ORDERS") }.map(\.name) == ["daily"])
+        #expect(store.queries.filter { store.matches($0, "oth") }.map(\.name) == ["other"])
+        #expect(store.queries.filter { store.matches($0, "") }.count == 2)
+
+        let elsewhere = tempDir()
+        try FileManager.default.createDirectory(at: elsewhere, withIntermediateDirectories: true)
+        let aside = elsewhere.appending(path: "daily.sql")
+        try FileManager.default.moveItem(at: q.url, to: aside)
+        store.reload()
+        try store.putBack(aside, to: q.url)
+        #expect(store.queries.map(\.name) == ["daily", "other"])
+        // Nothing is overwritten.
+        try Data("x".utf8).write(to: aside)
+        #expect(throws: (any Error).self) { try store.putBack(aside, to: q.url) }
     }
 
     @Test func fileNames() {

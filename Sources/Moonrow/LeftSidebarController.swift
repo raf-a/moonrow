@@ -255,23 +255,30 @@ class SidebarListController: NSViewController, NSTableViewDataSource, NSTableVie
     }
 }
 
-/// Saved queries, in folders (one level) then those in no folder. Double-click opens one in a
-/// tab of its own; dragging a query onto a folder (or the empty area) files it there.
+/// Saved queries, in folders (one level) then those in no folder. Double-click or Return opens
+/// one in a tab of its own; dragging a query onto a folder (or the empty area) files it there.
+/// Renaming happens in the row; Delete moves to the Trash. The pane has its own undo.
 @MainActor
-final class SavedQueriesViewController: SidebarListController, NSOutlineViewDataSource, NSOutlineViewDelegate, NSMenuDelegate {
+final class SavedQueriesViewController: SidebarListController, NSOutlineViewDataSource, NSOutlineViewDelegate,
+    NSMenuDelegate, NSMenuItemValidation
+{
     /// Replaced when the connection's queries folder changes.
     var store: SavedQueries {
         didSet {
             guard store !== oldValue, isViewLoaded else { return }
             NotificationCenter.default.removeObserver(self, name: SavedQueries.didChange, object: oldValue)
             NotificationCenter.default.addObserver(self, selector: #selector(storeChanged), name: SavedQueries.didChange, object: store)
+            // Steps in the old folder no longer apply.
+            paneUndoManager.removeAllActions()
             reloadList()
         }
     }
     var onOpen: ((SavedQueries.Query) -> Void)?
     var onInsert: ((String) -> Void)?
-    /// After a rename or move (new value) or delete (nil).
+    /// After a rename or move (new value) or a move to the Trash (nil).
     var onChange: ((SavedQueries.Query, SavedQueries.Query?) -> Void)?
+    /// Undo and redo while the pane has the focus (the window asks for it).
+    let paneUndoManager = UndoManager()
 
     /// A row: a folder, or a query. Kept per path so the outline remembers what's expanded.
     final class Node: NSObject {
@@ -286,8 +293,10 @@ final class SavedQueriesViewController: SidebarListController, NSOutlineViewData
     private var folderChildren: [String: [Node]] = [:]
     private var nodes: [String: Node] = [:]
     private var collapsed = Set<String>()
+    /// The row whose name is being edited, and whether Esc cancelled it.
+    private var renaming: (node: Node, field: NSTextField, cancelled: Bool)?
     private static let dragType = NSPasteboard.PasteboardType("app.moonrow.saved-query")
-    var outline: NSOutlineView { table as! NSOutlineView }
+    var outline: KeyOutlineView { table as! KeyOutlineView }
 
     init(store: SavedQueries) {
         self.store = store
@@ -297,7 +306,7 @@ final class SavedQueriesViewController: SidebarListController, NSOutlineViewData
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
-    override func makeTable() -> NSTableView { NSOutlineView() }
+    override func makeTable() -> NSTableView { KeyOutlineView() }
 
     override func loadView() {
         super.loadView()
@@ -308,6 +317,8 @@ final class SavedQueriesViewController: SidebarListController, NSOutlineViewData
         outline.indentationPerLevel = 12
         outline.registerForDraggedTypes([Self.dragType])
         outline.setDraggingSourceOperationMask(.move, forLocal: true)
+        outline.onReturn = { [weak self] in self?.openSelected() }
+        outline.onDelete = { [weak self] in self?.moveToTrash(nil) }
         let menu = NSMenu()
         menu.delegate = self
         outline.menu = menu
@@ -315,7 +326,11 @@ final class SavedQueriesViewController: SidebarListController, NSOutlineViewData
         reloadList()
     }
 
-    @objc private func storeChanged() { reloadList() }
+    @objc private func storeChanged() {
+        // A row being renamed keeps its field until the rename ends.
+        guard renaming == nil else { return }
+        reloadList()
+    }
 
     private func node(folder: String?, query: SavedQueries.Query?) -> Node {
         let key = query.map { "q:" + $0.path } ?? "f:" + (folder ?? "")
@@ -331,22 +346,31 @@ final class SavedQueriesViewController: SidebarListController, NSOutlineViewData
     override func reloadList() {
         store.reload()
         let q = search.stringValue.trimmingCharacters(in: .whitespaces)
-        func matches(_ query: SavedQueries.Query) -> Bool { q.isEmpty || query.name.localizedCaseInsensitiveContains(q) }
+        let selected = item(at: outline.selectedRow).map(key)
         folderChildren = [:]
         var folderNodes: [Node] = []
         for folder in store.folders {
-            let inside = store.queries(in: folder).filter(matches).map { node(folder: folder, query: $0) }
+            let inside = store.queries(in: folder).filter { store.matches($0, q) }.map { node(folder: folder, query: $0) }
             // While searching, folders without a match hide.
             if !q.isEmpty && inside.isEmpty && !folder.localizedCaseInsensitiveContains(q) { continue }
             folderChildren[folder] = inside
             folderNodes.append(node(folder: folder, query: nil))
         }
-        roots = folderNodes + store.queries(in: "").filter(matches).map { node(folder: nil, query: $0) }
+        roots = folderNodes + store.queries(in: "").filter { store.matches($0, q) }.map { node(folder: nil, query: $0) }
         outline.reloadData()
         for n in folderNodes where !q.isEmpty || !collapsed.contains(n.folder!) { outline.expandItem(n) }
-        empty.stringValue = store.queries.isEmpty && store.folders.isEmpty
-            ? "No saved queries.\nIn a query tab, choose Save from the Run menu." : "Nothing matches “\(q)”."
+        if let selected, let n = nodes[selected] { select(n) }
+        empty.stringValue = store.queries.isEmpty && store.folders.isEmpty ? "No Saved Queries" : "No Results"
         empty.isHidden = !roots.isEmpty
+    }
+
+    private func key(_ n: Node) -> String { n.query.map { "q:" + $0.path } ?? "f:" + (n.folder ?? "") }
+
+    private func select(_ n: Node) {
+        let row = outline.row(forItem: n)
+        guard row >= 0 else { return }
+        outline.selectRowIndexes([row], byExtendingSelection: false)
+        outline.scrollRowToVisible(row)
     }
 
     // MARK: - Outline
@@ -406,7 +430,7 @@ final class SavedQueriesViewController: SidebarListController, NSOutlineViewData
             let count = store.queries(in: n.folder!).count
             cell.textField?.stringValue = n.folder!
             cell.imageView?.image = NSImage(systemSymbolName: "folder", accessibilityDescription: "Folder")
-            cell.toolTip = "\(count) quer\(count == 1 ? "y" : "ies")"
+            cell.toolTip = count == 1 ? "1 query" : "\(count.formatted()) queries"
         }
         return cell
     }
@@ -422,41 +446,65 @@ final class SavedQueriesViewController: SidebarListController, NSOutlineViewData
 
     override func doubleClicked(_ sender: Any?) {
         guard let n = item(at: outline.clickedRow) else { return }
-        if let query = n.query { onOpen?(query) }
-        else if outline.isItemExpanded(n) { outline.collapseItem(n) } else { outline.expandItem(n) }
+        if let query = n.query { onOpen?(query) } else { toggle(n) }
+    }
+
+    private func openSelected() {
+        guard let n = item(at: outline.selectedRow) else { return NSSound.beep() }
+        if let query = n.query { onOpen?(query) } else { toggle(n) }
+    }
+
+    private func toggle(_ n: Node) {
+        if outline.isItemExpanded(n) { outline.collapseItem(n) } else { outline.expandItem(n) }
     }
 
     // MARK: - Menu
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
-        func add(_ title: String, _ action: Selector) -> NSMenuItem {
-            let item = menu.addItem(withTitle: title, action: action, keyEquivalent: "")
-            item.target = self
-            return item
+        func add(_ title: String, _ action: Selector) {
+            menu.addItem(withTitle: title, action: action, keyEquivalent: "").target = self
         }
         if let query = target?.query {
-            _ = add("Open", #selector(open(_:)))
-            _ = add("Insert into Editor", #selector(insert(_:)))
-            _ = add("Rename…", #selector(rename(_:)))
-            let move = menu.addItem(withTitle: "Move to", action: nil, keyEquivalent: "")
-            move.submenu = NSMenu(title: "Move to")
-            for (title, folder) in [("No Folder", "")] + store.folders.map({ ($0, $0) }) {
-                let item = move.submenu!.addItem(withTitle: title, action: #selector(moveToFolder(_:)), keyEquivalent: "")
-                item.target = self
-                item.representedObject = folder
-                item.state = folder == query.folder ? .on : .off
-                item.isEnabled = folder != query.folder
+            add("Open", #selector(open(_:)))
+            add("Insert into Editor", #selector(insert(_:)))
+            menu.addItem(.separator())
+            add("Rename", #selector(rename(_:)))
+            if !store.folders.isEmpty {
+                let move = menu.addItem(withTitle: "Move to", action: nil, keyEquivalent: "")
+                move.submenu = NSMenu(title: "Move to")
+                for (title, folder) in [("No Folder", "")] + store.folders.map({ ($0, $0) }) {
+                    let item = move.submenu!.addItem(withTitle: title, action: #selector(moveToFolder(_:)), keyEquivalent: "")
+                    item.target = self
+                    item.representedObject = folder
+                    item.state = folder == query.folder ? .on : .off
+                }
             }
-            _ = add("Show in Finder", #selector(reveal(_:)))
-            _ = add("Delete…", #selector(delete(_:)))
+            add("Show in Finder", #selector(reveal(_:)))
+            menu.addItem(.separator())
+            add("Move to Trash", #selector(moveToTrash(_:)))
             menu.addItem(.separator())
         } else if target?.folder != nil {
-            _ = add("Rename Folder…", #selector(renameFolder(_:)))
-            _ = add("Delete Folder…", #selector(deleteFolder(_:)))
+            add("Rename", #selector(rename(_:)))
+            add("Show in Finder", #selector(reveal(_:)))
+            menu.addItem(.separator())
+            add("Move to Trash", #selector(moveToTrash(_:)))
             menu.addItem(.separator())
         }
-        _ = add("New Folder…", #selector(newFolder(_:)))
+        add("New Folder", #selector(newFolder(_:)))
+    }
+
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        switch item.action {
+        case #selector(moveToFolder(_:)):
+            return (item.representedObject as? String) != target?.query?.folder
+        case #selector(deleteRows(_:)):
+            // Edit ▸ Delete (⌘⌫) while the pane has the focus.
+            if item.menu?.title == "Edit" { item.title = "Move to Trash" }
+            return target != nil
+        default:
+            return true
+        }
     }
 
     @objc private func open(_ sender: Any?) {
@@ -469,16 +517,9 @@ final class SavedQueriesViewController: SidebarListController, NSOutlineViewData
     }
 
     @objc private func reveal(_ sender: Any?) {
-        if let query = target?.query { NSWorkspace.shared.activateFileViewerSelecting([query.url]) }
-    }
-
-    @objc private func rename(_ sender: Any?) {
-        guard let query = target?.query else { return }
-        ask("Rename “\(query.name)”", value: query.name, button: "Rename") { [weak self] name in
-            guard let self else { return }
-            let renamed = try self.store.rename(query, to: name)
-            self.onChange?(query, renamed)
-        }
+        guard let n = target else { return }
+        let url = n.query?.url ?? store.url(ofFolder: n.folder ?? "")
+        NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
     @objc private func moveToFolder(_ sender: NSMenuItem) {
@@ -486,89 +527,137 @@ final class SavedQueriesViewController: SidebarListController, NSOutlineViewData
         move(query, to: folder)
     }
 
+    /// Edit ▸ Delete (⌘⌫).
+    @objc func deleteRows(_ sender: Any?) { moveToTrash(sender) }
+
+    // MARK: - Changes, each undoable
+
     /// Files a query in a folder ("" for none), as the menu or a drag does.
     func move(_ query: SavedQueries.Query, to folder: String) {
-        do {
+        attempt("Couldn’t move “\(query.name)”") {
             let moved = try store.move(query, to: folder)
             onChange?(query, moved)
-        } catch {
-            show(error)
+            registerUndo("Move Query") { $0.move(moved, to: query.folder) }
+            if let n = nodes["q:" + moved.path] { select(n) }
         }
     }
 
-    @objc private func delete(_ sender: Any?) {
-        guard let query = target?.query, let window = view.window else { return }
-        let alert = NSAlert()
-        alert.messageText = "Delete “\(query.name)”?"
-        alert.informativeText = "The file is moved to the Trash."
-        alert.addButton(withTitle: "Delete")
-        alert.addButton(withTitle: "Cancel")
-        alert.buttons[0].hasDestructiveAction = true
-        alert.beginSheetModal(for: window) { [weak self] response in
-            guard response == .alertFirstButtonReturn, let self else { return }
-            do {
-                try FileManager.default.trashItem(at: query.url, resultingItemURL: nil)
-                self.store.reload()
-                NotificationCenter.default.post(name: SavedQueries.didChange, object: self.store)
-                self.onChange?(query, nil)
-            } catch {
-                self.show(error)
-            }
+    private func rename(_ query: SavedQueries.Query, to name: String) {
+        attempt("Couldn’t rename “\(query.name)”") {
+            let renamed = try store.rename(query, to: name)
+            guard renamed.url != query.url || renamed.name != query.name else { return }
+            onChange?(query, renamed)
+            registerUndo("Rename Query") { $0.rename(renamed, to: query.name) }
         }
     }
 
-    @objc func newFolder(_ sender: Any?) {
-        ask("New Folder", value: "", button: "Create") { [weak self] name in
-            guard let self else { return }
-            let folder = try self.store.addFolder(name)
-            self.collapsed.remove(folder)
-        }
-    }
-
-    @objc private func renameFolder(_ sender: Any?) {
-        guard let folder = target?.folder, target?.query == nil else { return }
+    private func renameFolder(_ folder: String, to name: String) {
         let before = store.queries(in: folder)
-        ask("Rename Folder “\(folder)”", value: folder, button: "Rename") { [weak self] name in
-            guard let self else { return }
-            let new = try self.store.renameFolder(folder, to: name)
-            for q in before { self.onChange?(q, self.store.query(named: q.name, in: new)) }
+        attempt("Couldn’t rename “\(folder)”") {
+            let new = try store.renameFolder(folder, to: name)
+            guard new != folder else { return }
+            if collapsed.remove(folder) != nil { collapsed.insert(new) }
+            for q in before { onChange?(q, store.query(named: q.name, in: new)) }
+            registerUndo("Rename Folder") { $0.renameFolder(new, to: folder) }
         }
     }
 
-    @objc private func deleteFolder(_ sender: Any?) {
-        guard let folder = target?.folder, target?.query == nil, let window = view.window else { return }
-        let inside = store.queries(in: folder)
-        let alert = NSAlert()
-        alert.messageText = "Delete the folder “\(folder)”?"
-        alert.informativeText = inside.isEmpty ? "The folder is empty." : "It and its \(inside.count) quer\(inside.count == 1 ? "y" : "ies") are moved to the Trash."
-        alert.addButton(withTitle: "Delete")
-        alert.addButton(withTitle: "Cancel")
-        alert.buttons[0].hasDestructiveAction = true
-        alert.beginSheetModal(for: window) { [weak self] response in
-            guard response == .alertFirstButtonReturn, let self else { return }
-            do {
-                try self.store.deleteFolder(folder)
-                for q in inside { self.onChange?(q, nil) }
-            } catch {
-                self.show(error)
+    @objc private func moveToTrash(_ sender: Any?) {
+        guard let n = target else { return NSSound.beep() }
+        if let query = n.query {
+            attempt("Couldn’t move “\(query.name)” to the Trash") {
+                guard let trashed = try store.delete(query) else { return }
+                onChange?(query, nil)
+                registerUndo("Move to Trash") { $0.putBack(trashed, to: query.url) }
+            }
+        } else if let folder = n.folder {
+            let inside = store.queries(in: folder)
+            let original = store.url(ofFolder: folder)
+            attempt("Couldn’t move “\(folder)” to the Trash") {
+                guard let trashed = try store.deleteFolder(folder) else { return }
+                for q in inside { onChange?(q, nil) }
+                registerUndo("Move to Trash") { $0.putBack(trashed, to: original) }
             }
         }
     }
 
-    private func ask(_ title: String, value: String, button: String, _ apply: @escaping (String) throws -> Void) {
-        guard let window = view.window else { return }
-        let alert = NSAlert()
-        alert.messageText = title
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 22))
-        field.stringValue = value
-        alert.accessoryView = field
-        alert.addButton(withTitle: button)
-        alert.addButton(withTitle: "Cancel")
-        alert.window.initialFirstResponder = field
-        alert.beginSheetModal(for: window) { [weak self] response in
-            guard response == .alertFirstButtonReturn else { return }
-            do { try apply(field.stringValue) } catch { self?.show(error) }
+    /// Undoes a move to the Trash; redo moves it there again.
+    private func putBack(_ trashed: URL, to original: URL) {
+        attempt("Couldn’t put back “\(original.deletingPathExtension().lastPathComponent)”") {
+            try store.putBack(trashed, to: original)
+            let place = store.location(of: original)
+            let n = place.map { nodes["q:" + ($0.folder.isEmpty ? $0.name : $0.folder + "/" + $0.name)] } ?? nodes["f:" + original.lastPathComponent]
+            if let n { select(n) }
+            registerUndo("Move to Trash") { pane in
+                if let n { pane.select(n) }
+                pane.moveToTrash(nil)
+            }
         }
+    }
+
+    /// A folder named "New Folder" (or "New Folder 2"…) whose name is then edited in its row.
+    @objc func newFolder(_ sender: Any?) {
+        var name = "New Folder"
+        var number = 2
+        while store.folders.contains(where: { $0.caseInsensitiveCompare(name) == .orderedSame }) {
+            name = "New Folder \(number)"
+            number += 1
+        }
+        attempt("Couldn’t create the folder") {
+            let folder = try store.addFolder(name)
+            collapsed.remove(folder)
+            search.stringValue = ""
+            reloadList()
+            registerUndo("New Folder") { _ = try? $0.store.deleteFolder(folder) }
+            if let n = nodes["f:" + folder] { beginRename(n) }
+        }
+    }
+
+    private func registerUndo(_ name: String, _ action: @escaping @MainActor (SavedQueriesViewController) -> Void) {
+        paneUndoManager.registerUndo(withTarget: self) { pane in MainActor.assumeIsolated { action(pane) } }
+        paneUndoManager.setActionName(name)
+    }
+
+    private func attempt(_ title: String, _ body: () throws -> Void) {
+        do { try body() } catch { show(error, title: title) }
+    }
+
+    // MARK: - Renaming in the row
+
+    @objc private func rename(_ sender: Any?) {
+        if let n = target { beginRename(n) }
+    }
+
+    private func beginRename(_ n: Node) {
+        let row = outline.row(forItem: n)
+        guard row >= 0, let field = (outline.view(atColumn: 0, row: row, makeIfNecessary: true) as? NSTableCellView)?.textField
+        else { return NSSound.beep() }
+        select(n)
+        field.isEditable = true
+        field.delegate = self
+        renaming = (n, field, false)
+        view.window?.makeFirstResponder(field)
+    }
+
+    @objc func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        guard let r = renaming, control === r.field, selector == #selector(NSResponder.cancelOperation(_:)) else { return false }
+        renaming?.cancelled = true
+        view.window?.makeFirstResponder(outline)
+        return true
+    }
+
+    @objc func controlTextDidEndEditing(_ obj: Notification) {
+        guard let r = renaming, obj.object as? NSTextField === r.field else { return }
+        renaming = nil
+        r.field.isEditable = false
+        let name = r.field.stringValue
+        let old = r.node.query?.name ?? r.node.folder ?? ""
+        r.field.stringValue = old
+        if view.window?.firstResponder == nil || view.window?.firstResponder === view.window { view.window?.makeFirstResponder(outline) }
+        if !r.cancelled, name != old {
+            if let query = r.node.query { rename(query, to: name) } else if let folder = r.node.folder { renameFolder(folder, to: name) }
+        }
+        reloadList()
     }
 
     // MARK: - Drag to file
@@ -602,11 +691,12 @@ final class SavedQueriesViewController: SidebarListController, NSOutlineViewData
         return true
     }
 
-    private func show(_ error: any Error) {
+    private func show(_ error: any Error, title: String) {
         DispatchQueue.main.async { [weak self] in
             guard let window = self?.view.window else { return }
             let alert = NSAlert()
-            alert.messageText = "\(error)"
+            alert.messageText = title
+            alert.informativeText = error.localizedDescription
             alert.beginSheetModal(for: window)
         }
     }
@@ -619,6 +709,17 @@ final class SavedQueriesViewController: SidebarListController, NSOutlineViewData
             return n.query.map { ($0.folder.isEmpty ? "" : "  ") + $0.name } ?? "[\(n.folder!)]"
         }
     }
+
+    /// Selects the row of `path` ("folder/name" for a query, "[folder]" for a folder).
+    func selectRow(_ path: String) -> Bool {
+        let key = path.hasPrefix("[") ? "f:" + path.dropFirst().dropLast() : "q:" + path
+        guard let n = nodes[key] else { return false }
+        select(n)
+        return outline.selectedRow >= 0
+    }
+
+    /// The text field of the row being renamed.
+    var renamingField: NSTextField? { renaming?.field }
 }
 
 /// Statements run from query tabs, newest first. Double-click puts one in the editor.

@@ -97,6 +97,9 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
         didSet { onTabItemChange?() }
     }
 
+    /// The name of the saved query the tab edited until its file went; it still names the tab.
+    private var formerName: String?
+
     /// The text the tab opened with, when a copy is kept elsewhere (a history entry, say);
     /// closing the tab with it unchanged loses nothing.
     private let keptText: String?
@@ -279,7 +282,7 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
                                  toolTip: (fileURL.path as NSString).abbreviatingWithTildeInPath,
                                  background: AppStyle.colors.background)
         }
-        return TabStrip.Item(title: savedQuery?.name ?? "Query \(number)", symbol: "terminal",
+        return TabStrip.Item(title: savedQuery?.name ?? formerName ?? "Query \(number)", symbol: "terminal",
                              toolTip: savedQuery.map { "Saved query “\($0.name)”" } ?? "Unsaved query",
                              background: AppStyle.colors.background)
     }
@@ -296,11 +299,18 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
     func prepareToClose(then proceed: @escaping () -> Void) {
         guard asksBeforeClosing, let window = view.window else { return proceed() }
         let alert = NSAlert()
-        alert.messageText = "Save “\(tabItem.title)”?"
-        // A file tab saves to its file; any other asks where.
-        alert.informativeText = fileURL == nil ? "Closing the tab drops its text." : "Closing the tab drops its changes."
-        alert.addButton(withTitle: fileURL == nil ? "Save…" : "Save")
-        alert.addButton(withTitle: "Don't Save")
+        // A file tab saves to its file; any other asks where, or goes.
+        if fileURL == nil {
+            alert.messageText = "Do you want to keep the query “\(tabItem.title)”?"
+            alert.informativeText = "You can save it, or delete it now. You can’t undo this action."
+            alert.addButton(withTitle: "Save…")
+            alert.addButton(withTitle: "Delete")
+        } else {
+            alert.messageText = "Do you want to save the changes made to “\(tabItem.title)”?"
+            alert.informativeText = "Your changes will be lost if you don’t save them."
+            alert.addButton(withTitle: "Save")
+            alert.addButton(withTitle: "Don’t Save")
+        }
         alert.addButton(withTitle: "Cancel")
         alert.buttons[1].hasDestructiveAction = true
         alert.beginSheetModal(for: window) { [weak self] response in
@@ -583,7 +593,10 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
             panel.directoryURL = folder.map { store.directory.appending(path: $0, directoryHint: .isDirectory) } ?? store.directory
             panel.nameFieldStringValue = tabItem.title + ".sql"
         }
+        let validator = QueriesFolderValidator(store: store)
+        panel.delegate = validator
         panel.beginSheetModal(for: window) { [weak self] response in
+            withExtendedLifetime(validator) {}
             guard response == .OK, let url = panel.url, let self else { return }
             if self.save(to: url) { saved?() }
         }
@@ -606,6 +619,7 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
                 fileURL = url
             }
             isDirty = false
+            formerName = nil
             autosaveTask?.cancel()
             onTabItemChange?()
             return true
@@ -638,6 +652,7 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
 
     /// The saved query was renamed or deleted from the sidebar, or moved to another folder.
     func savedQueryChanged(to query: SavedQueries.Query?) {
+        if query == nil, let savedQuery { formerName = savedQuery.name }
         savedQuery = query
         onTabItemChange?()
     }
@@ -662,7 +677,7 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
     private func presentError(_ error: any Error, title: String) {
         let alert = NSAlert()
         alert.messageText = title
-        alert.informativeText = "\(error)"
+        alert.informativeText = error.localizedDescription
         if let window = view.window { alert.beginSheetModal(for: window) } else { alert.runModal() }
     }
 
@@ -803,6 +818,30 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
 
     /// For the dev harness: the items the list is showing.
     var completionItems: [SQLCompletion.Item] { completion.items }
+}
+
+/// Keeps the save panel from saving a query two folders down in the queries folder, where it
+/// wouldn't be listed: saved queries are at its top or in one of its folders.
+@MainActor
+final class QueriesFolderValidator: NSObject, NSOpenSavePanelDelegate {
+    let store: SavedQueries
+
+    init(store: SavedQueries) { self.store = store }
+
+    func panel(_ sender: Any, validate url: URL) throws {
+        // How many folders down from the queries folder, if it's in there at all.
+        var dir = url.deletingLastPathComponent()
+        var depth = 0
+        while !SavedQueries.sameDirectory(dir, store.directory) {
+            guard dir.path != "/" else { return }
+            dir = dir.deletingLastPathComponent()
+            depth += 1
+        }
+        guard depth > 1 else { return }
+        throw CocoaError(.fileWriteNoPermission, userInfo: [
+            NSLocalizedDescriptionKey: "Queries can be saved in the queries folder or in one of its folders.",
+        ])
+    }
 }
 
 extension Duration {

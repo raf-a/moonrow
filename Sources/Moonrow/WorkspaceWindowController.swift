@@ -494,11 +494,36 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         proceed()
     }
 
-    private var hasUnsavedQueries: Bool { panes.panes.contains { $0.tabs.contains(where: \.asksBeforeClosing) } }
+    /// Tabs that would ask before closing.
+    var unsavedQueryCount: Int { panes.panes.reduce(0) { $0 + $1.tabs.filter(\.asksBeforeClosing).count } }
+
+    /// With several unsaved queries, asks first whether to go through them (Review Changes…)
+    /// or drop them all (Discard Changes); with one, asks about it. `proceed` runs unless the
+    /// user cancels.
+    func reviewUnsavedQueries(quitting: Bool, then proceed: @escaping () -> Void) {
+        let count = unsavedQueryCount
+        guard count > 1, let window else { return resolveUnsavedQueries(then: proceed) }
+        window.makeKeyAndOrderFront(nil)
+        let alert = NSAlert()
+        alert.messageText = "Do you want to review the \(count) queries with unsaved changes before \(quitting ? "quitting" : "closing the window")?"
+        alert.informativeText = "If you don’t review them, their changes will be lost."
+        alert.addButton(withTitle: "Review Changes…")
+        alert.addButton(withTitle: "Discard Changes")
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons[1].hasDestructiveAction = true
+        alert.beginSheetModal(for: window) { [weak self] response in
+            switch response {
+            // The questions about each one follow this sheet once it's gone.
+            case .alertFirstButtonReturn: DispatchQueue.main.async { self?.resolveUnsavedQueries(then: proceed) }
+            case .alertSecondButtonReturn: proceed()
+            default: break
+            }
+        }
+    }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        guard changes.isEmpty, !hasUnsavedQueries else {
-            resolveUnsavedQueries { [weak self] in
+        guard changes.isEmpty, unsavedQueryCount == 0 else {
+            reviewUnsavedQueries(quitting: false) { [weak self] in
                 self?.resolveStagedChanges(before: "Closing the window") { sender.close() }
             }
             return false
@@ -513,7 +538,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         return super.supplementalTarget(forAction: action, sender: sender)
     }
 
-    func windowWillReturnUndoManager(_ window: NSWindow) -> UndoManager? { changes.undoManager }
+    /// The Queries pane keeps its own steps (renames, moves, the Trash); everything else undoes
+    /// staged changes.
+    func windowWillReturnUndoManager(_ window: NSWindow) -> UndoManager? {
+        if let focus = window.firstResponder as? NSView, leftSidebar.isViewLoaded, focus.isDescendant(of: leftSidebar.queries.view) {
+            return leftSidebar.queries.paneUndoManager
+        }
+        return changes.undoManager
+    }
 
     func windowWillReturnFieldEditor(_ sender: NSWindow, to client: Any?) -> Any? {
         client is NSTextField ? fieldEditor : nil

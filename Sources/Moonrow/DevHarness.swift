@@ -50,7 +50,7 @@ import Darwin
 enum DevHarness {
     /// Saved workspaces reopen at launch only outside the harnesses (and in the relaunch check).
     static var allowsSessionRestore: Bool {
-        let quiet: Set = ["MOONROW_STORE", "MOONROW_SNAPSHOTS", "MOONROW_SESSION", "MOONROW_FEED_URL"]
+        let quiet: Set = ["MOONROW_STORE", "MOONROW_SNAPSHOTS", "MOONROW_SESSION", "MOONROW_FEED_URL", "MOONROW_BACKGROUND"]
         return !ProcessInfo.processInfo.environment.keys.contains { $0.hasPrefix("MOONROW_") && !quiet.contains($0) }
     }
 

@@ -101,6 +101,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
 
     func applicationWillTerminate(_ notification: Notification) {
         isTerminating = true
+        // Saved queries write what was typed in the last second too.
+        for workspace in workspaces { workspace.saveSavedQueries() }
         saveSession()
     }
 
@@ -114,12 +116,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
                 continue  // the connection was deleted since
             }
             count += 1
+            unrestored.append(session)
             connect(config, presentingErrorsIn: nil,
-                    onOpen: { workspace in workspace.restore(session) },
                     onFailure: { [weak self] in if self?.workspaces.isEmpty ?? false { self?.showWelcome(nil) } })
         }
         return count
     }
+
+    /// Workspaces of the last session that haven't opened: still connecting, or they couldn't.
+    /// They stay in the session, and the next workspace opened on their connection gets their
+    /// panes and tabs (unsaved queries included).
+    private var unrestored: [WorkspaceSession] = []
 
     /// Writes what every workspace shows, a second after the last change.
     func scheduleSessionSave() {
@@ -136,6 +143,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         sessionSave = nil
         // Only saved connections come back; the harnesses' unsaved ones aren't kept.
         let open = workspaces.filter { store.connection(id: $0.config.id) != nil }.map { $0.sessionSnapshot() }
+            + unrestored.filter { store.connection(id: $0.connectionID) != nil }
         do { try sessions.save(open) } catch { print("couldn't save the session: \(error)") }
     }
 
@@ -156,10 +164,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
     /// Staged changes are never dropped silently: ask, one workspace at a time, then quit again.
+    /// Unsaved queries come back with the session; when workspaces don't reopen, quitting asks
+    /// about them too, and each workspace closes once answered.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let workspace = workspaces.first(where: { !$0.changes.isEmpty }) else { return .terminateNow }
-        workspace.resolveStagedChanges(before: "Quitting") { NSApp.terminate(nil) }
-        return .terminateCancel
+        if let workspace = workspaces.first(where: { !$0.changes.isEmpty }) {
+            workspace.resolveStagedChanges(before: "Quitting") { NSApp.terminate(nil) }
+            return .terminateCancel
+        }
+        if !settings.settings.reopenWorkspaces, let workspace = workspaces.first(where: { $0.unsavedQueryCount > 0 }) {
+            workspace.reviewUnsavedQueries(quitting: true) { [weak workspace] in
+                workspace?.window?.close()
+                NSApp.terminate(nil)
+            }
+            return .terminateCancel
+        }
+        return .terminateNow
     }
 
     // MARK: - Actions
@@ -513,6 +532,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         workspace.onSessionChange = { [weak self] in self?.scheduleSessionSave() }
         show(workspace, placement)
         workspaces.append(workspace)
+        if let i = unrestored.firstIndex(where: { $0.connectionID == config.id }) {
+            workspace.restore(unrestored.remove(at: i))
+        }
         welcome?.close()
         forms.first { $0.config.id == config.id }?.close()
         scheduleSessionSave()

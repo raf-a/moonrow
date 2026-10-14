@@ -62,16 +62,92 @@ extension DevHarness {
         try check(editor.savedQuery?.url.deletingLastPathComponent().deletingLastPathComponent().lastPathComponent == "Harness B",
                   "the tab follows its query")
 
+        // The Queries pane: search looks in the SQL, Return opens, renaming happens in the row,
+        // the Trash and folders, each undoable while the pane has the focus.
+        let window = try require(workspace.window, "workspace window")
+        let queriesPane = workspace.leftSidebar.queries
+        workspace.leftSidebar.show(.queries)
+        queriesPane.view.layoutSubtreeIfNeeded()
+        // Each step is one undo group, as one event is in the app.
+        let undo = queriesPane.paneUndoManager
+        undo.groupsByEvent = false
+        defer { undo.groupsByEvent = true }
+        func step(_ body: () throws -> Void) rethrows {
+            undo.beginUndoGrouping()
+            defer { undo.endUndoGrouping() }
+            try body()
+        }
+        func runMenu(_ title: String) throws {
+            let menu = NSMenu()
+            queriesPane.menuNeedsUpdate(menu)
+            let item = try require(menu.items.first { $0.title == title }, "menu item \(title)")
+            NSApp.sendAction(try require(item.action, "action"), to: item.target, from: item)
+        }
+        queriesPane.search.stringValue = "select 3"
+        queriesPane.reloadList()
+        try check(queriesPane.shownRows == ["other"], "search finds a query by its SQL \(queriesPane.shownRows)")
+        queriesPane.search.stringValue = ""
+        queriesPane.reloadList()
+        try check(queriesPane.selectRow("other"), "the query is selectable")
+        window.makeFirstResponder(queriesPane.outline)
+        try check(window.undoManager === undo, "the pane has its own undo while it has the focus")
+        queriesPane.outline.onReturn?()
+        try check(workspace.queryController?.savedQuery?.name == "other", "Return opens the selected query")
+        let opened = try require(workspace.queryController, "opened query")
+        workspace.leftSidebar.show(.queries)
+        _ = queriesPane.selectRow("other")
+        window.makeFirstResponder(queriesPane.outline)
+        try runMenu("Rename")
+        let field = try require(queriesPane.renamingField, "the row's name being edited")
+        field.stringValue = "other renamed"
+        step { window.makeFirstResponder(queriesPane.outline) }
+        try check(moved.query(named: "other renamed") != nil && opened.tabItem.title == "other renamed",
+                  "renaming in the row renames the query and its tab")
+        undo.undo()
+        try check(moved.query(named: "other") != nil && opened.savedQuery?.name == "other", "undo renames it back")
+        _ = queriesPane.selectRow("other")
+        step { queriesPane.deleteRows(nil) }
+        try check(moved.query(named: "other") == nil && opened.savedQuery == nil && opened.tabItem.title == "other",
+                  "Delete moves the query to the Trash at once; its tab keeps the name")
+        try check(undo.undoActionName == "Move to Trash", "the step is named \(undo.undoActionName)")
+        undo.undo()
+        try check(moved.query(named: "other") != nil, "undo puts it back")
+        workspace.closeTab(nil)
+        if let sheet = window.attachedSheet { window.endSheet(sheet, returnCode: .alertSecondButtonReturn) }
+        try step { try runMenu("New Folder") }
+        let folderField = try require(queriesPane.renamingField, "the new folder's name being edited")
+        try check(folderField.stringValue == "New Folder", "a new folder is named New Folder")
+        folderField.stringValue = "Archive"
+        step { window.makeFirstResponder(queriesPane.outline) }
+        try check(moved.folders.contains("Archive"), "its name is edited in the row \(moved.folders)")
+        try step { queriesPane.move(try require(moved.query(named: "other"), "other"), to: "Archive") }
+        try check(moved.query(path: "Archive/other") != nil, "a query files into it")
+        _ = queriesPane.selectRow("[Archive]")
+        step { queriesPane.deleteRows(nil) }
+        try check(!moved.folders.contains("Archive") && moved.query(named: "other") == nil, "a folder goes to the Trash with its queries")
+        undo.undo()
+        undo.undo()
+        try check(moved.query(named: "other") != nil && moved.folders.contains("Archive"),
+                  "undo brings the folder back, then takes the query out of it")
+        if let snapshots {
+            window.displayIfNeeded()
+            snapshot(window, to: snapshots.appending(path: "queries-2-pane.png"))
+        }
+        let validator = QueriesFolderValidator(store: moved)
+        try check((try? validator.panel(NSSavePanel(), validate: moved.directory.appending(path: "Reports/deep/x.sql"))) == nil
+                  && (try? validator.panel(NSSavePanel(), validate: moved.directory.appending(path: "Reports/x.sql"))) != nil,
+                  "the save panel refuses a query two folders down")
+
         try FileManager.default.removeItem(at: try require(editor.savedQuery, "saved query").url)
         _ = try await waitFor("tab detached") { editor.savedQuery == nil ? true : nil }
-        try check(editor.editor.string == "select 2;", "a query deleted on disk leaves its tab as an unsaved query")
+        try check(editor.editor.string == "select 2;" && editor.tabItem.title == "report",
+                  "a query deleted on disk leaves its tab as an unsaved query, under its name")
         if let snapshots, let window = workspace.window {
             window.displayIfNeeded()
-            snapshot(window, to: snapshots.appending(path: "queries-2-workspace.png"))
+            snapshot(window, to: snapshots.appending(path: "queries-3-workspace.png"))
         }
 
         // Closing a query that isn't saved anywhere offers to save it.
-        let window = try require(workspace.window, "workspace window")
         func isOpen(_ tab: QueryEditorViewController) -> Bool { workspace.panes.pane(of: tab) != nil }
         func question(_ what: String, with button: String) async throws -> NSWindow {
             try await waitFor(what) { window.attachedSheet.flatMap { s in buttons(in: s.contentView).contains { $0.title == button } ? s : nil } }
@@ -82,17 +158,17 @@ extension DevHarness {
         func sheetGone() async throws { _ = try await waitFor("sheet gone") { window.attachedSheet == nil ? true : nil } }
         try check(workspace.queryController === editor, "the unsaved query is the selected tab")
         workspace.closeTab(nil)
-        var ask = try await question("close question", with: "Don't Save")
-        if let snapshots { snapshot(ask, to: snapshots.appending(path: "queries-3-close.png")) }
+        var ask = try await question("close question", with: "Delete")
+        if let snapshots { snapshot(ask, to: snapshots.appending(path: "queries-4-close.png")) }
         let asked = ask.contentView.map(texts(in:)) ?? []
         let title = editor.tabItem.title
-        try check(asked.contains("Save “\(title)”?"), "closing asks to save it \(asked)")
+        try check(asked.contains("Do you want to keep the query “\(title)”?"), "closing asks whether to keep it \(asked)")
         try click("Cancel", in: ask)
         try await sheetGone()
         try check(isOpen(editor), "Cancel keeps the tab")
 
         workspace.closeTab(nil)
-        try click("Save…", in: try await question("close question", with: "Don't Save"))
+        try click("Save…", in: try await question("close question", with: "Delete"))
         let panel = try await waitFor("save panel") { window.attachedSheet as? NSSavePanel }
         let start = try require(panel.directoryURL, "panel folder")
         try check(moved.location(of: start.appending(path: "x.sql")) != nil && panel.nameFieldStringValue == "\(title).sql",
@@ -110,11 +186,11 @@ extension DevHarness {
         let blank = workspace.newQuery()
         let pane = try require(workspace.panes.pane(of: scratch), "pane")
         pane.close(try require(pane.index(of: scratch), "scratch tab"))
-        ask = try await question("close question", with: "Don't Save")
+        ask = try await question("close question", with: "Delete")
         try check(workspace.queryController === scratch, "closing a tab in the background selects it before asking")
-        try click("Don't Save", in: ask)
+        try click("Delete", in: ask)
         _ = try await waitFor("tab closed") { isOpen(scratch) ? nil : true }
-        try check(moved.queries.count == count, "Don't Save closes the tab, saving nothing")
+        try check(moved.queries.count == count, "Delete closes the tab, saving nothing")
 
         try check(workspace.queryController === blank, "the blank query is selected")
         workspace.closeTab(nil)
@@ -134,28 +210,49 @@ extension DevHarness {
         let edited = workspace.newQuery(text: "select 6;", file: file)
         edited.setText("select 7;")
         workspace.closeTab(nil)
-        try click("Save", in: try await question("close question", with: "Don't Save"))
+        ask = try await question("close question", with: "Don’t Save")
+        let fileAsked = ask.contentView.map(texts(in:)) ?? []
+        try check(fileAsked.contains("Do you want to save the changes made to “\(file.lastPathComponent)”?"),
+                  "a file tab asks to save its changes \(fileAsked)")
+        try click("Save", in: ask)
         _ = try await waitFor("tab closed") { isOpen(edited) ? nil : true }
         try check(try String(contentsOf: file, encoding: .utf8) == "select 7;", "Save writes a file tab's changes to its file, then the tab closes")
         let report2 = workspace.newQuery(text: "select 8;")
         try check(report2.save(to: moved.directory.appending(path: "Reports/report 2.sql")) && report2.savedQuery?.path == "Reports/report 2"
                   && report2.fileURL == nil, "a file in a folder of the queries folder makes a saved query")
 
-        // Closing the window asks about each unsaved query, selecting it; Cancel keeps it all.
+        // Quitting asks about unsaved queries when workspaces don't reopen; Cancel keeps it all.
         let first = workspace.newQuery(text: "select 9;")
         let second = workspace.newQuery(text: "select 10;")
+        try app.settings.update { $0.reopenWorkspaces = false }
+        try check(app.applicationShouldTerminate(NSApp) == .terminateCancel, "quitting waits for the question")
+        ask = try await question("quit question", with: "Discard Changes")
+        let quitAsked = ask.contentView.map(texts(in:)) ?? []
+        try check(quitAsked.contains { $0.hasPrefix("Do you want to review the 2 queries with unsaved changes before quitting?") },
+                  "quitting asks about the 2 unsaved queries \(quitAsked)")
+        try click("Cancel", in: ask)
+        try await sheetGone()
+        try app.settings.update { $0.reopenWorkspaces = true }
+        try check(app.applicationShouldTerminate(NSApp) == .terminateNow, "with workspaces reopening, quitting keeps them for the session")
+
+        // Closing the window with several asks once, then about each one in turn on Review Changes….
         workspace.content.select(try require(workspace.content.index(of: report2), "saved query tab"))
         window.performClose(nil)
-        ask = try await question("window question", with: "Don't Save")
-        try check(workspace.queryController === first, "closing the window selects the first unsaved query")
+        ask = try await question("window question", with: "Review Changes…")
+        if let snapshots { snapshot(ask, to: snapshots.appending(path: "queries-5-review.png")) }
         try click("Cancel", in: ask)
         try await sheetGone()
         try check(window.isVisible && isOpen(first) && isOpen(second), "Cancel keeps the window and its tabs")
         window.performClose(nil)
-        try click("Don't Save", in: try await question("window question", with: "Don't Save"))
-        _ = try await waitFor("second question") { workspace.queryController === second && window.attachedSheet != nil ? true : nil }
+        try click("Review Changes…", in: try await question("window question", with: "Review Changes…"))
+        ask = try await question("first question", with: "Delete")
+        try check(workspace.queryController === first, "Review Changes… selects the first unsaved query and asks")
+        try click("Delete", in: ask)
+        _ = try await waitFor("second question") {
+            workspace.queryController === second && window.attachedSheet.map { s in buttons(in: s.contentView).contains { $0.title == "Delete" } } == true ? true : nil
+        }
         try check(true, "then it asks about the next one")
-        try click("Don't Save", in: try require(window.attachedSheet, "question"))
+        try click("Delete", in: try require(window.attachedSheet, "question"))
         _ = try await waitFor("window closed") { window.isVisible ? nil : true }
         try check(moved.queries.count == count + 1, "the window closes, saving nothing more")
     }
