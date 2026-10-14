@@ -58,7 +58,8 @@ else
 fi
 version="${MOONROW_VERSION:-0.1 ($(git describe --tags --always --dirty 2>/dev/null || echo dev))}"
 build_number="${MOONROW_BUILD:-1}"
-sparkle_key="${MOONROW_SPARKLE_KEY:-SPARKLE_PUBLIC_KEY_PLACEHOLDER}"
+# The public half of the EdDSA key that signs updates (its private half is the release secret).
+sparkle_key="${MOONROW_SPARKLE_KEY:-93rVySo+PpnkHGVIqDMJOdXNPf2weeWPftiVB4c/SYI=}"
 
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
