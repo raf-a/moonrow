@@ -185,6 +185,9 @@ extension DevHarness {
         let scratch = workspace.newQuery(text: "select 4;")
         let blank = workspace.newQuery()
         let pane = try require(workspace.panes.pane(of: scratch), "pane")
+        try check(scratch.runMenuTitles.contains("Save…") && scratch.runMenuTitles.contains("Save As…")
+                  && !blank.runMenuTitles.contains("Save…") && blank.runMenuTitles.contains("Save As…"),
+                  "the Run menu offers Save… only for unsaved text \(scratch.runMenuTitles)")
         try check(scratch.tabItem.isEdited && !blank.tabItem.isEdited && window.isDocumentEdited,
                   "a query with unsaved text shows a dot in its tab, and the window's close button too")
         let scratchTab = try require(pane.strip.tabView(at: try require(pane.index(of: scratch), "index")), "tab view")
@@ -220,6 +223,7 @@ extension DevHarness {
         try check(!edited.tabItem.isEdited, "a file tab matching its file shows no dot")
         edited.setText("select 7;")
         try check(edited.tabItem.isEdited, "a file tab with changes shows a dot")
+        try check(edited.runMenuTitles.contains("Save"), "and its Run menu offers Save")
         workspace.closeTab(nil)
         ask = try await question("close question", with: "Don’t Save")
         let fileAsked = ask.contentView.map(texts(in:)) ?? []
@@ -231,6 +235,8 @@ extension DevHarness {
         let report2 = workspace.newQuery(text: "select 8;")
         try check(report2.save(to: moved.directory.appending(path: "Reports/report 2.sql")) && report2.savedQuery?.path == "Reports/report 2"
                   && report2.fileURL == nil, "a file in a folder of the queries folder makes a saved query")
+        try check(!report2.runMenuTitles.contains("Save") && report2.runMenuTitles.contains("Save As…"),
+                  "a saved query's Run menu has Save As… but no Save \(report2.runMenuTitles)")
 
         // Quitting asks about unsaved queries when workspaces don't reopen; Cancel keeps it all.
         let first = workspace.newQuery(text: "select 9;")

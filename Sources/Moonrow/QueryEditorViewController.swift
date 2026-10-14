@@ -304,6 +304,9 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
             ("Beautify SQL", #selector(formatSQL(_:))),
             ("Compact SQL", #selector(compactSQL(_:))),
             ("-", nil),
+            ("Save", #selector(saveQuery(_:))),
+            ("Save As…", #selector(saveQueryAs(_:))),
+            ("-", nil),
         ] as [(String, Selector?)] {
             if title == "-" { menu.addItem(.separator()); continue }
             menu.addItem(withTitle: title, action: action, keyEquivalent: "").target = self
@@ -887,6 +890,12 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
         case #selector(addRow(_:)):
             if item.menu?.title == "Edit" { item.title = "Beautify SQL" }
             return !isRunning
+        case #selector(saveQuery(_:)):
+            // Only unsaved text needs it: saved queries save themselves. The Run button's menu
+            // leaves it out then; the File menu greys it out. A query saved nowhere asks where.
+            item.title = savedQuery == nil && fileURL == nil ? "Save…" : "Save"
+            if item.menu === runButton.menu { item.isHidden = !isEdited }
+            return isEdited
         case #selector(cancelQuery(_:)):
             return isRunning
         case #selector(setRunDefault(_:)):
@@ -1007,6 +1016,14 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
         environment.noteCompletion(item.text)
         completionContext = nil
         completionChosen = false
+    }
+
+    /// For the dev harness: the Run button menu's items as shown (validated, hidden ones left out).
+    var runMenuTitles: [String] {
+        runButton.menu.items.compactMap { item in
+            _ = validateMenuItem(item)
+            return item.isHidden || item.isSeparatorItem ? nil : item.title
+        }
     }
 
     /// For the dev harness: what the Run button runs.
