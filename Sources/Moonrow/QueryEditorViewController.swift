@@ -270,10 +270,12 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
     var tabItem: TabStrip.Item {
         if savedQuery == nil, let fileURL {
             return TabStrip.Item(title: fileURL.lastPathComponent, symbol: "doc.text",
-                                 toolTip: (fileURL.path as NSString).abbreviatingWithTildeInPath)
+                                 toolTip: (fileURL.path as NSString).abbreviatingWithTildeInPath,
+                                 background: AppStyle.colors.background)
         }
         return TabStrip.Item(title: savedQuery?.name ?? "Query \(number)", symbol: "terminal",
-                             toolTip: savedQuery.map { "Saved query “\($0.name)”" } ?? "Unsaved query")
+                             toolTip: savedQuery.map { "Saved query “\($0.name)”" } ?? "Unsaved query",
+                             background: AppStyle.colors.background)
     }
 
     var preferredResponder: NSView { editor }
@@ -481,6 +483,8 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
         highlighter.highlight(editor.textStorage!, delta: 0, full: true)
         ruler.textChanged()
         updateStatementHighlight()
+        // The tab is filled with the editor's background.
+        onTabItemChange?()
     }
 
     func textViewDidChangeSelection(_ notification: Notification) {

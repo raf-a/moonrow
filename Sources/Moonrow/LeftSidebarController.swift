@@ -39,13 +39,12 @@ final class LeftSidebarController: NSViewController {
             root.addSubview(v)
         }
         NSLayoutConstraint.activate([
-            // The capsule takes the place of the selected workspace tab's glass, 2 points inside the
-            // tab strip, so the two line up.
-            picker.topAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor, constant: 2),
-            picker.heightAnchor.constraint(equalToConstant: TabStrip.height - 5),
+            // As tall as the workspace's tabs, in line with them.
+            picker.topAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor),
+            picker.heightAnchor.constraint(equalToConstant: TabStrip.height - 1),
             picker.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 10),
             picker.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -10),
-            container.topAnchor.constraint(equalTo: picker.bottomAnchor, constant: 6),
+            container.topAnchor.constraint(equalTo: picker.bottomAnchor, constant: 4),
             container.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             container.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             container.bottomAnchor.constraint(equalTo: root.bottomAnchor),
@@ -117,7 +116,7 @@ private final class NavigatorBar: NSView {
             button.tag = i
             button.target = self
             button.action = #selector(clicked(_:))
-            button.heightAnchor.constraint(equalToConstant: TabStrip.height - 9).isActive = true
+            button.heightAnchor.constraint(equalToConstant: TabStrip.height - 5).isActive = true
         }
         update(animated: false)
     }
