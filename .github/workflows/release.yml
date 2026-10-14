@@ -4,12 +4,12 @@ name: Release
 # hyphen (v1.2.0-rc.1) publishes a prerelease. Running the workflow by hand builds and
 # packages without publishing; the files are kept as a workflow artifact.
 #
-# Signing and notarization are optional. With these repository secrets set, the app is signed
-# with a Developer ID and notarized; without them it is signed ad hoc:
-#   MACOS_CERTIFICATE           base64 of the Developer ID Application .p12
-#   MACOS_CERTIFICATE_PASSWORD  its password
-#   NOTARY_KEY                  base64 of an App Store Connect API key (.p8)
-#   NOTARY_KEY_ID, NOTARY_ISSUER_ID
+# Signing and notarization are optional. With these set, the app is signed with a Developer ID
+# and notarized; without them it is signed ad hoc:
+#   secret MACOS_CERTIFICATE           base64 of the Developer ID Application .p12
+#   secret MACOS_CERTIFICATE_PASSWORD  its password
+#   secret NOTARY_KEY                  base64 of an App Store Connect API key (.p8)
+#   variables NOTARY_KEY_ID, NOTARY_ISSUER_ID  that key's ID and issuer
 on:
   push:
     tags: ['v*']
@@ -25,8 +25,8 @@ jobs:
       MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
       MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
       NOTARY_KEY: ${{ secrets.NOTARY_KEY }}
-      NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
-      NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+      NOTARY_KEY_ID: ${{ vars.NOTARY_KEY_ID }}
+      NOTARY_ISSUER_ID: ${{ vars.NOTARY_ISSUER_ID }}
     steps:
       - uses: actions/checkout@v5
         with:

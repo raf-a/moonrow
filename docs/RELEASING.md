@@ -14,15 +14,15 @@ Running the workflow by hand (Actions → Release → Run workflow) builds and p
 
 ## Signing and notarization
 
-Without secrets, the app is signed ad hoc and users have to approve it on first launch (see the README). To sign with a Developer ID and notarize, add these repository secrets (Settings → Secrets and variables → Actions):
+Without secrets, the app is signed ad hoc and users have to approve it on first launch (see the README). To sign with a Developer ID and notarize, add these to the repository (Settings → Secrets and variables → Actions):
 
-| Secret | Value |
-|---|---|
-| `MACOS_CERTIFICATE` | `base64 -i DeveloperID.p12`: a *Developer ID Application* certificate with its private key |
-| `MACOS_CERTIFICATE_PASSWORD` | The `.p12` password |
-| `NOTARY_KEY` | `base64 -i AuthKey_XXXX.p8`: an App Store Connect API key with the Developer role |
-| `NOTARY_KEY_ID` | The key's ID |
-| `NOTARY_ISSUER_ID` | The issuer ID shown on the API keys page |
+| Name | Kind | Value |
+|---|---|---|
+| `MACOS_CERTIFICATE` | Secret | `base64 -i DeveloperID.p12`: a *Developer ID Application* certificate with its private key |
+| `MACOS_CERTIFICATE_PASSWORD` | Secret | The `.p12` password |
+| `NOTARY_KEY` | Secret | `base64 -i AuthKey_XXXX.p8`: an App Store Connect API key with the Developer role |
+| `NOTARY_KEY_ID` | Variable | The key's ID |
+| `NOTARY_ISSUER_ID` | Variable | The issuer ID shown on the API keys page |
 
 With only the certificate, releases are signed but not notarized.
 
