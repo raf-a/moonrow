@@ -345,7 +345,7 @@ final class SavedQueriesViewController: SidebarListController, NSOutlineViewData
         outline.reloadData()
         for n in folderNodes where !q.isEmpty || !collapsed.contains(n.folder!) { outline.expandItem(n) }
         empty.stringValue = store.queries.isEmpty && store.folders.isEmpty
-            ? "No saved queries.\nIn a query tab, choose Add to Queries… from the Run menu." : "Nothing matches “\(q)”."
+            ? "No saved queries.\nIn a query tab, choose Save from the Run menu." : "Nothing matches “\(q)”."
         empty.isHidden = !roots.isEmpty
     }
 
@@ -414,7 +414,7 @@ final class SavedQueriesViewController: SidebarListController, NSOutlineViewData
     private func item(at row: Int) -> Node? { row >= 0 ? outline.item(atRow: row) as? Node : nil }
     private var target: Node? { item(at: outline.clickedRow >= 0 ? outline.clickedRow : outline.selectedRow) }
 
-    /// The folder of the selected row, for Add to Queries.
+    /// The folder of the selected row, where the save panel starts.
     var selectedFolder: String? {
         guard let n = item(at: outline.selectedRow) else { return nil }
         return n.query?.folder ?? n.folder

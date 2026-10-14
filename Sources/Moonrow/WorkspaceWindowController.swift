@@ -142,7 +142,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         leftSidebar.queries.onChange = { [weak self] old, new in self?.savedQueryChanged(old, to: new) }
         environment.selectedQueriesFolder = { [weak self] in self?.leftSidebar.queries.selectedFolder }
         leftSidebar.history.onInsert = { [weak self] text in self?.insertIntoEditor(text) }
-        leftSidebar.history.onOpenInNewTab = { [weak self] text in self?.newQuery(text: text) }
+        leftSidebar.history.onOpenInNewTab = { [weak self] text in self?.newQuery(text: text, kept: true) }
         environment.onSchemaChange = { [weak self] in self?.sidebar.reload() }
         connectSearch()
         panes.onActivate = { [weak self] in self?.tabChanged() }
@@ -263,11 +263,13 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
             connection: connection, changes: changes, newTable: id, schema: sidebar.schema, pageSize: config.pageSize)))
     }
 
+    /// `kept`: the text is kept elsewhere too (history, a saved query), so closing the tab
+    /// with it unchanged doesn't offer to save it.
     @discardableResult
-    func newQuery(text: String = "", saved: SavedQueries.Query? = nil, file: URL? = nil) -> QueryEditorViewController {
+    func newQuery(text: String = "", saved: SavedQueries.Query? = nil, file: URL? = nil, kept: Bool = false) -> QueryEditorViewController {
         queryCount += 1
         let editor = QueryEditorViewController(environment: environment, number: queryCount, text: text, savedQuery: saved,
-                                               file: file)
+                                               file: file, kept: kept)
         editor.results.dialect = connection.dialect
         editor.onEdit = { [weak self] in self?.onSessionChange?() }
         content.add(editor)
@@ -323,7 +325,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         if let editor = queryController {
             editor.insertStatement(text)
         } else {
-            newQuery(text: text)
+            newQuery(text: text, kept: true)
         }
     }
 
@@ -475,9 +477,30 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         }
     }
 
+    /// Asks about each tab that would ask before closing (queries saved nowhere), in turn,
+    /// selecting it first, then runs `proceed`. Cancel stops there; the tabs stay open.
+    func resolveUnsavedQueries(skipping handled: Set<UUID> = [], then proceed: @escaping () -> Void) {
+        for (n, pane) in panes.panes.enumerated() {
+            guard let i = pane.tabs.firstIndex(where: { $0.asksBeforeClosing && !handled.contains($0.tabID) }) else { continue }
+            let tab = pane.tabs[i]
+            panes.activate(n, focus: false)
+            pane.select(i, force: true)
+            window?.makeKeyAndOrderFront(nil)
+            // The next question waits for this sheet to go.
+            return tab.prepareToClose { [weak self] in
+                DispatchQueue.main.async { self?.resolveUnsavedQueries(skipping: handled.union([tab.tabID]), then: proceed) }
+            }
+        }
+        proceed()
+    }
+
+    private var hasUnsavedQueries: Bool { panes.panes.contains { $0.tabs.contains(where: \.asksBeforeClosing) } }
+
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        guard changes.isEmpty else {
-            resolveStagedChanges(before: "Closing the window") { sender.close() }
+        guard changes.isEmpty, !hasUnsavedQueries else {
+            resolveUnsavedQueries { [weak self] in
+                self?.resolveStagedChanges(before: "Closing the window") { sender.close() }
+            }
             return false
         }
         return true

@@ -160,7 +160,7 @@ extension DevHarness {
         // A query tab must leave the main menu's shortcuts alone (AppKit keeps one item per shortcut).
         let query = workspace.newQuery(text: "select   id ,  count(*) from \(table) where id = :id group by id")
         for action in [#selector(MoonrowActions.addRow(_:)), #selector(MoonrowActions.runCurrentQuery(_:)), #selector(MoonrowActions.runAllQueries(_:)),
-                       #selector(MoonrowActions.deleteRows(_:)), #selector(MoonrowActions.truncateTable(_:)), #selector(MoonrowActions.saveSQLAs(_:))] {
+                       #selector(MoonrowActions.deleteRows(_:)), #selector(MoonrowActions.truncateTable(_:)), #selector(MoonrowActions.saveQueryAs(_:))] {
             try check(menuItem(NSApp.mainMenu, action: action)?.keyEquivalent.isEmpty == false, "\(action) keeps its shortcut")
         }
         window.makeFirstResponder(query.editor)

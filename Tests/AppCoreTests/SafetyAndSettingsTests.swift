@@ -167,13 +167,13 @@ private func tempDir() -> URL {
         // AppKit clears a shortcut that another main-menu item already has.
         let bindings = Keymap.commands.map(\.defaultBinding).filter { !$0.isEmpty }
         #expect(Set(bindings).count == bindings.count)
-        // Space (right sidebar) and ⌥⌫ (truncate) have no ⌘; Add to Queries and the
+        // Space (right sidebar) and ⌥⌫ (truncate) have no ⌘; Save (⌘S is Commit) and the
         // M9–M11 commands have none.
-        let unusual = Set(["toggleRightSidebar:", "truncateTable:", "addToQueries:", "showRunningQueries:",
+        let unusual = Set(["toggleRightSidebar:", "truncateTable:", "saveQuery:", "showRunningQueries:",
                            "searchInDatabase:", "showDiagram:", "showTableDefinition:",
                            "exportTables:", "importJSON:", "importSQLFile:", "backupDatabases:", "restoreDatabase:"])
         #expect(Keymap.commands.allSatisfy { $0.defaultBinding.isValid || unusual.contains($0.id) })
-        #expect(Keymap.command("addToQueries:")?.defaultBinding.isEmpty == true)
+        #expect(Keymap.command("saveQuery:")?.defaultBinding.isEmpty == true)
         #expect(Keymap.command("toggleRightSidebar:")?.defaultBinding.display == "Space")
     }
 

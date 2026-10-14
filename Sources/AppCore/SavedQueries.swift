@@ -91,6 +91,17 @@ public final class SavedQueries {
         return query(named: String(path[path.index(after: slash)...]), in: String(path[..<slash]))
     }
 
+    /// Where a `.sql` file at `url` is a query: at the top of the directory, or in one of its
+    /// folders. Nil for a file anywhere else.
+    public func location(of url: URL) -> (folder: String, name: String)? {
+        guard url.pathExtension.lowercased() == "sql" else { return nil }
+        let parent = url.deletingLastPathComponent()
+        let name = url.deletingPathExtension().lastPathComponent
+        if Self.sameDirectory(parent, directory) { return ("", name) }
+        if Self.sameDirectory(parent.deletingLastPathComponent(), directory) { return (parent.lastPathComponent, name) }
+        return nil
+    }
+
     public func text(of query: Query) throws -> String {
         try String(contentsOf: query.url, encoding: .utf8)
     }
@@ -217,5 +228,13 @@ public final class SavedQueries {
         s = String(s.map { $0 == "/" || $0 == ":" || $0.isNewline ? "-" : $0 })
         while s.hasPrefix(".") { s.removeFirst() }
         return String(s.trimmingCharacters(in: .whitespaces).prefix(200))
+    }
+
+    /// Whether closing a query tab that isn't a saved query offers to save `text`: not when
+    /// it's blank, or the same as a copy kept elsewhere (the file the tab shows, the history
+    /// entry it was opened from).
+    public static func offersToSave(_ text: String, keptAs kept: [String?]) -> Bool {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        return !kept.contains(text)
     }
 }

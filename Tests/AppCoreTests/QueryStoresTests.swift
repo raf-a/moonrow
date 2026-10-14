@@ -143,6 +143,24 @@ private func tempDir() -> URL {
         #expect(SavedQueries.fileName(for: " ") == "")
         #expect(throws: SavedQueries.StoreError.self) { try SavedQueries(directory: tempDir()).save("x", as: "...") }
     }
+
+    @Test func locationOfAFile() {
+        let dir = tempDir()
+        let store = SavedQueries(directory: dir)
+        #expect(store.location(of: dir.appending(path: "daily.sql")) ?? ("?", "?") == ("", "daily"))
+        #expect(store.location(of: dir.appending(path: "Reports/monthly.SQL")) ?? ("?", "?") == ("Reports", "monthly"))
+        // Two folders down, another extension or another directory: a plain file.
+        #expect(store.location(of: dir.appending(path: "Reports/2026/q1.sql")) == nil)
+        #expect(store.location(of: dir.appending(path: "notes.txt")) == nil)
+        #expect(store.location(of: tempDir().appending(path: "daily.sql")) == nil)
+    }
+
+    @Test func offersToSaveOnClose() {
+        #expect(SavedQueries.offersToSave("select 1;", keptAs: []))
+        #expect(!SavedQueries.offersToSave(" \n\t", keptAs: []))
+        #expect(!SavedQueries.offersToSave("select 1;", keptAs: [nil, "select 1;"]))
+        #expect(SavedQueries.offersToSave("select 1;\n", keptAs: ["select 1;", nil]))
+    }
 }
 
 @MainActor

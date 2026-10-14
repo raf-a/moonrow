@@ -19,7 +19,7 @@ final class QueryEnvironment {
     var onSchemaChange: (() -> Void)?
     /// Which columns the table grids show (shared by the workspace's table tabs).
     var columnLayouts: ColumnLayouts?
-    /// The folder selected in the sidebar's Queries pane; Add to Queries suggests it.
+    /// The folder selected in the sidebar's Queries pane; the save panel starts there.
     var selectedQueriesFolder: (() -> String?)?
     /// The last value typed for each query parameter.
     var parameterInputs: [String: QueryParametersSheet.Input] = [:]
@@ -91,18 +91,23 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
     /// After the text changes (the workspace saves its session).
     var onEdit: (() -> Void)?
 
-    /// The SQL file the tab was opened from (File ▸ Open…) or last saved to (Save SQL As…). It
-    /// names the tab; the file is written only by Save SQL As….
+    /// The SQL file outside the queries folder that the tab was opened from (File ▸ Open…) or
+    /// saved to. It names the tab; Save and Save As… write it.
     private(set) var fileURL: URL? {
         didSet { onTabItemChange?() }
     }
 
+    /// The text the tab opened with, when a copy is kept elsewhere (a history entry, say);
+    /// closing the tab with it unchanged loses nothing.
+    private let keptText: String?
+
     init(environment: QueryEnvironment, number: Int, text: String = "", savedQuery: SavedQueries.Query? = nil,
-         file: URL? = nil) {
+         file: URL? = nil, kept: Bool = false) {
         self.environment = environment
         self.number = number
         self.savedQuery = savedQuery
         self.fileURL = file
+        self.keptText = kept ? text : nil
         self.highlighter = SQLHighlighter(dialect: environment.connection.dialect.lexer)
         super.init(nibName: nil, bundle: nil)
         editor.string = text
@@ -236,8 +241,8 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
             ("Beautify SQL", #selector(formatSQL(_:))),
             ("Compact SQL", #selector(compactSQL(_:))),
             ("-", nil),
-            ("Add to Queries…", #selector(addToQueries(_:))),
-            ("Save SQL As…", #selector(saveSQLAs(_:))),
+            ("Save", #selector(saveQuery(_:))),
+            ("Save As…", #selector(saveQueryAs(_:))),
         ] as [(String, Selector?)] {
             if title == "-" { menu.addItem(.separator()); continue }
             menu.addItem(withTitle: title, action: action, keyEquivalent: "").target = self
@@ -281,7 +286,32 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
 
     var preferredResponder: NSView { editor }
 
-    func prepareToClose(then proceed: @escaping () -> Void) { proceed() }
+    /// A query that isn't saved anywhere: closing offers to save it.
+    var asksBeforeClosing: Bool {
+        guard savedQuery == nil else { return false }
+        let fileText = fileURL.flatMap { try? String(contentsOf: $0, encoding: .utf8) }
+        return SavedQueries.offersToSave(editor.string, keptAs: [keptText, fileText])
+    }
+
+    func prepareToClose(then proceed: @escaping () -> Void) {
+        guard asksBeforeClosing, let window = view.window else { return proceed() }
+        let alert = NSAlert()
+        alert.messageText = "Save “\(tabItem.title)”?"
+        // A file tab saves to its file; any other asks where.
+        alert.informativeText = fileURL == nil ? "Closing the tab drops its text." : "Closing the tab drops its changes."
+        alert.addButton(withTitle: fileURL == nil ? "Save…" : "Save")
+        alert.addButton(withTitle: "Don't Save")
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons[1].hasDestructiveAction = true
+        alert.beginSheetModal(for: window) { [weak self] response in
+            switch response {
+            // The save panel follows this sheet once it's gone.
+            case .alertFirstButtonReturn: DispatchQueue.main.async { self?.save(then: proceed) }
+            case .alertSecondButtonReturn: proceed()
+            default: break
+            }
+        }
+    }
 
     func tabDidClose() {
         runTask?.cancel()
@@ -521,88 +551,67 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
 
     // MARK: - Saving
 
-    // ⌘S commits the workspace's staged changes, as everywhere. Saving
-    // the text is Add to Queries (the sidebar's Queries) or Save SQL As… (a file).
+    // ⌘S commits the workspace's staged changes, as everywhere. Save and Save As… write the
+    // text to a `.sql` file; one in the connection's queries folder is a saved query.
 
-    /// Saves the text to the connection's saved queries: a tab opened from one writes it back,
-    /// any other asks for a name.
-    @objc func addToQueries(_ sender: Any?) {
-        if let savedQuery { return write(to: savedQuery.name, in: savedQuery.folder, overwrite: true) }
+    /// Writes the text back to the tab's saved query or file; a tab with neither asks where.
+    @objc func saveQuery(_ sender: Any?) { save(then: nil) }
+
+    /// ⇧⌘S: asks where to save, in the queries folder unless the tab has a query or file
+    /// elsewhere.
+    @objc func saveQueryAs(_ sender: Any?) { saveAs(then: nil) }
+
+    /// `saved` runs once the text is saved (not after Cancel or an error).
+    private func save(then saved: (() -> Void)?) {
+        let url = savedQuery?.url ?? fileURL
+        guard let url else { return saveAs(then: saved) }
+        if save(to: url) { saved?() }
+    }
+
+    private func saveAs(then saved: (() -> Void)?) {
         guard let window = view.window else { return }
         let store = environment.savedQueries
-        let alert = NSAlert()
-        alert.messageText = "Add to Queries"
-        alert.informativeText = "Saved queries are listed under Queries in the sidebar."
-        let field = NSTextField(frame: NSRect(x: 0, y: 30, width: 260, height: 22))
-        field.placeholderString = "Name"
-        let folder = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
-        folder.addItem(withTitle: "No Folder")
-        folder.addItems(withTitles: store.folders)
-        if let preferred = environment.selectedQueriesFolder?(), let i = store.folders.firstIndex(of: preferred) { folder.selectItem(at: i + 1) }
-        let box = NSView(frame: NSRect(x: 0, y: 0, width: 260, height: 54))
-        box.addSubview(field)
-        box.addSubview(folder)
-        alert.accessoryView = box
-        alert.addButton(withTitle: "Save")
-        alert.addButton(withTitle: "Cancel")
-        alert.window.initialFirstResponder = field
-        alert.beginSheetModal(for: window) { [weak self] response in
-            guard response == .alertFirstButtonReturn, let self else { return }
-            let name = field.stringValue
-            let inFolder = folder.indexOfSelectedItem > 0 ? store.folders[folder.indexOfSelectedItem - 1] : ""
-            if let existing = store.query(named: name, in: inFolder), existing != self.savedQuery {
-                self.confirmReplace(existing.name) { self.write(to: name, in: inFolder, overwrite: true) }
-            } else {
-                self.write(to: name, in: inFolder, overwrite: store.query(named: name, in: inFolder) != nil)
-            }
-        }
-    }
-
-    /// ⇧⌘S: writes the editor's text to a `.sql` file.
-    @objc func saveSQLAs(_ sender: Any?) {
-        guard let window = view.window else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.init(filenameExtension: "sql") ?? .plainText]
-        // A tab opened from a file suggests that file.
-        if let fileURL, savedQuery == nil {
-            panel.directoryURL = fileURL.deletingLastPathComponent()
-            panel.nameFieldStringValue = fileURL.lastPathComponent
+        panel.canCreateDirectories = true
+        if let current = savedQuery?.url ?? fileURL {
+            panel.directoryURL = current.deletingLastPathComponent()
+            panel.nameFieldStringValue = current.lastPathComponent
         } else {
-            panel.nameFieldStringValue = (savedQuery?.name ?? tabItem.title) + ".sql"
+            // The folder selected in the sidebar's Queries pane, as a new query goes there.
+            let folder = environment.selectedQueriesFolder?().flatMap { store.folders.contains($0) ? $0 : nil }
+            panel.directoryURL = folder.map { store.directory.appending(path: $0, directoryHint: .isDirectory) } ?? store.directory
+            panel.nameFieldStringValue = tabItem.title + ".sql"
         }
-        let text = editor.string
         panel.beginSheetModal(for: window) { [weak self] response in
-            guard response == .OK, let url = panel.url else { return }
-            do {
-                try Data(text.utf8).write(to: url, options: .atomic)
-                if self?.savedQuery == nil { self?.fileURL = url }
-            } catch {
-                self?.presentError(error, title: "Couldn't save the SQL")
-            }
+            guard response == .OK, let url = panel.url, let self else { return }
+            if self.save(to: url) { saved?() }
         }
     }
 
-    private func confirmReplace(_ name: String, then proceed: @escaping () -> Void) {
-        guard let window = view.window else { return }
-        DispatchQueue.main.async {
-            let alert = NSAlert()
-            alert.messageText = "Replace “\(name)”?"
-            alert.informativeText = "A saved query with that name already exists."
-            alert.addButton(withTitle: "Replace")
-            alert.addButton(withTitle: "Cancel")
-            alert.buttons[0].hasDestructiveAction = true
-            alert.beginSheetModal(for: window) { if $0 == .alertFirstButtonReturn { proceed() } }
-        }
-    }
-
-    private func write(to name: String, in folder: String, overwrite: Bool) {
+    /// Writes the text to `url` (the save panel replaced a file there already). In the queries
+    /// folder or one of its folders it's a saved query, anywhere else a file; the tab edits it
+    /// from now on.
+    @discardableResult
+    func save(to url: URL) -> Bool {
+        // The query being left keeps what was typed into it.
+        if savedQuery?.url != url { saveIfDirty() }
         do {
-            savedQuery = try environment.savedQueries.save(editor.string, as: name, in: folder, overwrite: overwrite)
+            if let place = environment.savedQueries.location(of: url) {
+                savedQuery = try environment.savedQueries.save(editor.string, as: place.name, in: place.folder, overwrite: true)
+                fileURL = nil
+            } else {
+                try Data(editor.string.utf8).write(to: url, options: .atomic)
+                savedQuery = nil
+                fileURL = url
+            }
             isDirty = false
             autosaveTask?.cancel()
             onTabItemChange?()
+            return true
         } catch {
-            presentError(error, title: "Couldn't save the query")
+            presentError(error, title: "Couldn't save “\(url.deletingPathExtension().lastPathComponent)”")
+            return false
         }
     }
 

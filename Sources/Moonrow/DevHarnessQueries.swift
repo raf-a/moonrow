@@ -2,8 +2,11 @@ import AppCore
 import AppKit
 
 // Saved queries in a connection's queries folder: a change on disk reaches the open tab, the
-// connection form moves the folder's queries (and the tab follows them), and a file deleted on
-// disk leaves its tab as an unsaved query. No mouse or key events, so it runs hidden.
+// connection form moves the folder's queries (and the tab follows them), a file deleted on
+// disk leaves its tab as an unsaved query, and closing that tab offers to save it (Cancel,
+// Save… through the save panel, Don't Save), while blank and history tabs close at once. A
+// file outside the queries folder makes a file tab; one inside makes a saved query. Closing the
+// window asks about each unsaved query in turn. No mouse or key events, so it runs hidden.
 
 extension DevHarness {
     static func queriesFolderDemo(_ app: AppDelegate, snapshots: URL?) async throws {
@@ -66,6 +69,95 @@ extension DevHarness {
             window.displayIfNeeded()
             snapshot(window, to: snapshots.appending(path: "queries-2-workspace.png"))
         }
+
+        // Closing a query that isn't saved anywhere offers to save it.
+        let window = try require(workspace.window, "workspace window")
+        func isOpen(_ tab: QueryEditorViewController) -> Bool { workspace.panes.pane(of: tab) != nil }
+        func question(_ what: String, with button: String) async throws -> NSWindow {
+            try await waitFor(what) { window.attachedSheet.flatMap { s in buttons(in: s.contentView).contains { $0.title == button } ? s : nil } }
+        }
+        func click(_ title: String, in sheet: NSWindow) throws {
+            try require(buttons(in: sheet.contentView).first { $0.title == title }, title).performClick(nil)
+        }
+        func sheetGone() async throws { _ = try await waitFor("sheet gone") { window.attachedSheet == nil ? true : nil } }
+        try check(workspace.queryController === editor, "the unsaved query is the selected tab")
+        workspace.closeTab(nil)
+        var ask = try await question("close question", with: "Don't Save")
+        if let snapshots { snapshot(ask, to: snapshots.appending(path: "queries-3-close.png")) }
+        let asked = ask.contentView.map(texts(in:)) ?? []
+        let title = editor.tabItem.title
+        try check(asked.contains("Save “\(title)”?"), "closing asks to save it \(asked)")
+        try click("Cancel", in: ask)
+        try await sheetGone()
+        try check(isOpen(editor), "Cancel keeps the tab")
+
+        workspace.closeTab(nil)
+        try click("Save…", in: try await question("close question", with: "Don't Save"))
+        let panel = try await waitFor("save panel") { window.attachedSheet as? NSSavePanel }
+        let start = try require(panel.directoryURL, "panel folder")
+        try check(moved.location(of: start.appending(path: "x.sql")) != nil && panel.nameFieldStringValue == "\(title).sql",
+                  "Save… opens the save panel in the queries folder, named after the tab (\(start.path), \(panel.nameFieldStringValue))")
+        // The panel runs out of process: names set on it now don't reach it, so take its own.
+        let saved = try require(panel.url, "panel file")
+        window.endSheet(panel, returnCode: .OK)
+        _ = try await waitFor("tab closed") { isOpen(editor) ? nil : true }
+        let place = try require(moved.location(of: saved), "a place in the queries folder")
+        try check(try moved.query(named: place.name, in: place.folder).map(moved.text(of:)) == "select 2;",
+                  "Save… saves it as a query, then the tab closes")
+
+        let count = moved.queries.count
+        let scratch = workspace.newQuery(text: "select 4;")
+        let blank = workspace.newQuery()
+        let pane = try require(workspace.panes.pane(of: scratch), "pane")
+        pane.close(try require(pane.index(of: scratch), "scratch tab"))
+        ask = try await question("close question", with: "Don't Save")
+        try check(workspace.queryController === scratch, "closing a tab in the background selects it before asking")
+        try click("Don't Save", in: ask)
+        _ = try await waitFor("tab closed") { isOpen(scratch) ? nil : true }
+        try check(moved.queries.count == count, "Don't Save closes the tab, saving nothing")
+
+        try check(workspace.queryController === blank, "the blank query is selected")
+        workspace.closeTab(nil)
+        try check(!isOpen(blank) && window.attachedSheet == nil, "a blank query closes without asking")
+        let fromHistory = workspace.newQuery(text: "select 5;", kept: true)
+        workspace.closeTab(nil)
+        try check(!isOpen(fromHistory) && window.attachedSheet == nil, "a query opened from history closes without asking")
+
+        // Saved outside the queries folder, the tab shows a file; Save writes it back.
+        let file = FileManager.default.temporaryDirectory.appending(path: "moonrow-harness-\(UUID().uuidString).sql")
+        defer { try? FileManager.default.removeItem(at: file) }
+        let other = workspace.newQuery(text: "select 6;")
+        try check(other.save(to: file) && other.fileURL == file && other.savedQuery == nil && other.tabItem.title == file.lastPathComponent,
+                  "a file outside the queries folder makes a file tab")
+        workspace.closeTab(nil)
+        try check(!isOpen(other) && window.attachedSheet == nil, "a file tab matching its file closes without asking")
+        let edited = workspace.newQuery(text: "select 6;", file: file)
+        edited.setText("select 7;")
+        workspace.closeTab(nil)
+        try click("Save", in: try await question("close question", with: "Don't Save"))
+        _ = try await waitFor("tab closed") { isOpen(edited) ? nil : true }
+        try check(try String(contentsOf: file, encoding: .utf8) == "select 7;", "Save writes a file tab's changes to its file, then the tab closes")
+        let report2 = workspace.newQuery(text: "select 8;")
+        try check(report2.save(to: moved.directory.appending(path: "Reports/report 2.sql")) && report2.savedQuery?.path == "Reports/report 2"
+                  && report2.fileURL == nil, "a file in a folder of the queries folder makes a saved query")
+
+        // Closing the window asks about each unsaved query, selecting it; Cancel keeps it all.
+        let first = workspace.newQuery(text: "select 9;")
+        let second = workspace.newQuery(text: "select 10;")
+        workspace.content.select(try require(workspace.content.index(of: report2), "saved query tab"))
+        window.performClose(nil)
+        ask = try await question("window question", with: "Don't Save")
+        try check(workspace.queryController === first, "closing the window selects the first unsaved query")
+        try click("Cancel", in: ask)
+        try await sheetGone()
+        try check(window.isVisible && isOpen(first) && isOpen(second), "Cancel keeps the window and its tabs")
+        window.performClose(nil)
+        try click("Don't Save", in: try await question("window question", with: "Don't Save"))
+        _ = try await waitFor("second question") { workspace.queryController === second && window.attachedSheet != nil ? true : nil }
+        try check(true, "then it asks about the next one")
+        try click("Don't Save", in: try require(window.attachedSheet, "question"))
+        _ = try await waitFor("window closed") { window.isVisible ? nil : true }
+        try check(moved.queries.count == count + 1, "the window closes, saving nothing more")
     }
 
     private static func buttons(in view: NSView?) -> [NSButton] {

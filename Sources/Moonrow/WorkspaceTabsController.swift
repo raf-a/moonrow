@@ -12,6 +12,8 @@ protocol WorkspaceTab: NSViewController {
     var onTabItemChange: (() -> Void)? { get set }
     /// Gets focus when the tab is selected.
     var preferredResponder: NSView { get }
+    /// Closing it asks first; the tab is selected so the question is about what's shown.
+    var asksBeforeClosing: Bool { get }
     /// Deals with unsaved work (asking if needed), then calls `proceed` if the tab may close.
     func prepareToClose(then proceed: @escaping () -> Void)
     /// The tab is gone: stop loading and running.
@@ -20,6 +22,7 @@ protocol WorkspaceTab: NSViewController {
 
 extension WorkspaceTab {
     var isPreview: Bool { false }
+    var asksBeforeClosing: Bool { false }
 }
 
 /// One pane of the workspace: a strip of tabs on top, the selected tab's view below.
@@ -114,6 +117,7 @@ final class WorkspaceTabsController: NSViewController {
     func close(_ index: Int) {
         guard index < tabs.count else { return }
         let tab = tabs[index]
+        if tab.asksBeforeClosing { select(index) }
         tab.prepareToClose { [weak self, weak tab] in
             guard let self, let tab, let i = self.tabs.firstIndex(where: { $0 === tab }) else { return }
             self.remove(at: i)
