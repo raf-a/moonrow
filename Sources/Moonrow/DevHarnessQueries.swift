@@ -185,6 +185,15 @@ extension DevHarness {
         let scratch = workspace.newQuery(text: "select 4;")
         let blank = workspace.newQuery()
         let pane = try require(workspace.panes.pane(of: scratch), "pane")
+        try check(scratch.tabItem.isEdited && !blank.tabItem.isEdited && window.isDocumentEdited,
+                  "a query with unsaved text shows a dot in its tab, and the window's close button too")
+        let scratchTab = try require(pane.strip.tabView(at: try require(pane.index(of: scratch), "index")), "tab view")
+        try check(scratchTab.accessibilityRole() == .radioButton && scratchTab.accessibilityLabel() == scratch.tabItem.title + ", edited"
+                  && pane.strip.accessibilityRole() == .tabGroup, "VoiceOver reads the tabs as a tab group")
+        if let snapshots {
+            window.displayIfNeeded()
+            snapshot(pane.strip, to: snapshots.appending(path: "queries-4-tabs.png"))
+        }
         pane.close(try require(pane.index(of: scratch), "scratch tab"))
         ask = try await question("close question", with: "Delete")
         try check(workspace.queryController === scratch, "closing a tab in the background selects it before asking")
@@ -208,7 +217,9 @@ extension DevHarness {
         workspace.closeTab(nil)
         try check(!isOpen(other) && window.attachedSheet == nil, "a file tab matching its file closes without asking")
         let edited = workspace.newQuery(text: "select 6;", file: file)
+        try check(!edited.tabItem.isEdited, "a file tab matching its file shows no dot")
         edited.setText("select 7;")
+        try check(edited.tabItem.isEdited, "a file tab with changes shows a dot")
         workspace.closeTab(nil)
         ask = try await question("close question", with: "Don’t Save")
         let fileAsked = ask.contentView.map(texts(in:)) ?? []

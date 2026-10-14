@@ -100,6 +100,11 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
     /// The name of the saved query the tab edited until its file went; it still names the tab.
     private var formerName: String?
 
+    /// The text of the tab's file when the tab opened it or last saved it.
+    private var fileText: String?
+    /// Whether the tab showed its dot when last told to the strip.
+    private var shownEdited = false
+
     /// The text the tab opened with, when a copy is kept elsewhere (a history entry, say);
     /// closing the tab with it unchanged loses nothing.
     private let keptText: String?
@@ -114,6 +119,8 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
         self.highlighter = SQLHighlighter(dialect: environment.connection.dialect.lexer)
         super.init(nibName: nil, bundle: nil)
         editor.string = text
+        fileText = file.flatMap { try? String(contentsOf: $0, encoding: .utf8) }
+        shownEdited = isEdited
     }
 
     @available(*, unavailable)
@@ -276,15 +283,22 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
 
     // MARK: - WorkspaceTab
 
+    /// Saved queries and files show a document with text; a query saved nowhere, an empty one.
     var tabItem: TabStrip.Item {
-        if savedQuery == nil, let fileURL {
-            return TabStrip.Item(title: fileURL.lastPathComponent, symbol: "doc.text",
-                                 toolTip: (fileURL.path as NSString).abbreviatingWithTildeInPath,
-                                 background: AppStyle.colors.background)
+        if let url = savedQuery?.url ?? fileURL {
+            return TabStrip.Item(title: savedQuery?.name ?? url.lastPathComponent, symbol: "doc.text",
+                                 toolTip: (url.path as NSString).abbreviatingWithTildeInPath,
+                                 isEdited: isEdited, background: AppStyle.colors.background)
         }
-        return TabStrip.Item(title: savedQuery?.name ?? formerName ?? "Query \(number)", symbol: "terminal",
-                             toolTip: savedQuery.map { "Saved query “\($0.name)”" } ?? "Unsaved query",
-                             background: AppStyle.colors.background)
+        return TabStrip.Item(title: formerName ?? "Query \(number)", symbol: "doc", toolTip: "Not saved",
+                             isEdited: isEdited, background: AppStyle.colors.background)
+    }
+
+    /// Has text that isn't saved anywhere: a saved query never (it saves itself), a file tab
+    /// when its text differs from the file's, any other unless blank or kept elsewhere.
+    var isEdited: Bool {
+        guard savedQuery == nil else { return false }
+        return SavedQueries.offersToSave(editor.string, keptAs: [keptText, fileText])
     }
 
     var preferredResponder: NSView { editor }
@@ -514,6 +528,10 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
         updatePosition()
         updateStatementHighlight()
         if savedQuery != nil { scheduleAutosave() }
+        if isEdited != shownEdited {
+            shownEdited = isEdited
+            onTabItemChange?()
+        }
         onEdit?()
     }
 
@@ -616,10 +634,12 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
             } else {
                 try Data(editor.string.utf8).write(to: url, options: .atomic)
                 savedQuery = nil
+                fileText = editor.string
                 fileURL = url
             }
             isDirty = false
             formerName = nil
+            shownEdited = isEdited
             autosaveTask?.cancel()
             onTabItemChange?()
             return true
@@ -654,6 +674,7 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
     func savedQueryChanged(to query: SavedQueries.Query?) {
         if query == nil, let savedQuery { formerName = savedQuery.name }
         savedQuery = query
+        shownEdited = isEdited
         onTabItemChange?()
     }
 

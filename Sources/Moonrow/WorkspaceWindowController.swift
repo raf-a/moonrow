@@ -172,6 +172,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     private func setUp(_ pane: WorkspaceTabsController) {
         pane.onSelectionChange = { [weak self, weak pane] in
             guard let self, let pane else { return }
+            self.updateDocumentEdited()
             // A pane whose selection changes by itself (a tab closing) doesn't take over.
             if pane === self.content { self.tabChanged() } else { self.onSessionChange?() }
         }
@@ -404,8 +405,14 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
 
     // MARK: - Staged changes
 
-    @objc private func stagedChangesChanged() {
+    /// The close button shows a dot while changes are staged or a query tab has unsaved text.
+    private func updateDocumentEdited() {
         window?.isDocumentEdited = !changes.isEmpty
+            || panes.allTabs.contains { ($0 as? QueryEditorViewController)?.isEdited == true }
+    }
+
+    @objc private func stagedChangesChanged() {
+        updateDocumentEdited()
         sidebar.stagedChangesChanged()
         // A new table or object that's no longer staged (discarded, deleted, undone) closes its tab.
         for tab in tableTabs {

@@ -14,6 +14,8 @@ final class TabStrip: NSView {
         var tint: NSColor?
         /// A preview tab: the title is in italics.
         var italic = false
+        /// Has changes that aren't saved: a dot stands in for the × until the pointer is over the tab.
+        var isEdited = false
         /// The colour of what the tab shows, which the selected tab is filled with so it runs into
         /// it. Nil: the grid's.
         var background: NSColor?
@@ -84,6 +86,8 @@ final class TabStrip: NSView {
         stack.spacing = 0
         stack.alignment = .centerY
         stack.translatesAutoresizingMaskIntoConstraints = false
+        setAccessibilityElement(true)
+        setAccessibilityRole(.tabGroup)
         let document = FlippedView()
         document.translatesAutoresizingMaskIntoConstraints = false
         document.addSubview(stack)
@@ -154,6 +158,7 @@ final class TabStrip: NSView {
             stack.addArrangedSubview(v)
         }
         for (v, item) in zip(tabViews, items) { v.item = item }
+        setAccessibilityChildren(tabViews + (addButton.isHidden ? [] : [addButton]))
         updateSelection()
     }
 
@@ -283,10 +288,29 @@ private final class TabView: NSView {
         let accent = isSelected && isActive
         icon.contentTintColor = item.tint ?? (accent ? .controlAccentColor : .secondaryLabelColor)
         label.textColor = item.tint ?? (isSelected ? .labelColor : .secondaryLabelColor)
-        // The × keeps its space so titles don't shift on hover.
+        // The × keeps its space so titles don't shift on hover; an edited tab shows a dot there.
         close.isHidden = !item.closable
-        close.alphaValue = isSelected || isHovered ? 1 : 0
+        let dot = item.isEdited && !isHovered
+        close.image = NSImage(systemSymbolName: dot ? "circle.fill" : "xmark", accessibilityDescription: "Close tab")
+        close.symbolConfiguration = .init(pointSize: dot ? 7 : 9, weight: .semibold)
+        close.contentTintColor = dot ? .secondaryLabelColor : nil
+        close.alphaValue = isSelected || isHovered || item.isEdited ? 1 : 0
         needsDisplay = true
+    }
+
+    // A tab reads as a radio button in its strip's tab group, its title as the label.
+
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .radioButton }
+    override func accessibilityRoleDescription() -> String? { "tab" }
+    override func accessibilityLabel() -> String? { item.isEdited ? item.title + ", edited" : item.title }
+    override func accessibilityValue() -> Any? { NSNumber(value: isSelected) }
+    override func accessibilityHelp() -> String? { item.toolTip }
+    override func accessibilityChildren() -> [Any]? { item.closable ? [close] : [] }
+
+    override func accessibilityPerformPress() -> Bool {
+        onClick?()
+        return true
     }
 
     override func layout() {

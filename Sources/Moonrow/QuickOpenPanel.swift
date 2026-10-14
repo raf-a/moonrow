@@ -246,7 +246,7 @@ extension WorkspaceWindowController {
                 case .table: ("tablecells", .systemBlue)
                 case .view, .materializedView: ("eye", .systemPurple)
                 case .function: ("function", .systemOrange)
-                case .savedQuery: ("terminal", .secondaryLabelColor)
+                case .savedQuery: ("doc.text", .secondaryLabelColor)
                 }
                 var detail = item.kind == .savedQuery ? "Saved query" : item.schema ?? ""
                 if let signature = item.object?.signature { detail += (detail.isEmpty ? "" : " · ") + "(\(signature))" }
