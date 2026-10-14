@@ -286,7 +286,7 @@ class ToolWindowController: NSWindowController, NSWindowDelegate, NSTableViewDat
         if selected == nil {
             showDatabaseNote("")
         } else if session != nil {
-            showDatabaseNote(shownDatabases.isEmpty ? (query.isEmpty ? "No databases." : "Nothing matches “\(query)”.") : "")
+            showDatabaseNote(shownDatabases.isEmpty ? (query.isEmpty ? "No Databases" : "No Results") : "")
         }
         refresh()
     }

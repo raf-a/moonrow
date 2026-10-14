@@ -30,7 +30,7 @@ extension WorkspaceTab {
 final class WorkspaceTabsController: NSViewController {
     let strip = TabStrip()
     private let container = NSView()
-    private let placeholder = NSTextField(labelWithString: "Open a table from the sidebar, or press ⌘T for a new query")
+    private let placeholder = NSTextField(labelWithString: "No Open Tabs")
     private(set) var tabs: [any WorkspaceTab] = []
     private(set) var selectedIndex: Int?
     /// After the selected tab changes (or its title does).
@@ -49,7 +49,7 @@ final class WorkspaceTabsController: NSViewController {
         strip.onClose = { [weak self] i in self?.close(i) }
         strip.onAdd = { [weak self] in self?.onNewTab?() }
         strip.onDoubleClick = { [weak self] i in self?.onDoubleClickTab?(i) }
-        strip.addToolTip = "New query tab (⌘T)"
+        strip.addToolTip = "New query tab"
         placeholder.textColor = .tertiaryLabelColor
         placeholder.font = .systemFont(ofSize: 14)
 

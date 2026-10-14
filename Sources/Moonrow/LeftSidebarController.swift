@@ -12,10 +12,10 @@ final class LeftSidebarController: NSViewController {
     let history: HistoryViewController
     let search = SearchInDatabaseViewController()
     private let picker = NavigatorBar(tabs: [
-        .init(symbol: "cylinder", name: "Items", tip: "Items: tables and views"),
-        .init(symbol: "doc.text", name: "Queries", tip: "Queries: saved queries"),
-        .init(symbol: "clock", name: "History", tip: "History: statements run in this connection"),
-        .init(symbol: "magnifyingglass", name: "Search", tip: "Search in Database: a text in every table"),
+        .init(symbol: "cylinder", name: "Items", tip: "Tables and Views"),
+        .init(symbol: "doc.text", name: "Queries", tip: "Saved Queries"),
+        .init(symbol: "clock", name: "History", tip: "Query History"),
+        .init(symbol: "magnifyingglass", name: "Search", tip: "Search in Database"),
     ])
     private let container = NSView()
     private(set) var pane = Pane.items
@@ -764,7 +764,7 @@ final class HistoryViewController: SidebarListController {
         let found = history.search(search.stringValue)
         rows = QueryHistory.grouped(found).flatMap { [Row.heading($0.title)] + $0.entries.map(Row.entry) }
         table.reloadData()
-        empty.stringValue = history.entries.isEmpty ? "Statements you run appear here." : "Nothing matches."
+        empty.stringValue = history.entries.isEmpty ? "No History" : "No Results"
         empty.isHidden = !found.isEmpty
     }
 
@@ -844,8 +844,9 @@ final class HistoryViewController: SidebarListController {
     @objc private func clear(_ sender: Any?) {
         guard let window = view.window else { return }
         let alert = NSAlert()
-        alert.messageText = "Clear this connection's query history?"
-        alert.addButton(withTitle: "Clear")
+        alert.messageText = "Clear this connection’s query history?"
+        alert.informativeText = "You can’t undo this action."
+        alert.addButton(withTitle: "Clear History")
         alert.addButton(withTitle: "Cancel")
         alert.buttons[0].hasDestructiveAction = true
         alert.beginSheetModal(for: window) { [weak self] response in
@@ -884,7 +885,10 @@ final class HistoryViewController: SidebarListController {
         required init?(coder: NSCoder) { fatalError() }
 
         func show(_ entry: QueryHistory.Entry) {
-            var meta = entry.date.formatted(date: .abbreviated, time: .standard)
+            // Under Today and Yesterday the heading has the day already.
+            let calendar = Calendar.current
+            let recent = calendar.isDateInToday(entry.date) || calendar.isDateInYesterday(entry.date)
+            var meta = entry.date.formatted(date: recent ? .omitted : .abbreviated, time: .shortened)
             if let ms = entry.ms { meta += " · \(ms) ms" }
             if !entry.ok { meta += " · failed" }
             when.stringValue = meta

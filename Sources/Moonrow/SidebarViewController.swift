@@ -688,7 +688,7 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         if objects.isEmpty && staged.isEmpty {
             showMessage(schema.map { "“\($0)” has no tables yet." } ?? "This database has no tables yet.")
         } else if groups.isEmpty {
-            showMessage("Nothing matches “\(query)”.")
+            showMessage("No Results")
         } else {
             message.isHidden = true
         }

@@ -43,11 +43,11 @@ final class SafetyGate {
         let writes = statements.filter { SQLClassifier.kind(of: $0, dialect: dialect) == .write }.count
         var message = level.detail
         if level == .alertWrites || level == .passwordWrites, statements.count > 1 {
-            message += " \(writes) of \(statements.count) statements may change something."
+            message += " \(writes) of \(statements.count) statements may modify data."
         }
         let sql = statements.map { $0.hasSuffix(";") ? $0 : $0 + ";" }.joined(separator: "\n\n")
         let prompt = SafetyPrompt(
-            title: requirement == .password ? "Safe mode: enter the password to continue" : "Safe mode: send these statements?",
+            title: "Run these statements?",
             message: message, sql: sql,
             credential: requirement == .password ? credential : nil, connectionName: connectionName, confirm: "Run")
         return await show(prompt, in: window)
@@ -59,7 +59,7 @@ final class SafetyGate {
         if !level.canChange(to: new) {
             guard let window else { return }
             let prompt = SafetyPrompt(
-                title: "Turn safe mode down to “\(new.title)”?", message: new.detail, sql: nil,
+                title: "Change safe mode to “\(new.title)”?", message: new.detail, sql: nil,
                 credential: credential, connectionName: connectionName, confirm: "Change")
             guard await show(prompt, in: window) else { return }
         }
@@ -170,7 +170,7 @@ final class SafetyPrompt: NSObject, NSTextFieldDelegate {
 
     @objc func confirm(_ sender: Any?) {
         if let credential, !credential.matches(passwordField.stringValue) {
-            errorLabel.stringValue = credential.kind == .password ? "That isn't the password." : "That isn't the connection's name."
+            errorLabel.stringValue = credential.kind == .password ? "Incorrect password." : "The name doesn’t match."
             errorLabel.isHidden = false
             passwordField.selectText(nil)
             return

@@ -381,12 +381,15 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         let what = change.count == 1 ? "the query" : "the \(change.count) queries"
         let alert = NSAlert()
         alert.messageText = "\(verb) \(what) in “\(folderLabel(change.source))” to “\(folderLabel(change.destination))”?"
+        let source = folderLabel(change.source), destination = folderLabel(change.destination)
+        var info = "If you don’t \(verb.lowercased()) them, they stay in “\(source)”, and this connection uses the queries in “\(destination)”."
         if shared {
             let names = ListFormatter.localizedString(byJoining: change.sharedWith)
-            alert.informativeText = "“\(folderLabel(change.source))” is also the queries folder of \(names)."
+            info = "“\(source)” is also the queries folder of \(names). " + info
         }
+        alert.informativeText = info
         alert.addButton(withTitle: "\(verb) Queries")
-        alert.addButton(withTitle: "Leave Them")
+        alert.addButton(withTitle: "Don’t \(verb)")
         alert.addButton(withTitle: "Cancel")
         alert.beginSheetModal(for: window) { [weak self] response in
             switch response {
@@ -411,7 +414,7 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
             queriesField.stringValue = c.queriesFolder
             done()
         } catch {
-            setStatus("Couldn't save: \(error)", ok: false)
+            setStatus("Couldn’t save: \(error.localizedDescription)", ok: false)
         }
     }
 

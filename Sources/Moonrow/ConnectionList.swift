@@ -130,7 +130,7 @@ final class ConnectionList: NSObject, NSOutlineViewDataSource, NSOutlineViewDele
         } else {
             outline.deselectAll(nil)
         }
-        emptyLabel.stringValue = query.isEmpty ? emptyText : "Nothing matches “\(query)”."
+        emptyLabel.stringValue = query.isEmpty ? emptyText : "No Results"
         emptyLabel.isHidden = !nodes.isEmpty
         onSelectionChange?()
     }

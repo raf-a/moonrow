@@ -94,8 +94,8 @@ public struct SafetyCredential: Sendable {
     /// What the prompt asks for.
     public func prompt(for connection: String) -> String {
         switch kind {
-        case .password: "Enter the database password for \(connection) to send these statements."
-        case .connectionName: "\(connection) has no database password. Type its name, \(connection), to send these statements."
+        case .password: "Enter the database password for “\(connection)” to continue."
+        case .connectionName: "“\(connection)” has no database password. Type “\(connection)” to continue."
         }
     }
 }
