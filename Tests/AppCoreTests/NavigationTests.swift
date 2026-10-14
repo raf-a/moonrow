@@ -200,7 +200,7 @@ private func table(_ name: String, schema: String? = nil) -> DatabaseObject {
     @Test func roundTrips() throws {
         let store = SessionStore(fileURL: tempFile("session.json"))
         let session = WorkspaceSession(
-            connectionID: UUID(), filePath: "/tmp/a.sqlite", schema: "public",
+            connectionID: UUID(), schema: "public",
             panes: [
                 .init(tabs: [.table(table("users", schema: "public"), isPreview: true),
                              .query(text: "select 1;\n", savedQuery: nil),
@@ -229,7 +229,7 @@ private func table(_ name: String, schema: String? = nil) -> DatabaseObject {
         let json = """
         {"version": 1, "workspaces": [
           {"connectionID": "not a uuid"},
-          {"connectionID": "\(id.uuidString)", "activePane": 7, "panes": [
+          {"connectionID": "\(id.uuidString)", "filePath": "/tmp/old.sqlite", "activePane": 7, "panes": [
             {"selected": 5, "tabs": [{"kind": "chart"}, {"kind": "table", "name": "users"}, {"kind": "query", "text": "x"}]}
           ]}
         ]}

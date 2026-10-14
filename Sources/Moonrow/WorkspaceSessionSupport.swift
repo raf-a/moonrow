@@ -7,8 +7,8 @@ import DBKit
 // (unsaved query text included). Staged changes and new tables aren't kept.
 
 extension WorkspaceWindowController {
-    /// What the window shows now. `filePath` names a database file opened directly.
-    func sessionSnapshot(filePath: String?) -> WorkspaceSession {
+    /// What the window shows now.
+    func sessionSnapshot() -> WorkspaceSession {
         let saved = panes.panes.map { pane -> WorkspaceSession.Pane in
             var tabs: [WorkspaceSession.Tab] = []
             var selected: Int?
@@ -19,8 +19,7 @@ extension WorkspaceWindowController {
             }
             return WorkspaceSession.Pane(tabs: tabs, selected: selected ?? (tabs.isEmpty ? nil : 0))
         }
-        return WorkspaceSession(connectionID: config.id, filePath: filePath, schema: sidebar.schema, panes: saved,
-                                activePane: panes.activeIndex)
+        return WorkspaceSession(connectionID: config.id, schema: sidebar.schema, panes: saved, activePane: panes.activeIndex)
     }
 
     private func sessionTab(_ tab: any WorkspaceTab) -> WorkspaceSession.Tab? {

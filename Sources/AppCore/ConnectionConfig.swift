@@ -289,9 +289,9 @@ public struct ConnectionConfig: Codable, Hashable, Sendable, Identifiable {
         return parts.joined(separator: " · ")
     }
 
-    /// A connection for a file opened directly (Finder, ⌘O); not saved unless the user asks.
-    /// The id comes from the path, so the file's query history and saved queries are there
-    /// again the next time it's opened.
+    /// An unsaved connection to a database file, for the dev harnesses, which name their
+    /// database on the command line. The id comes from the path, so two harness workspaces on
+    /// the same file share it.
     public static func sqliteFile(_ url: URL) -> ConnectionConfig {
         let path = url.standardizedFileURL.path
         return ConnectionConfig(id: stableID(for: "sqlite:" + path), name: url.lastPathComponent, driver: .sqlite, filePath: path)

@@ -104,14 +104,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     private func reopenWorkspaces() -> Int {
         var count = 0
         for session in sessions.load() {
-            let config: ConnectionConfig
-            if let saved = store.connection(id: session.connectionID) {
-                config = saved
-            } else if let path = session.filePath, FileManager.default.fileExists(atPath: path) {
-                var file = ConnectionConfig.sqliteFile(URL(filePath: path))
-                file.safeMode = settings.settings.defaultSafeMode
-                config = file
-            } else {
+            guard let config = store.connection(id: session.connectionID) else {
                 continue  // the connection was deleted since
             }
             count += 1
@@ -135,13 +128,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     func saveSession() {
         sessionSave?.cancel()
         sessionSave = nil
-        let open = workspaces.compactMap { w -> WorkspaceSession? in
-            if store.connection(id: w.config.id) != nil { return w.sessionSnapshot(filePath: nil) }
-            // A file opened directly isn't saved; its path brings it back. Unsaved server
-            // connections (dev switches) aren't kept.
-            if w.config.driver == .sqlite { return w.sessionSnapshot(filePath: w.config.expandedFilePath) }
-            return nil
-        }
+        // Only saved connections come back; the harnesses' unsaved ones aren't kept.
+        let open = workspaces.filter { store.connection(id: $0.config.id) != nil }.map { $0.sessionSnapshot() }
         do { try sessions.save(open) } catch { print("couldn't save the session: \(error)") }
     }
 

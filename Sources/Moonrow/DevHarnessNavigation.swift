@@ -223,7 +223,9 @@ extension DevHarness {
                   && !fileMenu.contains { $0.title.hasPrefix("Open Database File") },
                   "File has Open… (SQL files) and no Open Database File…")
 
-        // Leave a known layout for the relaunch check.
+        // Leave a known layout for the relaunch check. Only saved connections come back, so the
+        // command line's database is saved first.
+        try app.store.save(workspace.config)
         app.saveSession()
         let expected = describe(workspace)
         print("session:\n\(expected)")
