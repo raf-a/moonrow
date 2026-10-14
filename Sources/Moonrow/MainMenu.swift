@@ -56,6 +56,7 @@ import AppKit
     @objc optional func toggleBlockComment(_ sender: Any?)
     @objc optional func formatSQL(_ sender: Any?)
     @objc optional func compactSQL(_ sender: Any?)
+    @objc optional func goToLine(_ sender: Any?)
     @objc optional func toggleQueryLog(_ sender: Any?)
     @objc optional func showRunningQueries(_ sender: Any?)
     @objc optional func showSavedQueries(_ sender: Any?)
@@ -111,6 +112,16 @@ enum MainMenu {
         }
     }
 
+    private static let editMenuDelegate = EditMenuDelegate()
+
+    /// A query tab hides Show Filters (Find ▸ Find… is the same command there); it shows again
+    /// each time the menu updates, before the items are validated.
+    private final class EditMenuDelegate: NSObject, NSMenuDelegate {
+        func menuNeedsUpdate(_ menu: NSMenu) {
+            for item in menu.items where item.action == #selector(MoonrowActions.toggleFilters(_:)) { item.isHidden = false }
+        }
+    }
+
     private static func buildMenus() -> NSMenu {
         let main = NSMenu()
         let appName = ProcessInfo.processInfo.processName
@@ -160,6 +171,7 @@ enum MainMenu {
         }
 
         main.addSubmenu("Edit") { m in
+            m.delegate = editMenuDelegate
             m.add("Undo", Selector(("undo:")), "z")
             m.add("Redo", Selector(("redo:")), "z", [.command, .shift])
             m.addItem(.separator())
@@ -192,6 +204,8 @@ enum MainMenu {
             m.add("Toggle Comment", #selector(MoonrowActions.toggleLineComment(_:)), "/")
             m.add("Toggle Block Comment", #selector(MoonrowActions.toggleBlockComment(_:)), "/", [.command, .option])
             m.add("Compact SQL", #selector(MoonrowActions.compactSQL(_:)), "i", [.command, .shift])
+            // ⌃Space by default, which macOS often keeps for switching input sources.
+            m.add("Complete", #selector(NSTextView.complete(_:)))
             let find = m.add("Find", nil)
             find.submenu = NSMenu(title: "Find")
             for (title, action, key, mods) in [
@@ -205,6 +219,7 @@ enum MainMenu {
             ] {
                 find.submenu!.add(title, #selector(NSTextView.performFindPanelAction(_:)), key, mods).tag = action.rawValue
             }
+            m.add("Go to Line…", #selector(MoonrowActions.goToLine(_:)))
             m.addItem(.separator())
             m.add("Show Filters", #selector(MoonrowActions.toggleFilters(_:)), "f")
             m.add("Filter Items", #selector(MoonrowActions.focusItemFilter(_:)), "f", [.command, .shift])

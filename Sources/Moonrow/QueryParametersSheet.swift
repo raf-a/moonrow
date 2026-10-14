@@ -43,7 +43,6 @@ final class QueryParametersSheet: NSWindowController {
             kind.addItems(withTitles: ["Auto", "Text", "SQL"])
             kind.selectItem(at: QueryParameters.Kind.allCases.firstIndex(of: remembered[key]?.kind ?? .auto) ?? 0)
             kind.toolTip = "Auto: numbers, NULL, TRUE and FALSE as typed, anything else quoted. Text: always quoted. SQL: as typed."
-            kind.controlSize = .small
             fields.append(field)
             kinds.append(kind)
             rows.append([label, field, kind])
@@ -53,11 +52,15 @@ final class QueryParametersSheet: NSWindowController {
         grid.columnSpacing = 8
         grid.column(at: 0).xPlacement = .trailing
         for r in 0..<grid.numberOfRows { grid.row(at: r).yPlacement = .center }
+        // The rows from the top, with room around them for the fields' borders.
+        let document = FlippedView()
+        document.addSubview(grid)
+        grid.translatesAutoresizingMaskIntoConstraints = false
+        document.translatesAutoresizingMaskIntoConstraints = false
         let scroll = NSScrollView()
-        scroll.documentView = grid
+        scroll.documentView = document
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = keys.count > 8
-        grid.translatesAutoresizingMaskIntoConstraints = false
 
         let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancel(_:)))
         cancel.keyEquivalent = "\u{1B}"
@@ -70,17 +73,23 @@ final class QueryParametersSheet: NSWindowController {
             v.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview(v)
         }
-        let height = min(CGFloat(keys.count) * 32, 8 * 32)
+        // Every row up to eight, then it scrolls.
+        let rowHeight = ceil(grid.fittingSize.height + grid.rowSpacing) / CGFloat(keys.count)
+        let height = min(CGFloat(keys.count), 8) * rowHeight - grid.rowSpacing + 4
         NSLayoutConstraint.activate([
             title.topAnchor.constraint(equalTo: root.topAnchor, constant: 18),
             title.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 20),
-            scroll.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 12),
+            scroll.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 10),
             scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 20),
             scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -20),
             scroll.heightAnchor.constraint(equalToConstant: height),
-            grid.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
-            grid.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
-            grid.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
+            document.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+            document.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+            document.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
+            grid.topAnchor.constraint(equalTo: document.topAnchor, constant: 2),
+            grid.bottomAnchor.constraint(equalTo: document.bottomAnchor, constant: -2),
+            grid.leadingAnchor.constraint(equalTo: document.leadingAnchor),
+            grid.trailingAnchor.constraint(equalTo: document.trailingAnchor),
             buttons.topAnchor.constraint(equalTo: scroll.bottomAnchor, constant: 16),
             buttons.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 20),
             buttons.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -20),
@@ -89,8 +98,8 @@ final class QueryParametersSheet: NSWindowController {
         ])
         window?.contentView = root
         window?.initialFirstResponder = fields.first
-        // Tab moves through the value fields.
-        for (a, b) in zip(fields, fields.dropFirst() + fields.prefix(1)) { a.nextKeyView = b }
+        // Tab goes through each row's field and pop-up, then the buttons.
+        window?.autorecalculatesKeyViewLoop = true
     }
 
     func begin(on window: NSWindow, completion: @escaping ([String: Input]?) -> Void) {
@@ -125,4 +134,8 @@ final class QueryParametersSheet: NSWindowController {
     }
 
     func confirm() { run(nil) }
+}
+
+private final class FlippedView: NSView {
+    override var isFlipped: Bool { true }
 }

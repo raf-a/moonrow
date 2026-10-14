@@ -9,8 +9,12 @@ final class CompletionPopup: NSObject, NSTableViewDataSource, NSTableViewDelegat
     private(set) var items: [SQLCompletion.Item] = []
     private let panel: NSPanel
     private let table = NSTableView()
-    private static let rowHeight: CGFloat = 20
     private static let maxRows = 10
+    /// The editor's font; rows grow with it.
+    private var font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+    private var rowHeight: CGFloat = 20
+    /// The width while the list stays open: it only grows, so it doesn't jitter as items change.
+    private var shownWidth: CGFloat = 0
 
     var isVisible: Bool { panel.isVisible }
     var selectedItem: SQLCompletion.Item? {
@@ -32,7 +36,7 @@ final class CompletionPopup: NSObject, NSTableViewDataSource, NSTableViewDelegat
         let column = NSTableColumn(identifier: .init("item"))
         table.addTableColumn(column)
         table.headerView = nil
-        table.rowHeight = Self.rowHeight
+        table.rowHeight = rowHeight
         table.intercellSpacing = .zero
         table.style = .plain
         table.backgroundColor = .clear
@@ -91,19 +95,25 @@ final class CompletionPopup: NSObject, NSTableViewDataSource, NSTableViewDelegat
         }
     }
 
-    /// Shows `items` below `anchor` (screen coordinates), keeping the selection on the same
-    /// name when it's still listed.
-    func show(_ items: [SQLCompletion.Item], below anchor: NSRect, in parent: NSWindow) {
+    /// Shows `items` below `anchor` (screen coordinates) in `font`, keeping the selection on the
+    /// same name when it's still listed.
+    func show(_ items: [SQLCompletion.Item], below anchor: NSRect, in parent: NSWindow, font: NSFont) {
         let previous = selectedItem
         self.items = items
+        if font != self.font {
+            self.font = font
+            rowHeight = max(20, ceil(font.ascender - font.descender + font.leading) + 6)
+            table.rowHeight = rowHeight
+        }
         table.reloadData()
         let row = previous.flatMap { p in items.firstIndex { $0.text == p.text && $0.kind == p.kind } } ?? 0
         table.selectRowIndexes([row], byExtendingSelection: false)
         table.scrollRowToVisible(row)
 
-        let widest = items.prefix(200).map { CompletionCell.width(for: $0) }.max() ?? 200
-        let width = min(460, max(220, widest + 16))
-        let height = CGFloat(min(items.count, Self.maxRows)) * Self.rowHeight + 6
+        let widest = items.prefix(200).map { CompletionCell.width(for: $0, font: font) }.max() ?? 200
+        let width = max(shownWidth, min(600, max(220, widest + 16)))
+        shownWidth = width
+        let height = CGFloat(min(items.count, Self.maxRows)) * rowHeight + 6
         var frame = NSRect(x: anchor.minX - 22, y: anchor.minY - height - 2, width: width, height: height)
         // Flip above the line when there's no room below.
         if let screen = parent.screen?.visibleFrame {
@@ -119,6 +129,7 @@ final class CompletionPopup: NSObject, NSTableViewDataSource, NSTableViewDelegat
         guard panel.isVisible || panel.parent != nil else { return }
         panel.parent?.removeChildWindow(panel)
         panel.orderOut(nil)
+        shownWidth = 0
         items = []
         table.reloadData()
     }
@@ -146,15 +157,13 @@ final class CompletionPopup: NSObject, NSTableViewDataSource, NSTableViewDelegat
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let cell = tableView.makeView(withIdentifier: CompletionCell.identifier, owner: nil) as? CompletionCell ?? CompletionCell()
-        cell.show(items[row])
+        cell.show(items[row], font: font)
         return cell
     }
 }
 
 private final class CompletionCell: NSTableCellView {
     static let identifier = NSUserInterfaceItemIdentifier("Completion")
-    private static let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-    private static let detailFont = NSFont.systemFont(ofSize: 11)
     private let icon = NSImageView()
     private let name = NSTextField(labelWithString: "")
     private let detail = NSTextField(labelWithString: "")
@@ -162,9 +171,7 @@ private final class CompletionCell: NSTableCellView {
     init() {
         super.init(frame: .zero)
         identifier = Self.identifier
-        name.font = Self.font
         name.lineBreakMode = .byTruncatingTail
-        detail.font = Self.detailFont
         detail.textColor = .secondaryLabelColor
         detail.alignment = .right
         detail.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -188,7 +195,11 @@ private final class CompletionCell: NSTableCellView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
-    func show(_ item: SQLCompletion.Item) {
+    func show(_ item: SQLCompletion.Item, font: NSFont) {
+        if name.font != font {
+            name.font = font
+            detail.font = Self.detailFont(for: font)
+        }
         name.stringValue = item.text
         let (symbol, color, kind) = Self.style(item.kind)
         icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: kind)
@@ -196,9 +207,12 @@ private final class CompletionCell: NSTableCellView {
         detail.stringValue = item.detail ?? kind
     }
 
-    static func width(for item: SQLCompletion.Item) -> CGFloat {
+    /// The detail beside a name: the system font, a point smaller.
+    static func detailFont(for font: NSFont) -> NSFont { .systemFont(ofSize: max(10, font.pointSize - 1)) }
+
+    static func width(for item: SQLCompletion.Item, font: NSFont) -> CGFloat {
         let n = (item.text as NSString).size(withAttributes: [.font: font]).width
-        let d = ((item.detail ?? style(item.kind).2) as NSString).size(withAttributes: [.font: detailFont]).width
+        let d = ((item.detail ?? style(item.kind).2) as NSString).size(withAttributes: [.font: detailFont(for: font)]).width
         return 6 + 14 + 6 + n + 10 + d + 8
     }
 

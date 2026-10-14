@@ -16,6 +16,8 @@ public struct LexerDialect: Sendable, Hashable {
     public var triggerBodies: Bool
     /// `/*! … */` and `/*M! … */` are code the server runs (MySQL, MariaDB), not comments.
     public var executableComments: Bool
+    /// Unquoted names are folded to lower case (PostgreSQL), so `Users` names `users`.
+    public var foldsToLowercase: Bool
     public var keywords: Set<String>
 
     public init(
@@ -29,6 +31,7 @@ public struct LexerDialect: Sendable, Hashable {
         delimiterCommand: Bool = false,
         triggerBodies: Bool = false,
         executableComments: Bool = false,
+        foldsToLowercase: Bool = false,
         keywords: Set<String> = SQLKeywords.common
     ) {
         self.doubleQuoteIsIdentifier = doubleQuoteIsIdentifier
@@ -41,13 +44,14 @@ public struct LexerDialect: Sendable, Hashable {
         self.delimiterCommand = delimiterCommand
         self.triggerBodies = triggerBodies
         self.executableComments = executableComments
+        self.foldsToLowercase = foldsToLowercase
         self.keywords = keywords
     }
 
     public static let sqlite = LexerDialect(
         backtickIdentifiers: true, bracketIdentifiers: true, triggerBodies: true)
     public static let postgres = LexerDialect(
-        dollarQuotedStrings: true, nestedBlockComments: true)
+        dollarQuotedStrings: true, nestedBlockComments: true, foldsToLowercase: true)
     public static let mysql = LexerDialect(
         doubleQuoteIsIdentifier: false, backtickIdentifiers: true, hashLineComments: true,
         backslashEscapes: true, delimiterCommand: true, executableComments: true)

@@ -175,6 +175,8 @@ private func tempDir() -> URL {
         #expect(Keymap.commands.allSatisfy { $0.defaultBinding.isValid || unusual.contains($0.id) })
         #expect(Keymap.command("saveQuery:")?.defaultBinding.isEmpty == true)
         #expect(Keymap.command("toggleRightSidebar:")?.defaultBinding.display == "Space")
+        // Completion, reachable from Edit ▸ Complete when macOS keeps ⌃Space for input sources.
+        #expect(Keymap.command("complete:")?.defaultBinding.display == "⌃Space")
     }
 
     /// AppKit reads a shifted letter from its case, so ⇧⌘S goes to the menu as "S".

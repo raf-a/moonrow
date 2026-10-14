@@ -158,6 +158,8 @@ public enum Keymap {
         KeyCommand("compactSQL:", "Compact SQL", "SQL Editor", "i", [.command, .shift]),
         KeyCommand("saveQuery:", "Save", "SQL Editor", ""),
         KeyCommand("saveQueryAs:", "Save As", "SQL Editor", "s", [.command, .shift]),
+        KeyCommand("complete:", "Complete", "SQL Editor", " ", .control),
+        KeyCommand("goToLine:", "Go to Line", "SQL Editor", "l"),
 
         KeyCommand("showTableData:", "Show Table Data", "Table", "[", [.command, .control]),
         KeyCommand("showTableStructure:", "Show Table Structure", "Table", "]", [.command, .control]),

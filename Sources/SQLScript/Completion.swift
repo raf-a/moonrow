@@ -336,16 +336,33 @@ public enum SQLCompletion {
 
     // MARK: - Inserting
 
-    /// The text to insert for `item`: keywords in upper case, names quoted when they need it.
-    public static func insertion(for item: Item, dialect: LexerDialect) -> String {
-        if item.kind == .keyword { return item.text.uppercased() }
+    /// The text to insert for `item` in place of `typed` (the partial word, as written).
+    /// Keywords follow the typed case: lower case when everything typed is, else upper case.
+    /// Names are quoted when they need it.
+    public static func insertion(for item: Item, typed: String = "", dialect: LexerDialect) -> String {
+        if item.kind == .keyword {
+            let letters = typed.filter(\.isLetter)
+            return !letters.isEmpty && letters.allSatisfy(\.isLowercase) ? item.text.lowercased() : item.text.uppercased()
+        }
         return quoteIfNeeded(item.text, dialect: dialect)
     }
 
+    /// Whether Return (or Enter) accepts `item` rather than ending the line. A list that opened
+    /// while typing, still on its first item, gives way when accepting would leave `typed` as it
+    /// is (ignoring case): Return after a complete word starts a new line. When the list was
+    /// asked for, or the selection moved (`chosen`), Return accepts.
+    public static func returnAccepts(_ item: Item, typed: String, dialect: LexerDialect, chosen: Bool) -> Bool {
+        chosen || insertion(for: item, typed: typed, dialect: dialect).lowercased() != typed.lowercased()
+    }
+
+    /// `name` as written in SQL: plain when the database reads it back unchanged, else quoted.
+    /// Names that are keywords are quoted, and so are names with capitals where unquoted names
+    /// fold to lower case (PostgreSQL).
     public static func quoteIfNeeded(_ name: String, dialect: LexerDialect) -> String {
         let units = Array(name.utf16)
         let plain = !units.isEmpty && isIdentStart(units[0]) && units.allSatisfy(isIdentPart)
             && !dialect.keywords.contains(name.uppercased())
+            && !(dialect.foldsToLowercase && name != name.lowercased())
         if plain { return name }
         let q: Character = dialect.doubleQuoteIsIdentifier ? "\"" : "`"
         return String(q) + name.flatMap { $0 == q ? [q, q] : [$0] } + String(q)

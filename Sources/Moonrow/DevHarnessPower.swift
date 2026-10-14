@@ -210,12 +210,12 @@ extension DevHarness {
         query.results.toggleChart(nil)
 
         // Run button default.
-        let runAllItem = try require(query.view.descendantMenus().flatMap(\.items).first { $0.title == "Run All" && $0.action == NSSelectorFromString("setRunDefault:") },
-                                     "Default ▸ Run All")
+        let runAllItem = try require(query.view.descendantMenus().flatMap(\.items).first { $0.title == "Runs All Statements" && $0.action == NSSelectorFromString("setRunDefault:") },
+                                     "Run Button ▸ Runs All Statements")
         _ = runAllItem.target?.perform(runAllItem.action, with: runAllItem)
         _ = try await waitFor("Run All button") { query.runButtonTitle == "Run All" ? true : nil }
         print("ok: the Run button runs all")
-        let runCurrentItem = try require(runAllItem.menu?.items.first { $0.title == "Run Current" }, "Default ▸ Run Current")
+        let runCurrentItem = try require(runAllItem.menu?.items.first { $0.title == "Runs Current Statement" }, "Run Button ▸ Runs Current Statement")
         _ = runCurrentItem.target?.perform(runCurrentItem.action, with: runCurrentItem)
 
         // The query log (⌃⌘C) has every statement, the grid's too.
@@ -303,7 +303,7 @@ extension NSView {
     /// Menus of pop-up buttons under this view (the Run button's menu).
     func descendantMenus() -> [NSMenu] {
         var out: [NSMenu] = []
-        if let popup = self as? NSPopUpButton, let menu = popup.menu {
+        if let menu = (self as? NSPopUpButton)?.menu ?? (self as? NSComboButton)?.menu {
             out.append(menu)
             out += menu.items.compactMap(\.submenu)
         }

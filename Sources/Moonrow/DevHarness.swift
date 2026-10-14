@@ -1185,6 +1185,8 @@ enum DevHarness {
         window.displayIfNeeded()
         print("tabs: \(workspace.content.tabs.map(\.tabItem.title))")
         snap("q8-tabs.png", window)
+
+        try await editorChecks(workspace, table: table, snap: snap)
     }
 
     /// Exports a filtered table as CSV, JSON and SQL through the export sheet.

@@ -168,6 +168,35 @@ public enum SQLFormatter {
         return out
     }
 
+    /// Where a cursor at `offset` (UTF-16) in `old` lands in `new`, the same script after
+    /// `format` or `compact`: in the same statement (by position in the script, the last one if
+    /// there are fewer), after as many non-space characters from that statement's start as it
+    /// had before, so it stays on the same token.
+    public static func mapOffset(_ offset: Int, from old: String, to new: String, dialect: LexerDialect) -> Int {
+        let before = SQLLexer(old, dialect: dialect), after = SQLLexer(new, dialect: dialect)
+        let oldStatements = SQLSplitter.split(before), newStatements = SQLSplitter.split(after)
+        guard let last = oldStatements.last, !newStatements.isEmpty else { return min(offset, after.units.count) }
+        // Past the last statement's terminator: the end.
+        if offset > last.fullRange.upperBound { return after.units.count }
+        let index = oldStatements.firstIndex { offset <= $0.fullRange.upperBound } ?? oldStatements.count - 1
+        let start = oldStatements[index].range.lowerBound
+        var count = 0
+        if offset > start {
+            for u in before.units[start..<min(offset, before.units.count)] where !isSpace(u) { count += 1 }
+        }
+        let target = newStatements[min(index, newStatements.count - 1)]
+        var i = target.range.lowerBound
+        while count > 0, i < target.fullRange.upperBound {
+            if !isSpace(after.units[i]) { count -= 1 }
+            i += 1
+        }
+        // A cursor after a space stays at the start of the next token.
+        if offset > start, offset <= before.units.count, isSpace(before.units[offset - 1]) {
+            while i < target.range.upperBound, isSpace(after.units[i]) { i += 1 }
+        }
+        return i
+    }
+
     // MARK: - Statements
 
     static func formatStatement(_ text: String, dialect: LexerDialect, options: Options) -> String {

@@ -57,12 +57,17 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
     private let completion = CompletionPopup()
     private var completionContext: SQLCompletion.Context?
     private var isInsertingCompletion = false
+    /// The list was asked for (⌃Space, Edit ▸ Complete) or its selection moved: Return accepts.
+    private var completionChosen = false
+    /// Where the word being completed was on screen when the list was placed under it.
+    private var completionAnchor: NSRect?
 
     private let split = NSSplitView()
-    /// Runs the current statement or all of them, as Settings' Run button default says.
-    private let runButton = NSButton(title: "Run Current", target: nil, action: nil)
+    /// Runs the selection, or the current statement or all of them as Settings' Run button
+    /// default says; its menu has the other run and layout commands.
+    private let runButton = NSComboButton()
+    /// Takes the Run button's place while a query runs.
     private let stopButton = NSButton(title: "Stop", target: nil, action: nil)
-    private let runMenuButton = NSPopUpButton(frame: .zero, pullsDown: true)
     private let limitPopup = NSPopUpButton()
     private let spinner = NSProgressIndicator()
     private let positionLabel = NSTextField(labelWithString: "")
@@ -80,6 +85,15 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
     static let rowLimits = [100, 300, 500, 1_000, 5_000, 10_000, 50_000, 100_000, 500_000]
     /// Same as the grid's default page size.
     static let defaultRowLimit = 300
+    /// The last limit chosen in any query tab (0: no limit); new tabs start with it.
+    private static let rowLimitKey = "QueryRowLimit"
+    private static var rememberedRowLimit: Int {
+        get {
+            let tag = UserDefaults.standard.object(forKey: rowLimitKey) as? Int ?? defaultRowLimit
+            return tag == 0 || rowLimits.contains(tag) ? tag : defaultRowLimit
+        }
+        set { UserDefaults.standard.set(newValue, forKey: rowLimitKey) }
+    }
     /// Nil: every row.
     var rowLimit: Int? {
         let tag = limitPopup.selectedTag()
@@ -145,6 +159,13 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
         editorScroll.verticalRulerView = ruler
         editorScroll.hasVerticalRuler = true
         editorScroll.rulersVisible = true
+        // The completion list stays where it opened; it closes when the text moves under it.
+        editorScroll.contentView.postsBoundsChangedNotifications = true
+        editorScroll.postsFrameChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(editorMoved), name: NSView.boundsDidChangeNotification, object: editorScroll.contentView)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(editorMoved), name: NSView.frameDidChangeNotification, object: editorScroll)
 
         let top = NSView()
         let bar = makeActionBar()
@@ -210,76 +231,95 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
 
         limitPopup.controlSize = .small
         limitPopup.font = .systemFont(ofSize: 11)
-        limitPopup.addItem(withTitle: "No limit")
+        limitPopup.addItem(withTitle: "No Limit")
         limitPopup.lastItem?.tag = 0
         for n in Self.rowLimits {
-            limitPopup.addItem(withTitle: "\(n.formatted()) rows")
+            limitPopup.addItem(withTitle: "\(n.formatted()) Rows")
             limitPopup.lastItem?.tag = n
         }
-        limitPopup.selectItem(withTag: Self.defaultRowLimit)
-        limitPopup.toolTip = "Most rows to keep per result"
+        limitPopup.selectItem(withTag: Self.rememberedRowLimit)
+        limitPopup.toolTip = "Maximum rows per result"
+        limitPopup.target = self
+        limitPopup.action = #selector(rowLimitChanged(_:))
 
         spinner.style = .spinning
         spinner.controlSize = .small
         spinner.isDisplayedWhenStopped = false
 
+        runButton.style = .split
+        runButton.controlSize = .small
+        runButton.font = .systemFont(ofSize: 11)
+        runButton.image = NSImage(systemSymbolName: "play.fill", accessibilityDescription: nil)
         runButton.target = self
         runButton.action = #selector(runDefault(_:))
-        runButton.image = NSImage(systemSymbolName: "play.fill", accessibilityDescription: nil)
-        runButton.imagePosition = .imageLeading
+        runButton.menu = makeRunMenu()
         stopButton.target = self
         stopButton.action = #selector(cancelQuery(_:))
-        stopButton.toolTip = "Stop the running query (⌘.)"
+        stopButton.toolTip = "Stops the running query"
         stopButton.image = NSImage(systemSymbolName: "stop.fill", accessibilityDescription: nil)
         stopButton.imagePosition = .imageLeading
+        stopButton.bezelStyle = .push
+        stopButton.controlSize = .small
+        stopButton.font = .systemFont(ofSize: 11)
         stopButton.isHidden = true
-        runMenuButton.pullsDown = true
-        runMenuButton.isBordered = false
-        runMenuButton.toolTip = "More run and save commands"
-        let menu = runMenuButton.menu!
-        // A pull-down shows its first item, so that item carries the button's image.
-        let titleItem = menu.addItem(withTitle: "", action: nil, keyEquivalent: "")
-        titleItem.image = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: "More")
-        (runMenuButton.cell as? NSPopUpButtonCell)?.arrowPosition = .noArrow
-        runMenuButton.imagePosition = .imageOnly
-        runMenuButton.controlSize = .small
-        // No shortcuts here: AppKit would take them off the main menu's items (it gives each
-        // shortcut to one item).
-        for (title, action) in [
-            ("Run All", #selector(runAllQueries(_:))),
-            ("Run Current", #selector(runCurrentQuery(_:))),
-            ("-", nil),
-            ("Beautify SQL", #selector(formatSQL(_:))),
-            ("Compact SQL", #selector(compactSQL(_:))),
-            ("-", nil),
-            ("Save", #selector(saveQuery(_:))),
-            ("Save As…", #selector(saveQueryAs(_:))),
-        ] as [(String, Selector?)] {
-            if title == "-" { menu.addItem(.separator()); continue }
-            menu.addItem(withTitle: title, action: action, keyEquivalent: "").target = self
+
+        // Stop and Run share a slot as wide as the Run button's longest title, so nothing moves
+        // when the title changes or Stop takes its place.
+        let slot = NSView()
+        for b in [runButton, stopButton] as [NSControl] {
+            b.translatesAutoresizingMaskIntoConstraints = false
+            slot.addSubview(b)
+            NSLayoutConstraint.activate([
+                b.trailingAnchor.constraint(equalTo: slot.trailingAnchor),
+                b.centerYAnchor.constraint(equalTo: slot.centerYAnchor),
+                b.leadingAnchor.constraint(greaterThanOrEqualTo: slot.leadingAnchor),
+                slot.heightAnchor.constraint(greaterThanOrEqualTo: b.heightAnchor),
+            ])
         }
-        menu.addItem(.separator())
-        let defaults = menu.addItem(withTitle: "Default", action: nil, keyEquivalent: "")
-        defaults.submenu = NSMenu(title: "Default")
-        for (title, all) in [("Run Current", false), ("Run All", true)] {
-            let item = defaults.submenu!.addItem(withTitle: title, action: #selector(setRunDefault(_:)), keyEquivalent: "")
-            item.target = self
-            item.tag = all ? 1 : 0
+        var widest: CGFloat = 0
+        for title in ["Run Current", "Run All", "Run Selection"] {
+            runButton.title = title
+            widest = max(widest, runButton.fittingSize.width)
         }
-        for b in [runButton, stopButton] {
-            b.bezelStyle = .accessoryBarAction
-            b.controlSize = .small
-            b.font = .systemFont(ofSize: 11)
-        }
+        slot.widthAnchor.constraint(equalToConstant: ceil(max(widest, stopButton.fittingSize.width))).isActive = true
         updateRunButton()
 
         let spacer = NSView()
         spacer.setContentHuggingPriority(.init(1), for: .horizontal)
-        let bar = NSStackView(views: [positionLabel, spacer, spinner, limitPopup, stopButton, runButton, runMenuButton])
+        let bar = NSStackView(views: [positionLabel, spacer, spinner, limitPopup, slot])
         bar.spacing = 6
         bar.edgeInsets = NSEdgeInsets(top: 0, left: 8, bottom: 0, right: 8)
         bar.heightAnchor.constraint(equalToConstant: 30).isActive = true
         return bar
+    }
+
+    /// The Run button's menu. No shortcuts here: AppKit would take them off the main menu's
+    /// items (it gives each shortcut to one item).
+    private func makeRunMenu() -> NSMenu {
+        let menu = NSMenu()
+        for (title, action) in [
+            ("Run Current Statement", #selector(runCurrentQuery(_:))),
+            ("Run All Statements", #selector(runAllQueries(_:))),
+            ("-", nil),
+            ("Beautify SQL", #selector(formatSQL(_:))),
+            ("Compact SQL", #selector(compactSQL(_:))),
+            ("-", nil),
+        ] as [(String, Selector?)] {
+            if title == "-" { menu.addItem(.separator()); continue }
+            menu.addItem(withTitle: title, action: action, keyEquivalent: "").target = self
+        }
+        let defaults = menu.addItem(withTitle: "Run Button", action: nil, keyEquivalent: "")
+        defaults.submenu = NSMenu(title: "Run Button")
+        for (title, all) in [("Runs Current Statement", false), ("Runs All Statements", true)] {
+            let item = defaults.submenu!.addItem(withTitle: title, action: #selector(setRunDefault(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = all ? 1 : 0
+        }
+        return menu
+    }
+
+    @objc private func rowLimitChanged(_ sender: NSPopUpButton) {
+        Self.rememberedRowLimit = sender.selectedTag()
     }
 
     // MARK: - WorkspaceTab
@@ -354,7 +394,8 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
         run(ScriptSelection.all(in: editor.string, selection: selection, dialect: dialect))
     }
 
-    /// The Run button: the current statement or all, as chosen in its menu's Default ▸.
+    /// The Run button: the selection, else the current statement or all, as chosen in its
+    /// menu's Run Button ▸.
     @objc func runDefault(_ sender: Any?) {
         AppStyle.settings.runButtonRunsAll ? runAllQueries(sender) : runCurrentQuery(sender)
     }
@@ -366,10 +407,20 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
     }
 
     private func updateRunButton() {
-        let all = AppStyle.settings.runButtonRunsAll
-        runButton.title = all ? "Run All" : "Run Current"
-        runButton.toolTip = all ? "Run every statement, or the selected text (⇧⌘↩)"
-            : "Run the statement at the cursor, or the selected text (⌘↩)"
+        let title: String
+        if editor.selectedRange().length > 0 {
+            title = "Run Selection"
+            runButton.toolTip = "Runs the selected text"
+        } else if AppStyle.settings.runButtonRunsAll {
+            title = "Run All"
+            runButton.toolTip = "Runs every statement, or the selected text"
+        } else {
+            title = "Run Current"
+            runButton.toolTip = "Runs the statement at the insertion point, or the selected text"
+        }
+        guard runButton.title != title else { return }
+        runButton.title = title
+        runButton.setAccessibilityLabel(title)
     }
 
     @objc func cancelQuery(_ sender: Any?) {
@@ -495,7 +546,7 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
     private func setRunning(_ running: Bool) {
         isRunning = running
         stopButton.isHidden = !running
-        runButton.isEnabled = !running
+        runButton.isHidden = running
         limitPopup.isEnabled = !running
         if running { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
     }
@@ -584,7 +635,19 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
     func textViewDidChangeSelection(_ notification: Notification) {
         updatePosition()
         updateStatementHighlight()
+        updateRunButton()
+        flashMatchingBracket()
         ruler.needsDisplay = true
+    }
+
+    /// With the caret next to a parenthesis, briefly shows its partner.
+    private func flashMatchingBracket() {
+        let sel = editor.selectedRange()
+        let text = editor.string as NSString
+        guard sel.length == 0, text.length < 400_000,
+              [sel.location - 1, sel.location].contains(where: { $0 >= 0 && $0 < text.length && [40, 41].contains(text.character(at: $0)) }),
+              let match = SQLBrackets.match(at: sel.location, in: editor.string, dialect: dialect) else { return }
+        editor.showFindIndicator(for: NSRange(location: match, length: 1))
     }
 
     private func updatePosition() {
@@ -752,18 +815,28 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
         rewrite { SQLFormatter.compact($0, dialect: self.dialect) }
     }
 
+    /// Replaces the selection, or the whole script, with `transform` of it. A selection stays
+    /// selected; for the whole script the caret stays on the same token of the same statement,
+    /// at the same height in the editor.
     private func rewrite(_ transform: (String) -> String) {
         let text = editor.string as NSString
-        var range = editor.selectedRange()
-        if range.length == 0 { range = NSRange(location: 0, length: text.length) }
+        let selection = editor.selectedRange()
+        let whole = selection.length == 0
+        let range = whole ? NSRange(location: 0, length: text.length) : selection
         let old = text.substring(with: range)
         let new = transform(old)
         guard new != old else { return }
+        let caretHeight = editor.lineTop(at: selection.location).map { $0 - editor.visibleRect.minY }
         guard editor.shouldChangeText(in: range, replacementString: new) else { return }
         editor.textStorage?.replaceCharacters(in: range, with: new)
         editor.didChangeText()
-        editor.setSelectedRange(range.location == 0 && range.length == text.length
-            ? NSRange(location: 0, length: 0) : NSRange(location: range.location, length: (new as NSString).length))
+        if whole {
+            let caret = SQLFormatter.mapOffset(selection.location, from: old, to: new, dialect: dialect)
+            editor.setSelectedRange(NSRange(location: caret, length: 0))
+            if let caretHeight, let top = editor.lineTop(at: caret) { editor.scrollVertically(to: top - caretHeight) }
+        } else {
+            editor.setSelectedRange(NSRange(location: range.location, length: (new as NSString).length))
+        }
         view.window?.makeFirstResponder(editor)
     }
 
@@ -776,6 +849,34 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
         item.tag = NSTextFinder.Action.showFindInterface.rawValue
         view.window?.makeFirstResponder(editor)
         editor.performFindPanelAction(item)
+    }
+
+    /// Asks for a line number and puts the caret at the start of that line.
+    @objc func goToLine(_ sender: Any?) {
+        guard let window = view.window else { return }
+        let lines = ruler.line(at: (editor.string as NSString).length)
+        let alert = NSAlert()
+        alert.messageText = "Go to Line"
+        alert.informativeText = lines == 1 ? "The query has 1 line." : "The query has \(lines) lines."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 22))
+        field.placeholderString = "Line number"
+        field.stringValue = String(ruler.line(at: editor.selectedRange().location))
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Go")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn, let self, let line = Int(field.stringValue.trimmingCharacters(in: .whitespaces)) else { return }
+            self.goTo(line: line)
+        }
+    }
+
+    /// Puts the caret at the start of `line` (1-based, clamped) and scrolls to it.
+    func goTo(line: Int) {
+        let start = ruler.lineStart(line)
+        editor.setSelectedRange(NSRange(location: start, length: 0))
+        editor.scrollRangeToVisible(NSRange(location: start, length: 0))
+        view.window?.makeFirstResponder(editor)
     }
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
@@ -794,7 +895,8 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
         case #selector(formatSQL(_:)), #selector(compactSQL(_:)):
             return !isRunning
         case #selector(toggleFilters(_:)):
-            item.title = "Find…"
+            // Edit ▸ Find ▸ Find… names it; ⌘F still comes here and shows the find bar.
+            if item.menu?.title == "Edit" { item.isHidden = true }
             return true
         default:
             return true
@@ -816,6 +918,7 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
         if !manual, !completion.isVisible, context.prefix.isEmpty, context.expects != .column {
             return textViewDismissCompletion()
         }
+        if manual { completionChosen = true } else if !completion.isVisible { completionChosen = false }
         completionContext = context
         var wanted = context.tables.map(\.name)
         if let q = context.qualifier {
@@ -835,10 +938,9 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
         if items.isEmpty || (!manual && items.count == 1 && items[0].text.caseInsensitiveCompare(context.prefix) == .orderedSame) {
             return completion.hide()
         }
-        let r = NSRange(location: context.replaceRange.lowerBound, length: context.replaceRange.count)
-        var anchor = editor.firstRect(forCharacterRange: r, actualRange: nil)
-        if anchor.width == 0 { anchor.size.width = 1 }
-        completion.show(items, below: anchor, in: window)
+        let anchor = completionAnchor(for: context)
+        completionAnchor = anchor
+        completion.show(items, below: anchor, in: window, font: editor.font ?? AppStyle.editorFont)
     }
 
     /// Columns arrived: refresh the list, or show it if it was waiting for them, as long as the
@@ -849,28 +951,72 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
         showCompletions(manual: completion.isVisible)
     }
 
-    func textViewMoveCompletion(by delta: Int) { completion.moveSelection(by: delta) }
+    func textViewMoveCompletion(by delta: Int) {
+        completionChosen = true
+        completion.moveSelection(by: delta)
+    }
 
-    func textViewAcceptCompletion() -> Bool { completion.acceptSelected() }
+    func textViewAcceptCompletion(byReturn: Bool) -> Bool {
+        if byReturn, let item = completion.selectedItem, let typed = completionContext.flatMap(typedWord),
+           !SQLCompletion.returnAccepts(item, typed: typed, dialect: dialect, chosen: completionChosen) {
+            textViewDismissCompletion()
+            return false
+        }
+        return completion.acceptSelected()
+    }
 
     func textViewDismissCompletion() {
         completion.hide()
         completionContext = nil
+        completionChosen = false
     }
 
-    private func insertCompletion(_ item: SQLCompletion.Item) {
-        guard let context = completionContext else { return }
+    /// The word being completed, in screen coordinates.
+    private func completionAnchor(for context: SQLCompletion.Context) -> NSRect {
         let r = NSRange(location: context.replaceRange.lowerBound, length: context.replaceRange.count)
-        guard NSMaxRange(r) <= (editor.string as NSString).length else { return }
+        var anchor = editor.firstRect(forCharacterRange: r, actualRange: nil)
+        if anchor.width == 0 { anchor.size.width = 1 }
+        return anchor
+    }
+
+    /// The editor scrolled or was resized: the list closes when the word moved from under it.
+    /// A list placed before the editor was laid out (no anchor yet) is placed again instead.
+    @objc private func editorMoved() {
+        guard completion.isVisible, let context = completionContext else { return }
+        let anchor = completionAnchor(for: context)
+        guard anchor != completionAnchor else { return }
+        if completionAnchor?.height == 0 { showCompletions(manual: completionChosen) } else { textViewDismissCompletion() }
+    }
+
+    /// The partial word a completion replaces, as typed.
+    private func typedWord(_ context: SQLCompletion.Context) -> String? {
+        let r = NSRange(location: context.replaceRange.lowerBound, length: context.replaceRange.count)
+        let text = editor.string as NSString
+        return NSMaxRange(r) <= text.length ? text.substring(with: r) : nil
+    }
+
+    /// Inserts `item` as an undo step of its own.
+    private func insertCompletion(_ item: SQLCompletion.Item) {
+        guard let context = completionContext, let typed = typedWord(context) else { return }
+        let r = NSRange(location: context.replaceRange.lowerBound, length: context.replaceRange.count)
         isInsertingCompletion = true
-        editor.insertText(SQLCompletion.insertion(for: item, dialect: dialect), replacementRange: r)
+        editor.breakUndoCoalescing()
+        editor.insertText(SQLCompletion.insertion(for: item, typed: typed, dialect: dialect), replacementRange: r)
+        editor.breakUndoCoalescing()
         isInsertingCompletion = false
         environment.noteCompletion(item.text)
         completionContext = nil
+        completionChosen = false
     }
 
     /// For the dev harness: what the Run button runs.
     var runButtonTitle: String { runButton.title }
+
+    /// For the dev harness: picks a row limit (0: none) as the pop-up does.
+    func chooseRowLimit(_ tag: Int) {
+        limitPopup.selectItem(withTag: tag)
+        rowLimitChanged(limitPopup)
+    }
 
     /// For the dev harness: the items the list is showing.
     var completionItems: [SQLCompletion.Item] { completion.items }
