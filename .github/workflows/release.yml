@@ -10,6 +10,10 @@ name: Release
 #   secret MACOS_CERTIFICATE_PASSWORD  its password
 #   secret NOTARY_KEY                  base64 of an App Store Connect API key (.p8)
 #   variables NOTARY_KEY_ID, NOTARY_ISSUER_ID  that key's ID and issuer
+#
+# Updates: secret SPARKLE_PRIVATE_KEY, the EdDSA key from Sparkle's `generate_keys -x`, signs the
+# zip for appcast.xml, the feed the app reads from the latest release. Tags need it; a manual run
+# without it skips the appcast.
 on:
   push:
     tags: ['v*']
@@ -85,6 +89,23 @@ jobs:
       - name: Package
         run: scripts/package-release.sh "$VERSION"
 
+      - name: Appcast
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          if [ -z "$SPARKLE_PRIVATE_KEY" ]; then
+            if [ "$GITHUB_REF_TYPE" = tag ]; then
+              echo "::error::The SPARKLE_PRIVATE_KEY secret isn't set" >&2
+              exit 1
+            fi
+            echo "::warning::The SPARKLE_PRIVATE_KEY secret isn't set; no appcast.xml"
+            exit 0
+          fi
+          tag="v$VERSION"
+          scripts/make-appcast.sh "$VERSION" "$GITHUB_RUN_NUMBER" \
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/$tag/Moonrow-$VERSION.zip" \
+            "https://github.com/$GITHUB_REPOSITORY/releases/tag/$tag"
+
       - uses: actions/upload-artifact@v4
         with:
           name: Moonrow-${{ env.VERSION }}
@@ -98,7 +119,8 @@ jobs:
           flags=""
           case "$VERSION" in *-*) flags="--prerelease" ;; esac
           gh release create "$GITHUB_REF_NAME" --title "Moonrow $VERSION" --generate-notes $flags \
-            build/release/Moonrow-"$VERSION".dmg build/release/Moonrow-"$VERSION".zip build/release/SHA256SUMS
+            build/release/Moonrow-"$VERSION".dmg build/release/Moonrow-"$VERSION".zip build/release/SHA256SUMS \
+            build/release/appcast.xml
 
       - name: Remove the signing keychain
         if: always() && env.MACOS_CERTIFICATE != ''
