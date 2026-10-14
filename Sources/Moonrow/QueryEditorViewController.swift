@@ -742,7 +742,7 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
             onTabItemChange?()
             return true
         } catch {
-            presentError(error, title: "Couldn't save “\(url.deletingPathExtension().lastPathComponent)”")
+            presentError(error, title: "Couldn’t save “\(url.deletingPathExtension().lastPathComponent)”")
             return false
         }
     }
@@ -764,7 +764,7 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
         do {
             try environment.savedQueries.save(editor.string, as: savedQuery.name, in: savedQuery.folder, overwrite: true)
         } catch {
-            presentError(error, title: "Couldn't save “\(savedQuery.name)”")
+            presentError(error, title: "Couldn’t save “\(savedQuery.name)”")
         }
     }
 

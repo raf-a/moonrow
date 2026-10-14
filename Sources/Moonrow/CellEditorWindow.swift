@@ -82,7 +82,7 @@ final class CellEditorController: NSWindowController, NSWindowDelegate {
         // Return types a line break; ⌘↩ saves.
         saveButton.keyEquivalent = "\r"
         saveButton.keyEquivalentModifierMask = .command
-        saveButton.toolTip = "Stage the value (⌘↩)"
+        saveButton.toolTip = "Stage the value"
         saveButton.isHidden = !isEditable
         loadButton.target = self
         loadButton.action = #selector(loadClicked(_:))
@@ -255,9 +255,9 @@ final class CellEditorController: NSWindowController, NSWindowDelegate {
         guard size <= CellViewer.fileLimit else {
             return .failure(DatabaseError("The file is larger than \(ByteCountFormatter.string(fromByteCount: Int64(CellViewer.fileLimit), countStyle: .file))."))
         }
-        guard let data = try? Data(contentsOf: url) else { return .failure(DatabaseError("The file couldn't be read.")) }
+        guard let data = try? Data(contentsOf: url) else { return .failure(DatabaseError("The file couldn’t be read.")) }
         guard let v = CellViewer.value(fromFile: data, typeName: typeName) else {
-            return .failure(DatabaseError("The file isn't UTF-8 text, and the column doesn't hold bytes."))
+            return .failure(DatabaseError("The file isn’t UTF-8 text, and the column doesn’t hold bytes."))
         }
         return .success(v)
     }

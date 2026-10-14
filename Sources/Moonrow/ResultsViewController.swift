@@ -14,7 +14,7 @@ final class ResultsViewController: NSViewController {
     private let messagesScroll = NSTextView.scrollableTextView()
     private var messages: NSTextView { messagesScroll.documentView as! NSTextView }
     private let statusLabel = NSTextField(labelWithString: "")
-    private let placeholder = NSTextField(labelWithString: "Run a query with ⌘↩ (current) or ⇧⌘↩ (all)")
+    private let placeholder = NSTextField(labelWithString: "No Results")
     private let exportButton = NSButton(title: "Export…", target: nil, action: #selector(MoonrowActions.exportData(_:)))
     private let pinButton = NSButton(title: "", target: nil, action: nil)
     private let chartButton = NSButton(title: "Chart", target: nil, action: nil)
@@ -432,7 +432,7 @@ final class ResultsViewController: NSViewController {
         } else if let n = outcome.rowsAffected {
             parts.append("\(n.formatted()) row\(n == 1 ? "" : "s") affected")
         } else {
-            parts.append("OK")
+            parts.append("Completed")
         }
         parts.append(DurationText.string(outcome.duration))
         return parts.joined(separator: " · ")

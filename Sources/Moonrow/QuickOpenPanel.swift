@@ -301,7 +301,7 @@ extension WorkspaceWindowController {
                 self.quickOpenItems = QuickOpen.items(objects: objects, savedQueries: [])
                 panel?.setNote(schemas.count > 1 ? "\(schemas.count) schemas" : "")
             } catch {
-                panel?.setNote("Couldn't list every schema: \(error)")
+                panel?.setNote("Couldn’t list every schema: \(error.localizedDescription)")
             }
             panel?.refresh()
         }

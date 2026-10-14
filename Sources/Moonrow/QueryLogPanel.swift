@@ -140,14 +140,13 @@ final class QueryLogViewController: NSViewController {
         title.font = .systemFont(ofSize: 11, weight: .semibold)
         countLabel.font = .systemFont(ofSize: 11)
         countLabel.textColor = .secondaryLabelColor
-        let copy = NSButton(title: "Copy", target: self, action: #selector(copyLog(_:)))
+        let copy = NSButton(title: "Copy All", target: self, action: #selector(copyLog(_:)))
         let clear = NSButton(title: "Clear", target: self, action: #selector(clearLog(_:)))
         for b in [copy, clear] {
             b.bezelStyle = .accessoryBarAction
             b.controlSize = .small
             b.font = .systemFont(ofSize: 11)
         }
-        copy.toolTip = "Copy the whole log"
         let bar = NSStackView(views: [title, countLabel, NSView(), copy, clear])
         bar.spacing = 6
         bar.edgeInsets = NSEdgeInsets(top: 0, left: 8, bottom: 0, right: 8)

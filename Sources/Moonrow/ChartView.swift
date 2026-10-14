@@ -34,8 +34,8 @@ final class ChartViewController: NSViewController {
         }
         note.font = .systemFont(ofSize: 11)
         note.textColor = .secondaryLabelColor
-        let bar = NSStackView(views: [NSTextField(labelWithString: "Chart"), kindPopup, NSTextField(labelWithString: "Labels"),
-                                      labelPopup, NSTextField(labelWithString: "Values"), valuePopup, note])
+        let bar = NSStackView(views: [NSTextField(labelWithString: "Type:"), kindPopup, NSTextField(labelWithString: "Labels:"),
+                                      labelPopup, NSTextField(labelWithString: "Values:"), valuePopup, note])
         for case let label as NSTextField in bar.arrangedSubviews where label !== note {
             label.font = .systemFont(ofSize: 11)
             label.textColor = .secondaryLabelColor
@@ -69,7 +69,7 @@ final class ChartViewController: NSViewController {
         let keepValue = valuePopup.numberOfItems > 0 ? valuePopup.selectedTag() : nil
         let axes = ChartData.defaultAxes(count: columns.count, rows: rows)
         labelPopup.removeAllItems()
-        labelPopup.addItem(withTitle: "Row number")
+        labelPopup.addItem(withTitle: "Row Number")
         labelPopup.lastItem?.tag = -1
         for (i, c) in columns.enumerated() {
             labelPopup.addItem(withTitle: c.name)
@@ -92,14 +92,14 @@ final class ChartViewController: NSViewController {
         let kind = ChartData.Kind.allCases[max(0, kindPopup.indexOfSelectedItem)]
         guard !numeric.isEmpty, valuePopup.selectedTag() >= 0 else {
             chart.show([], kind: kind)
-            note.stringValue = "No column holds numbers."
+            note.stringValue = "No numeric columns"
             return
         }
         let label = labelPopup.selectedTag() >= 0 ? labelPopup.selectedTag() : nil
         let (points, truncated) = ChartData.points(rows: rows(), label: label, value: valuePopup.selectedTag(), kind: kind)
         chart.show(points, kind: kind)
-        note.stringValue = !truncated ? "" : kind == .pie ? "Zero and negative values are left out."
-            : "The first \(ChartData.pointLimit.formatted()) points are shown."
+        note.stringValue = !truncated ? "" : kind == .pie ? "Zero and negative values aren’t shown."
+            : "Showing the first \(ChartData.pointLimit.formatted()) points"
     }
 
     /// For the dev harness.

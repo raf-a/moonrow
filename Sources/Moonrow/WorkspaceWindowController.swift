@@ -301,7 +301,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
             window?.makeKeyAndOrderFront(nil)
             newQuery(text: text, file: url)
         } catch {
-            present(error, title: "Couldn't open “\(url.lastPathComponent)”", in: window)
+            present(error, title: "Couldn’t open “\(url.lastPathComponent)”", in: window)
         }
     }
 
@@ -317,7 +317,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         do {
             newQuery(text: try environment.savedQueries.text(of: query), saved: query)
         } catch {
-            present(error, title: "Couldn't open “\(query.name)”", in: window)
+            present(error, title: "Couldn’t open “\(query.name)”", in: window)
         }
     }
 
@@ -468,7 +468,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         window.makeKeyAndOrderFront(nil)
         let alert = NSAlert()
         alert.messageText = "Commit staged changes to \(config.displayName)?"
-        alert.informativeText = "\(action) drops changes that aren't committed:\n\(changes.summary)"
+        alert.informativeText = "\(action) drops changes that aren’t committed:\n\(changes.summary)"
         alert.addButton(withTitle: "Commit")
         alert.addButton(withTitle: "Discard")
         alert.addButton(withTitle: "Cancel")

@@ -498,7 +498,7 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
     @objc private func chooseQueriesFolder(_ sender: Any?) {
         guard let window else { return }
         let panel = NSOpenPanel()
-        panel.message = "Choose the folder for this connection's saved queries"
+        panel.message = "Choose the folder for this connection’s saved queries"
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.canCreateDirectories = true

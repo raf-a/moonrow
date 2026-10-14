@@ -889,7 +889,8 @@ final class HistoryViewController: SidebarListController {
             let calendar = Calendar.current
             let recent = calendar.isDateInToday(entry.date) || calendar.isDateInYesterday(entry.date)
             var meta = entry.date.formatted(date: recent ? .omitted : .abbreviated, time: .shortened)
-            if let ms = entry.ms { meta += " · \(ms) ms" }
+            // Kept in whole milliseconds: 0 was under one.
+            if let ms = entry.ms { meta += " · " + (ms == 0 ? "< 1 ms" : DurationText.string(.milliseconds(ms))) }
             if !entry.ok { meta += " · failed" }
             when.stringValue = meta
             status.image = NSImage(systemSymbolName: entry.ok ? "checkmark.circle" : "xmark.circle", accessibilityDescription: entry.ok ? "Succeeded" : "Failed")
