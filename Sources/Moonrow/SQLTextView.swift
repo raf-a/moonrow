@@ -8,8 +8,9 @@ protocol SQLTextViewCompletionDelegate: AnyObject {
     /// The user typed or deleted; refresh (or open, when `manual`) the list.
     func textViewNeedsCompletion(_ textView: SQLTextView, manual: Bool)
     func textViewMoveCompletion(by delta: Int)
-    /// Returns false when nothing was selected.
-    func textViewAcceptCompletion() -> Bool
+    /// Returns false when nothing was accepted: nothing was selected, or Return (`byReturn`)
+    /// gives way to a new line.
+    func textViewAcceptCompletion(byReturn: Bool) -> Bool
     func textViewDismissCompletion()
 }
 
@@ -106,8 +107,10 @@ final class SQLTextView: NSTextView {
             case (126, []): return completion.textViewMoveCompletion(by: -1)  // ↑
             case (121, []): return completion.textViewMoveCompletion(by: 8)   // page down
             case (116, []): return completion.textViewMoveCompletion(by: -8)  // page up
-            case (36, []), (76, []), (48, []):                                // Return, Enter, Tab
-                if completion.textViewAcceptCompletion() { return }
+            case (36, []), (76, []):                                           // Return, Enter
+                if completion.textViewAcceptCompletion(byReturn: true) { return }
+            case (48, []):                                                     // Tab
+                if completion.textViewAcceptCompletion(byReturn: false) { return }
             case (53, []):                                                     // Esc
                 return completion.textViewDismissCompletion()
             case (123, _), (124, _), (115, _), (119, _):                       // ← → home end
@@ -156,14 +159,17 @@ final class SQLTextView: NSTextView {
         return super.resignFirstResponder()
     }
 
-    /// Return keeps the current line's indentation.
+    /// Return keeps the current line's indentation, one level deeper after an open `(`.
     override func insertNewline(_ sender: Any?) {
         let text = string as NSString
         let caret = selectedRange().location
         let lineStart = text.lineRange(for: NSRange(location: caret, length: 0)).location
         var end = lineStart
         while end < caret, let c = UnicodeScalar(text.character(at: end)), c == " " || c == "\t" { end += 1 }
-        let leading = text.substring(with: NSRange(location: lineStart, length: end - lineStart))
+        var leading = text.substring(with: NSRange(location: lineStart, length: end - lineStart))
+        var last = caret - 1
+        while last >= end, [32, 9].contains(text.character(at: last)) { last -= 1 }
+        if last >= end, text.character(at: last) == 40 { leading += indent }  // (
         super.insertNewline(sender)
         if !leading.isEmpty { insertText(leading, replacementRange: selectedRange()) }
     }
@@ -238,6 +244,30 @@ final class SQLTextView: NSTextView {
         textStorage?.replaceCharacters(in: range, with: replacement)
         didChangeText()
         setSelectedRange(NSRange(location: range.location, length: (replacement as NSString).length))
+    }
+
+    /// The top of the line holding `offset`, in the view's coordinates.
+    func lineTop(at offset: Int) -> CGFloat? {
+        guard let layout = layoutManager, let container = textContainer else { return nil }
+        layout.ensureLayout(for: container)
+        let length = (string as NSString).length
+        let rect: NSRect
+        if offset >= length, layout.extraLineFragmentTextContainer != nil {
+            rect = layout.extraLineFragmentRect
+        } else if length > 0 {
+            rect = layout.lineFragmentRect(forGlyphAt: layout.glyphIndexForCharacter(at: min(offset, length - 1)), effectiveRange: nil)
+        } else {
+            rect = .zero
+        }
+        return rect.minY + textContainerOrigin.y
+    }
+
+    /// Scrolls so the top of the visible area is `y` (kept within the text).
+    func scrollVertically(to y: CGFloat) {
+        guard let clip = enclosingScrollView?.contentView else { return }
+        let target = clip.constrainBoundsRect(NSRect(origin: NSPoint(x: clip.bounds.minX, y: y), size: clip.bounds.size))
+        clip.scroll(to: target.origin)
+        enclosingScrollView?.reflectScrolledClipView(clip)
     }
 
     /// The full lines the selection touches (without the final newline).
