@@ -34,13 +34,15 @@ jobs:
       NOTARY_KEY_ID: ${{ vars.NOTARY_KEY_ID }}
       NOTARY_ISSUER_ID: ${{ vars.NOTARY_ISSUER_ID }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           fetch-depth: 0
 
       - name: Select Xcode
+        env:
+          XCODE_APP: ${{ vars.XCODE_APP }}
         run: |
-          xcode="${{ vars.XCODE_APP }}"
+          xcode="$XCODE_APP"
           [ -n "$xcode" ] || xcode="$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
           sudo xcode-select -s "$xcode"
           xcodebuild -version
@@ -125,7 +127,7 @@ jobs:
             "https://github.com/$GITHUB_REPOSITORY/releases/download/v$VERSION/Moonrow-$VERSION.zip" \
             build/release-notes.html
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: Moonrow-${{ env.VERSION }}
           path: |
