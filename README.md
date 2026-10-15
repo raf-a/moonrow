@@ -1,58 +1,49 @@
-# Moonrow
+<p align="center">
+  <img src="Assets/AppIcon.iconset/icon_256x256@2x.png" width="128" height="128" alt="">
+</p>
 
-A native macOS database client for SQLite, PostgreSQL, MySQL and MariaDB, written in Swift and AppKit.
+<h1 align="center">Moonrow</h1>
+
+<p align="center">
+  A native Mac app for SQLite, PostgreSQL, MySQL and MariaDB.
+  <br>
+  <a href="https://github.com/raf-a/moonrow/releases/latest">Download</a>
+  ·
+  <a href="#build-from-source">Build from source</a>
+</p>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/readme-dark.png">
+  <img src="docs/images/readme-light.png" alt="A Moonrow window on a sample shop database, with its tables in the sidebar, a query in the editor and the query’s results in a grid below.">
+</picture>
 
 ## Features
 
-- **Connections:** SQLite files, PostgreSQL, MySQL and MariaDB, over TLS and SSH tunnels (through the system's OpenSSH, so `~/.ssh/config`, keys and the agent just work). Passwords live in the Keychain. Connections can be grouped, coloured and tagged.
-- **Data grid:** fast paging through millions of rows, sorting, filters and quick filters, and cell, row and multi-row editing. Edits are staged per workspace, with undo, a SQL preview and a single commit.
-- **Query editor:** tabs, run current or all, autocomplete, history, saved queries in folders, a formatter, query parameters, pinned results and charts.
-- **Structure:** columns, indexes, foreign keys, views, functions and triggers, all edited with a DDL preview, plus a schema diagram.
-- **Transfer:** export to CSV, JSON, SQL and XLSX; import CSV, JSON and SQL; back up and restore with `pg_dump` and `mysqldump`.
-- **Safety:** per-connection safe modes that confirm or ask for a password before writes, and a log of every statement sent.
+- **Staged edits:** changes to rows and structure wait until you commit them, and you can read the SQL first.
+- **Saved queries as files:** each connection’s queries are `.sql` files in a folder, ready for any editor or version control.
+- **SSH tunnels** through your Mac’s own OpenSSH, so your `~/.ssh/config` and keys work as they do in Terminal.
+- **Safe mode:** a connection can ask for confirmation or its password before it sends changes.
+- **Import, export and backup:** CSV, JSON, SQL and Excel, and backups with `pg_dump` and `mysqldump`.
 
 ## Install
 
-Download the latest `Moonrow-<version>.dmg` from [Releases](../../releases) and drag Moonrow to Applications. It needs macOS 14 or later and runs natively on Apple silicon and Intel.
-
-## Updates
-
-Moonrow updates itself with [Sparkle](https://sparkle-project.org). **Moonrow ▸ Check for Updates…** looks for a new version, and **Settings ▸ General ▸ Automatically check for updates** turns daily checks on or off. Updates come from this repository's releases, are signed, and are only offered from full releases, never prereleases.
+Download the [latest release](https://github.com/raf-a/moonrow/releases/latest). Moonrow needs macOS 14 or later, and updates itself.
 
 ## Build from source
 
-You need Xcode 26 or later (Swift 6).
+With Xcode 26 or later:
 
 ```bash
 swift build
-swift test
-scripts/build-app.sh          # writes build/Moonrow.app
+scripts/build-app.sh
 ```
 
-To work in Xcode, open `Package.swift`.
+## Contributing
 
-The PostgreSQL, MySQL, MariaDB and SSH tests run against throwaway Docker containers and are skipped otherwise:
+To report a bug or ask for a feature, [open an issue](https://github.com/raf-a/moonrow/issues). For a bug, say which database and version you use, the steps that cause it, and what you expected to happen.
 
-```bash
-scripts/test-servers.sh up
-eval "$(scripts/test-servers.sh env)" && swift test
-scripts/test-servers.sh down
-```
+Pull requests are welcome. For a larger change, open an issue first so we can agree on the approach.
 
-## Layout
-
-| Path | What's there |
-|---|---|
-| `Sources/SQLScript` | SQL lexer, statement splitter, current statement |
-| `Sources/DBKit` | Driver contract, dialects, filters, change sets |
-| `Sources/WireSupport` | Sockets, TLS and framing (SwiftNIO) for the network drivers |
-| `Sources/DriverSQLite`, `DriverPostgres`, `DriverMySQL` | One module per database; Postgres and MySQL are our own wire-protocol clients |
-| `Sources/SSHTunnel`, `Sources/moonrow-ssh-helper` | SSH tunnels over `/usr/bin/ssh` |
-| `Sources/AppCore` | App logic without AppKit, covered by `swift test` |
-| `Sources/Moonrow` | The AppKit app |
-
-Releases are built by GitHub Actions; see [docs/RELEASING.md](docs/RELEASING.md).
-
-## License
+## Licence
 
 [MIT](LICENSE)
