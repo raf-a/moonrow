@@ -18,6 +18,7 @@ name: Release
 # a tag needs too.
 #
 # The secrets belong to the `release` environment, which only `v*` tags and `main` can use.
+# Before a tag is built, its code must have passed main's CodeQL Swift scan.
 on:
   push:
     tags: ['v*']
@@ -27,7 +28,36 @@ permissions:
   contents: write
 
 jobs:
+  # A tag must be on main, its code covered by main's latest CodeQL Swift scan, and main free of
+  # serious alerts; otherwise nothing is built. See scripts/check-release-scan.sh.
+  scan:
+    name: Check code scanning
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: read
+      actions: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+
+      - name: Check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$GITHUB_REF_TYPE" != tag ]; then
+            echo "A manual run isn't released, so it isn't checked."
+            exit 0
+          fi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_REF_NAME isn't on main" >&2
+            exit 1
+          fi
+          scripts/check-release-scan.sh "$GITHUB_SHA"
+
   release:
+    needs: scan
     runs-on: macos-26
     environment: release
     env:

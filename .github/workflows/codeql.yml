@@ -1,5 +1,7 @@
 name: CodeQL
 
+# Scans the workflows themselves, without a build: fast enough for every pull request.
+# The Swift code has its own scan, codeql-swift.yml, which runs on main.
 on:
   push:
     branches: [main]
@@ -16,47 +18,19 @@ permissions:
 
 jobs:
   analyze:
-    name: Analyze (${{ matrix.language }})
-    runs-on: ${{ matrix.runner }}
+    name: Analyze (actions)
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       security-events: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # The app, built the way CI builds it.
-          - language: swift
-            build-mode: manual
-            runner: macos-26
-          # The workflows themselves, read without a build.
-          - language: actions
-            build-mode: none
-            runner: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
-      # The newest Xcode on the image, unless the XCODE_APP repository variable names one.
-      - name: Select Xcode
-        if: matrix.language == 'swift'
-        env:
-          XCODE_APP: ${{ vars.XCODE_APP }}
-        run: |
-          xcode="$XCODE_APP"
-          [ -n "$xcode" ] || xcode="$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
-          sudo xcode-select -s "$xcode"
-          swift --version
-
       - uses: github/codeql-action/init@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
         with:
-          languages: ${{ matrix.language }}
-          build-mode: ${{ matrix.build-mode }}
-
-      # CodeQL watches the compiler, so this build runs without a cache.
-      - name: Build
-        if: matrix.build-mode == 'manual'
-        run: swift build
+          languages: actions
+          build-mode: none
 
       - uses: github/codeql-action/analyze@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
         with:
-          category: /language:${{ matrix.language }}
+          category: /language:actions

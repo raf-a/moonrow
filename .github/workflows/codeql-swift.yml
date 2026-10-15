@@ -1,0 +1,57 @@
+name: CodeQL Swift
+
+# Scans the Swift code on main. CodeQL has to watch a full build, which takes about 20 minutes,
+# so pull requests don't wait for it; a release checks this scan's results instead
+# (scripts/check-release-scan.sh). The paths are the ones that script compares: change them
+# together. The weekly run picks up new queries.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Sources/**'
+      - 'Package.swift'
+      - 'Package.resolved'
+      - '.github/workflows/codeql-swift.yml'
+  schedule:
+    - cron: '23 4 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: codeql-swift-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (swift)
+    runs-on: macos-26
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      # The newest Xcode on the image, unless the XCODE_APP repository variable names one.
+      - name: Select Xcode
+        env:
+          XCODE_APP: ${{ vars.XCODE_APP }}
+        run: |
+          xcode="$XCODE_APP"
+          [ -n "$xcode" ] || xcode="$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+          sudo xcode-select -s "$xcode"
+          swift --version
+
+      - uses: github/codeql-action/init@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+        with:
+          languages: swift
+          build-mode: manual
+
+      # CodeQL watches the compiler, so this build runs without a cache.
+      - name: Build
+        run: swift build
+
+      - uses: github/codeql-action/analyze@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+        with:
+          category: /language:swift
