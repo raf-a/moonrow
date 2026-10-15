@@ -1,16 +1,35 @@
 # Releasing
 
+The `/release` skill walks through all of this: it checks `main`, writes the notes, tags, waits for the workflow and checks the draft it makes. By hand:
+
 1. Make sure `main` is green in CI.
-2. Tag and push:
+2. Write the release notes in `docs/release-notes/1.2.0.md` (see [Release notes](#release-notes)) and commit them.
+3. Tag and push:
 
    ```bash
    git tag v1.2.0
    git push origin v1.2.0
    ```
 
-   The `Release` workflow tests, builds a universal (arm64 + x86_64) `Moonrow.app` with version `1.2.0` and build number set to the run number, and publishes a GitHub release with `Moonrow-1.2.0.dmg`, `Moonrow-1.2.0.zip`, `SHA256SUMS` and `appcast.xml`. A tag with a hyphen, like `v1.2.0-rc.1`, publishes a prerelease.
+   The `Release` workflow tests, builds a universal (arm64 + x86_64) `Moonrow.app` with version `1.2.0` and build number set to the run number, and drafts a GitHub release with `Moonrow-1.2.0.dmg`, `Moonrow-1.2.0.zip`, `SHA256SUMS` and `appcast.xml`. A tag with a hyphen, like `v1.2.0-rc.1`, drafts a prerelease.
+4. Check the draft with `scripts/check-release.sh 1.2.0`. It downloads the draft's files and checks the checksums, the appcast against the zip, the EdDSA signature, the version and build number, the architectures, the Developer ID signature and notarization, and the DMG. Then publish the draft on GitHub (Releases → the draft → Edit → Publish release). Until then nobody can download it, and the update feed still offers the previous release. The release notes and the appcast are dated the day the workflow ran, so publish soon after.
 
-Running the workflow by hand (Actions → Release → Run workflow) builds and packages without publishing; the files are attached to the run as an artifact.
+Running the workflow by hand (Actions → Release → Run workflow) builds and packages without a release; the files are attached to the run as an artifact, with the newest release notes rendered as `release-notes.html`.
+
+## Release notes
+
+Sparkle's update window shows each release's notes, written by hand in `docs/release-notes/<version>.md`. A tag without its notes fails before the build; a prerelease such as `v1.2.0-rc.1` uses `1.2.0.md`. The GitHub release page keeps GitHub's generated notes.
+
+[`docs/release-notes/README.md`](release-notes/README.md) says how to write them: the brand style, their shape and the area tags on Fixes and Improvements. The `/release-notes` skill drafts them from the commits since the last tag. Images go in `docs/release-notes/images/` and are loaded from the tagged commit on GitHub.
+
+`scripts/render-release-notes.swift` turns the notes into a page dated today, which `scripts/make-appcast.sh` embeds in `appcast.xml`. To preview them, render them and open the page:
+
+```bash
+swift scripts/render-release-notes.swift docs/release-notes/1.2.0.md > build/release-notes.html
+open build/release-notes.html
+```
+
+To see them in Sparkle's own window, put that page in a test appcast (as in [Testing an update](#testing-an-update)) and launch with `--env MOONROW_UPDATE=check`, which leaves the update window up.
 
 ## Signing and notarization
 
@@ -41,7 +60,7 @@ After packaging, the workflow runs `scripts/make-appcast.sh`, which:
 1. downloads Sparkle's tools at the version pinned in the script and checks the tarball's SHA-256;
 2. signs `Moonrow-1.2.0.zip` with `sign_update`, passing the key on stdin;
 3. checks that signature against the `SUPublicEDKey` of the app it just built, so a key that doesn't match fails the release;
-4. writes `appcast.xml` with one item: the zip's download URL on the release, its signature and length, the build number and version, `minimumSystemVersion` 14.0, and a link to the release page as the release notes.
+4. writes `appcast.xml` with one item: the zip's download URL on the release, its signature and length, the build number and version, `minimumSystemVersion` 14.0, and the rendered release notes.
 
 A tag without the secret fails; a manual run without it skips the appcast. When Sparkle moves to a new version, update the package and the version and checksum in `scripts/make-appcast.sh` together.
 
@@ -63,9 +82,11 @@ Set `MOONROW_SIGN_IDENTITY` to sign with a Developer ID, and `NOTARY_KEY_PATH`, 
 To write the appcast too, with the private key in a file:
 
 ```bash
+swift scripts/render-release-notes.swift docs/release-notes/1.2.0.md \
+  https://raw.githubusercontent.com/raf-a/moonrow/v1.2.0/docs/release-notes/ > build/release-notes.html
 SPARKLE_PRIVATE_KEY_FILE=path/to/key scripts/make-appcast.sh 1.2.0 42 \
   https://github.com/raf-a/moonrow/releases/download/v1.2.0/Moonrow-1.2.0.zip \
-  https://github.com/raf-a/moonrow/releases/tag/v1.2.0
+  build/release-notes.html
 ```
 
 ### Testing an update

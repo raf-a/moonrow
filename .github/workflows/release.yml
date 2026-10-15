@@ -1,8 +1,9 @@
 name: Release
 
-# Pushing a tag like v1.2.0 builds, packages and publishes a GitHub release. A tag with a
-# hyphen (v1.2.0-rc.1) publishes a prerelease. Running the workflow by hand builds and
-# packages without publishing; the files are kept as a workflow artifact.
+# Pushing a tag like v1.2.0 builds, packages and drafts a GitHub release; publishing the draft
+# on GitHub releases it, and only then does the update feed offer it. A tag with a hyphen
+# (v1.2.0-rc.1) drafts a prerelease. Running the workflow by hand builds and packages without
+# a release; the files are kept as a workflow artifact.
 #
 # Signing and notarization are optional. With these set, the app is signed with a Developer ID
 # and notarized; without them it is signed ad hoc:
@@ -13,7 +14,8 @@ name: Release
 #
 # Updates: secret SPARKLE_PRIVATE_KEY, the EdDSA key from Sparkle's `generate_keys -x`, signs the
 # zip for appcast.xml, the feed the app reads from the latest release. Tags need it; a manual run
-# without it skips the appcast.
+# without it skips the appcast. The feed carries the release notes from docs/release-notes, which
+# a tag needs too.
 on:
   push:
     tags: ['v*']
@@ -52,6 +54,24 @@ jobs:
           fi
           echo "VERSION=$version" >> "$GITHUB_ENV"
           echo "Version $version"
+
+      # Before the build, so a tag without notes fails at once. A prerelease (1.2.0-rc.1) uses its
+      # release's notes; a manual run renders the newest ones. Images come from this commit.
+      - name: Release notes
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            notes="docs/release-notes/${VERSION%%-*}.md"
+          else
+            notes="$(ls docs/release-notes/[0-9]*.md | sort -V | tail -1)"
+          fi
+          if [ ! -f "$notes" ]; then
+            echo "::error::No release notes; write docs/release-notes/${VERSION%%-*}.md" >&2
+            exit 1
+          fi
+          mkdir -p build
+          swift scripts/render-release-notes.swift "$notes" \
+            "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_SHA/docs/release-notes/" \
+            > build/release-notes.html
 
       - name: Test
         run: swift test
@@ -101,24 +121,26 @@ jobs:
             echo "::warning::The SPARKLE_PRIVATE_KEY secret isn't set; no appcast.xml"
             exit 0
           fi
-          tag="v$VERSION"
           scripts/make-appcast.sh "$VERSION" "$GITHUB_RUN_NUMBER" \
-            "https://github.com/$GITHUB_REPOSITORY/releases/download/$tag/Moonrow-$VERSION.zip" \
-            "https://github.com/$GITHUB_REPOSITORY/releases/tag/$tag"
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/v$VERSION/Moonrow-$VERSION.zip" \
+            build/release-notes.html
 
       - uses: actions/upload-artifact@v4
         with:
           name: Moonrow-${{ env.VERSION }}
-          path: build/release/
+          path: |
+            build/release/
+            build/release-notes.html
 
-      - name: Publish the release
+      # A draft: nothing reaches users until someone checks it and publishes it on GitHub.
+      - name: Draft the release
         if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           flags=""
           case "$VERSION" in *-*) flags="--prerelease" ;; esac
-          gh release create "$GITHUB_REF_NAME" --title "Moonrow $VERSION" --generate-notes $flags \
+          gh release create "$GITHUB_REF_NAME" --draft --title "Moonrow $VERSION" --generate-notes $flags \
             build/release/Moonrow-"$VERSION".dmg build/release/Moonrow-"$VERSION".zip build/release/SHA256SUMS \
             build/release/appcast.xml
 

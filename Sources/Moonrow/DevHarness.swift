@@ -27,6 +27,7 @@ import Darwin
 ///     MOONROW_TRANSFER=users MOONROW_STORE=… MOONROW_SNAPSHOTS=… Moonrow /tmp/copy-of-sample.sqlite  (or MOONROW_CONNECT to a scratch database)
 ///     MOONROW_FEED_URL=http://127.0.0.1:8000/appcast.xml MOONROW_STORE=… open build/copy/Moonrow.app
 ///     MOONROW_UPDATE=install MOONROW_FEED_URL=… MOONROW_STORE=… MOONROW_SNAPSHOTS=… open build/copy/Moonrow.app
+///     MOONROW_UPDATE=check MOONROW_FEED_URL=… MOONROW_STORE=… open build/Moonrow.app
 ///
 /// The bench opens the table in the first workspace with every row in one page, scrolls it like
 /// a fast trackpad, jumps to far-apart rows, prints timings and quits. The demo drives the grid's
@@ -134,10 +135,11 @@ enum DevHarness {
             return
         }
         // `MOONROW_UPDATE=install` installs the update `MOONROW_FEED_URL` offers; Sparkle relaunches the app.
-        if env["MOONROW_UPDATE"] == "install" {
+        // `MOONROW_UPDATE=check` only shows the update, release notes and all, and leaves it up.
+        if let mode = env["MOONROW_UPDATE"], ["install", "check"].contains(mode) {
             Task {
                 do {
-                    try await updateDemo(app, snapshots: snapshots)
+                    try await updateDemo(app, install: mode == "install", snapshots: snapshots)
                 } catch {
                     print("update demo failed: \(error)")
                     NSApp.terminate(nil)

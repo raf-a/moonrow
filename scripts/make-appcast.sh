@@ -1,16 +1,21 @@
 #!/bin/sh
 # Signs build/release/Moonrow-<version>.zip (from scripts/package-release.sh) for Sparkle and
-# writes build/release/appcast.xml, a feed with that one update.
-# Usage: scripts/make-appcast.sh <version> <build number> <zip URL> <release notes URL>
+# writes build/release/appcast.xml, a feed with that one update and its release notes, the HTML
+# page scripts/render-release-notes.swift writes, which Sparkle's update window shows.
+# Usage: scripts/make-appcast.sh <version> <build number> <zip URL> <release notes HTML>
 #
 # The EdDSA private key (as `generate_keys -x` exports it) comes from SPARKLE_PRIVATE_KEY, or
 # from the file SPARKLE_PRIVATE_KEY_FILE names. The signature is checked against the public key
 # in build/Moonrow.app's Info.plist, so a key that doesn't match the app's fails here.
 set -eu
-version="${1:?usage: scripts/make-appcast.sh <version> <build number> <zip URL> <release notes URL>}"
+version="${1:?usage: scripts/make-appcast.sh <version> <build number> <zip URL> <release notes HTML>}"
 build_number="${2:?missing build number}"
 zip_url="${3:?missing zip URL}"
-notes_url="${4:?missing release notes URL}"
+notes_html="${4:?missing release notes HTML}"
+[ -f "$notes_html" ] || { echo "error: no $notes_html" >&2; exit 1; }
+# Read before the cd, so a relative path is the caller's. A "]]>" in the page would end the CDATA
+# section, so it's split across two.
+notes="$(sed 's/]]>/]]]]><![CDATA[>/g' "$notes_html")"
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 
@@ -57,7 +62,7 @@ cat > "$out/appcast.xml" <<XML
       <sparkle:version>$build_number</sparkle:version>
       <sparkle:shortVersionString>$version</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-      <sparkle:releaseNotesLink>$notes_url</sparkle:releaseNotesLink>
+      <description><![CDATA[$notes]]></description>
       <enclosure url="$zip_url" length="$length" type="application/octet-stream" sparkle:edSignature="$signature"/>
     </item>
   </channel>
