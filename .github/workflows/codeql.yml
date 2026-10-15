@@ -1,13 +1,15 @@
 name: CodeQL
 
 # Scans the workflows themselves, without a build: fast enough for every pull request.
-# The Swift code has its own scan, codeql-swift.yml, which runs on main.
+# The Swift code has its own scan, codeql-swift.yml, which runs on main. A release runs both.
 on:
   push:
     branches: [main]
   pull_request:
   schedule:
     - cron: '23 4 * * 1'
+  workflow_dispatch:
+  workflow_call:
 
 concurrency:
   group: codeql-${{ github.ref }}

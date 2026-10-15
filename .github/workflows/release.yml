@@ -18,7 +18,7 @@ name: Release
 # a tag needs too.
 #
 # The secrets belong to the `release` environment, which only `v*` tags and `main` can use.
-# Before a tag is built, its code must have passed main's CodeQL Swift scan.
+# A tag must be on main, and CodeQL scans it while it builds; the draft waits for both.
 on:
   push:
     tags: ['v*']
@@ -28,36 +28,22 @@ permissions:
   contents: write
 
 jobs:
-  # A tag must be on main, its code covered by main's latest CodeQL Swift scan, and main free of
-  # serious alerts; otherwise nothing is built. See scripts/check-release-scan.sh.
-  scan:
-    name: Check code scanning
-    runs-on: ubuntu-latest
+  # A tag is scanned by CodeQL while it builds, and drafted only if both pass (publish, below).
+  scan-swift:
+    if: github.ref_type == 'tag'
+    uses: ./.github/workflows/codeql-swift.yml
     permissions:
       contents: read
-      security-events: read
-      actions: read
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-        with:
-          fetch-depth: 0
+      security-events: write
 
-      - name: Check
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if [ "$GITHUB_REF_TYPE" != tag ]; then
-            echo "A manual run isn't released, so it isn't checked."
-            exit 0
-          fi
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-            echo "::error::$GITHUB_REF_NAME isn't on main" >&2
-            exit 1
-          fi
-          scripts/check-release-scan.sh "$GITHUB_SHA"
+  scan-actions:
+    if: github.ref_type == 'tag'
+    uses: ./.github/workflows/codeql.yml
+    permissions:
+      contents: read
+      security-events: write
 
-  release:
-    needs: scan
+  build:
     runs-on: macos-26
     environment: release
     env:
@@ -70,6 +56,14 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           fetch-depth: 0
+
+      - name: On main
+        if: github.ref_type == 'tag'
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_REF_NAME isn't on main" >&2
+            exit 1
+          fi
 
       - name: Select Xcode
         env:
@@ -167,20 +161,41 @@ jobs:
             build/release/
             build/release-notes.html
 
-      # A draft: nothing reaches users until someone checks it and publishes it on GitHub.
+      - name: Remove the signing keychain
+        if: always() && env.MACOS_CERTIFICATE != ''
+        run: |
+          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true
+          rm -f "$RUNNER_TEMP/notary.p8"
+
+  # A draft: nothing reaches users until someone checks it and publishes it on GitHub. It's made
+  # only when the build and both scans passed, and the tag has no serious code scanning alerts.
+  publish:
+    if: github.ref_type == 'tag'
+    needs: [scan-swift, scan-actions, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      security-events: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: Check code scanning
+        run: scripts/check-release-scan.sh "$GITHUB_REF" "$GITHUB_SHA"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: Moonrow-${{ env.VERSION }}
+          path: build
+
       - name: Draft the release
-        if: github.ref_type == 'tag'
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           flags=""
           case "$VERSION" in *-*) flags="--prerelease" ;; esac
           gh release create "$GITHUB_REF_NAME" --draft --title "Moonrow $VERSION" --generate-notes $flags \
             build/release/Moonrow-"$VERSION".dmg build/release/Moonrow-"$VERSION".zip build/release/SHA256SUMS \
             build/release/appcast.xml
-
-      - name: Remove the signing keychain
-        if: always() && env.MACOS_CERTIFICATE != ''
-        run: |
-          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true
-          rm -f "$RUNNER_TEMP/notary.p8"
