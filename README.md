@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="Assets/AppIcon.iconset/icon_256x256@2x.png" width="128" height="128" alt="">
+  <img src="docs/images/icon.png" width="128" height="128" alt="">
 </p>
 
 <h1 align="center">Moonrow</h1>
