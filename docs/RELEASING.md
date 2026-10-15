@@ -2,7 +2,7 @@
 
 The `/release` skill walks through all of this: it checks `main`, writes the notes, tags, waits for the workflow and checks the draft it makes. By hand:
 
-1. Make sure `main` is green in CI.
+1. Make sure `main` is green in CI, and that `scripts/check-release-scan.sh` passes (see [Code scanning](#code-scanning)).
 2. Write the release notes in `docs/release-notes/1.2.0.md` (see [Release notes](#release-notes)) and commit them.
 3. Tag and push:
 
@@ -31,9 +31,15 @@ open build/release-notes.html
 
 To see them in Sparkle's own window, put that page in a test appcast (as in [Testing an update](#testing-an-update)) and launch with `--env MOONROW_UPDATE=check`, which leaves the update window up.
 
+## Code scanning
+
+CodeQL scans the workflows on every pull request (`codeql.yml`, under a minute) and the Swift code on main (`codeql-swift.yml`), after each push that changes `Sources/`, `Package.swift` or `Package.resolved`, every Monday, and on demand (Actions → CodeQL Swift → Run workflow). The Swift scan has to watch a full build, about 20 minutes, so pull requests don't wait for it.
+
+Releases check its results instead. `scripts/check-release-scan.sh [<commit>]` passes when main's latest Swift scan covered the same code as the commit (a commit that only adds release notes is covered by the scan before it) and main has no open CodeQL alert that's an error, or a security alert rated high or critical. The Release workflow runs it, after checking that the tag is on main, before it builds anything; if it fails, wait for the running scan or fix the alerts on main, then delete the tag and push it again.
+
 ## Signing and notarization
 
-Without these, the app is signed ad hoc, and macOS blocks it on first launch until the user approves it. To sign with a Developer ID and notarize, add these to the repository (Settings → Secrets and variables → Actions):
+Without these, the app is signed ad hoc, and macOS blocks it on first launch until the user approves it. To sign with a Developer ID and notarize, add these to the repository (Settings → Secrets and variables → Actions). The secrets go in the `release` environment (Settings → Environments → release), which only `v*` tags and `main` can use; the variables stay on the repository:
 
 | Name | Kind | Value |
 |---|---|---|
@@ -49,7 +55,7 @@ With only the certificate, releases are signed but not notarized.
 
 The app updates itself with [Sparkle](https://sparkle-project.org). It reads its feed from `https://github.com/raf-a/moonrow/releases/latest/download/appcast.xml`, which GitHub serves from the newest release that isn't a prerelease, so prereleases are never offered. Sparkle compares build numbers (`sparkle:version`, the workflow's run number) and shows the version (`sparkle:shortVersionString`, e.g. `1.2.0`).
 
-Each update is signed with an EdDSA key. The public half is `SUPublicEDKey` in the app's `Info.plist` (set in `scripts/build-app.sh`); the private half is the repository secret:
+Each update is signed with an EdDSA key. The public half is `SUPublicEDKey` in the app's `Info.plist` (set in `scripts/build-app.sh`); the private half is a secret in the `release` environment:
 
 | Name | Kind | Value |
 |---|---|---|

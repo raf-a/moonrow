@@ -1,6 +1,6 @@
 ---
 name: release
-description: Prepare a Moonrow release end to end, up to a checked GitHub draft that the user publishes. Checks main and CI, writes and previews the release notes, commits them, tags, waits for the Release workflow, then checks the draft's files and shows the update window people will get. Use when the user wants to release, ship or cut a version.
+description: Prepare a Moonrow release end to end, up to a checked GitHub draft that the user publishes. Checks main, CI and code scanning, writes and previews the release notes, commits them, tags, waits for the Release workflow, then checks the draft's files and shows the update window people will get. Use when the user wants to release, ship or cut a version.
 argument-hint: "[major | minor | patch | <version>]"
 ---
 
@@ -18,6 +18,7 @@ Check each of these, and report them together:
 
 - **The working tree:** the branch is `main`, and it's clean apart from release notes. After `git fetch origin`, it is neither behind nor ahead of `origin/main`, except for an unpushed notes commit.
 - **CI:** CI passed on the commit being released, or on the last code commit before a notes-only commit: `gh run list --workflow ci.yml --branch main --limit 5 --json headSha,conclusion,status`. If it failed or is still running, stop and say so. A failed run gets `gh run view <id> --log-failed`, summed up in a line or two.
+- **Code scanning:** `scripts/check-release-scan.sh` passes on `HEAD`. It checks that main's latest CodeQL Swift scan covered this code and that main has no open errors or high or critical security alerts. The Release workflow runs the same check before it builds, so a tag that fails it builds nothing. If a scan is still running, say so, wait for it with `gh run watch <id> --exit-status` as a background command, and check again. If alerts block the release, list them and stop.
 - **The version** comes from the skill's argument, counted from the last release tag (`git describe --tags --abbrev=0 --match 'v[0-9]*'`, without the `v`):
   - `major`, `minor` or `patch` bumps that part and resets the ones after it. From `0.1.0`, that's `1.0.0`, `0.2.0` or `0.1.1`. If the last tag is a prerelease (`1.2.0-rc.1`), bump from its release version (`1.2.0`).
   - An explicit version such as `1.2.0` or `1.2.0-rc.1` is used as given. It must be later than the last tag.
@@ -25,7 +26,7 @@ Check each of these, and report them together:
   - Anything else: ask which one was meant.
 
   Say which version this works out to, starting from which tag, and get a yes before going on. `v<version>` must be on neither the local repository nor the remote (`git ls-remote --tags origin v<version>`), and there must be no release of it (`gh release view v<version>` fails).
-- **Secrets:** `gh secret list` includes `SPARKLE_PRIVATE_KEY`, `MACOS_CERTIFICATE`, `MACOS_CERTIFICATE_PASSWORD` and `NOTARY_KEY`, and `gh variable list` includes `NOTARY_KEY_ID` and `NOTARY_ISSUER_ID`. Without the Sparkle key the release fails. Without the others it's unsigned or not notarized, so ask before going on.
+- **Secrets:** `gh secret list --env release`, or the repository's own `gh secret list` while they're still there, includes `SPARKLE_PRIVATE_KEY`, `MACOS_CERTIFICATE`, `MACOS_CERTIFICATE_PASSWORD` and `NOTARY_KEY`, and `gh variable list` includes `NOTARY_KEY_ID` and `NOTARY_ISSUER_ID`. Without the Sparkle key the release fails. Without the others it's unsigned or not notarized, so ask before going on.
 - **Other drafts:** `gh release list` shows any older draft. Mention it, but leave it alone.
 
 ## 2. Write the notes
@@ -46,7 +47,7 @@ If the notes were already committed and pushed, skip the first two steps and say
 
 - Find the run: `gh run list --workflow release.yml --limit 5 --json databaseId,headBranch,event,status,url`. It's the one whose `headBranch` is `v<version>`.
 - Wait with `gh run watch <id> --exit-status` as a background command (a release takes 15–30 minutes with notarization), and don't poll in between. Tell the user the run's URL while it builds.
-- If it fails, read `gh run view <id> --log-failed` and say which step failed and why. Common causes are a missing notes file, a test failure, a signing or notarization error, or an EdDSA key that doesn't match the app's.
+- If it fails, read `gh run view <id> --log-failed` and say which step failed and why. Common causes are the code scanning check (the scan hadn't caught up, or an alert appeared), a missing notes file, a test failure, a signing or notarization error, or an EdDSA key that doesn't match the app's.
 - Don't retry by deleting and re-pushing the tag without asking (see Recovery below).
 
 ## 5. Check the draft
