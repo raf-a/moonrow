@@ -16,6 +16,8 @@ name: Release
 # zip for appcast.xml, the feed the app reads from the latest release. Tags need it; a manual run
 # without it skips the appcast. The feed carries the release notes from docs/release-notes, which
 # a tag needs too.
+#
+# The secrets belong to the `release` environment, which only `v*` tags and `main` can use.
 on:
   push:
     tags: ['v*']
@@ -27,6 +29,7 @@ permissions:
 jobs:
   release:
     runs-on: macos-26
+    environment: release
     env:
       MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
       MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
