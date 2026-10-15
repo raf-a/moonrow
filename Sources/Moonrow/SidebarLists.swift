@@ -49,7 +49,10 @@ final class SidebarCell: NSTableCellView {
     init(identifier: NSUserInterfaceItemIdentifier) {
         super.init(frame: .zero)
         self.identifier = identifier
-        label.lineBreakMode = .byTruncatingTail
+        // One line, cut in the middle so names sharing a prefix still differ at the end.
+        label.lineBreakMode = .byTruncatingMiddle
+        label.usesSingleLineMode = true
+        label.maximumNumberOfLines = 1
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         detail.textColor = .secondaryLabelColor
         detail.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
@@ -82,7 +85,11 @@ final class SidebarCell: NSTableCellView {
     /// Mac differentiates without colour, adds its letter.
     func show(_ name: String, symbol: String, tint: NSColor, accessibilityDescription: String? = nil,
               font: NSFont = .systemFont(ofSize: NSFont.systemFontSize), state: StagedState? = nil, detail text: String? = nil) {
-        var attributes: [NSAttributedString.Key: Any] = [.font: font]
+        // The string's paragraph style wins over the field's line break mode, and without one
+        // the name wraps.
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byTruncatingMiddle
+        var attributes: [NSAttributedString.Key: Any] = [.font: font, .paragraphStyle: paragraph]
         if let state { attributes[.foregroundColor] = state.color }
         if state == .dropped { attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue }
         // The field's own colour too: with the label colour it draws vibrant in the sidebar,
