@@ -1,9 +1,8 @@
 name: CodeQL Swift
 
-# Scans the Swift code on main. CodeQL has to watch a full build, which takes about 20 minutes,
-# so pull requests don't wait for it; a release checks this scan's results instead
-# (scripts/check-release-scan.sh). The paths are the ones that script compares: change them
-# together. The weekly run picks up new queries.
+# Scans the Swift code on main, and on each release tag (release.yml calls it). CodeQL has to
+# watch a full build, which takes about 20 minutes, so pull requests don't wait for it. The
+# weekly run picks up new queries.
 on:
   push:
     branches: [main]
@@ -15,6 +14,7 @@ on:
   schedule:
     - cron: '23 4 * * 1'
   workflow_dispatch:
+  workflow_call:
 
 concurrency:
   group: codeql-swift-${{ github.ref }}

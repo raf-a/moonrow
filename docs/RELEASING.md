@@ -2,7 +2,7 @@
 
 The `/release` skill walks through all of this: it checks `main`, writes the notes, tags, waits for the workflow and checks the draft it makes. By hand:
 
-1. Make sure `main` is green in CI, and that `scripts/check-release-scan.sh` passes (see [Code scanning](#code-scanning)).
+1. Make sure `main` is green in CI, and that `scripts/check-release-scan.sh` shows no alerts (see [Code scanning](#code-scanning)).
 2. Write the release notes in `docs/release-notes/1.2.0.md` (see [Release notes](#release-notes)) and commit them.
 3. Tag and push:
 
@@ -11,7 +11,7 @@ The `/release` skill walks through all of this: it checks `main`, writes the not
    git push origin v1.2.0
    ```
 
-   The `Release` workflow tests, builds a universal (arm64 + x86_64) `Moonrow.app` with version `1.2.0` and build number set to the run number, and drafts a GitHub release with `Moonrow-1.2.0.dmg`, `Moonrow-1.2.0.zip`, `SHA256SUMS` and `appcast.xml`. A tag with a hyphen, like `v1.2.0-rc.1`, drafts a prerelease.
+   The `Release` workflow scans the tag with CodeQL (see [Code scanning](#code-scanning)), tests, builds a universal (arm64 + x86_64) `Moonrow.app` with version `1.2.0` and build number set to the run number, and drafts a GitHub release with `Moonrow-1.2.0.dmg`, `Moonrow-1.2.0.zip`, `SHA256SUMS` and `appcast.xml`. A tag with a hyphen, like `v1.2.0-rc.1`, drafts a prerelease.
 4. Check the draft with `scripts/check-release.sh 1.2.0`. It downloads the draft's files and checks the checksums, the appcast against the zip, the EdDSA signature, the version and build number, the architectures, the Developer ID signature and notarization, and the DMG. Then publish the draft on GitHub (Releases → the draft → Edit → Publish release). Until then nobody can download it, and the update feed still offers the previous release. The release notes and the appcast are dated the day the workflow ran, so publish soon after.
 
 Running the workflow by hand (Actions → Release → Run workflow) builds and packages without a release; the files are attached to the run as an artifact, with the newest release notes rendered as `release-notes.html`.
@@ -35,7 +35,9 @@ To see them in Sparkle's own window, put that page in a test appcast (as in [Tes
 
 CodeQL scans the workflows on every pull request (`codeql.yml`, under a minute) and the Swift code on main (`codeql-swift.yml`), after each push that changes `Sources/`, `Package.swift` or `Package.resolved`, every Monday, and on demand (Actions → CodeQL Swift → Run workflow). The Swift scan has to watch a full build, about 20 minutes, so pull requests don't wait for it.
 
-Releases check its results instead. `scripts/check-release-scan.sh [<commit>]` passes when main's latest Swift scan covered the same code as the commit (a commit that only adds release notes is covered by the scan before it) and main has no open CodeQL alert that's an error, or a security alert rated high or critical. The Release workflow runs it, after checking that the tag is on main, before it builds anything; if it fails, wait for the running scan or fix the alerts on main, then delete the tag and push it again.
+A release scans its own tag: the Release workflow runs both scans alongside the build, and its `publish` job drafts the release only when all three passed and `scripts/check-release-scan.sh <tag ref> <commit>` finds both scans of that commit and no open CodeQL alert that's an error, or a security alert rated high or critical. A release takes about 20 minutes, the length of the Swift scan. If an alert blocks it, fix it on main (or dismiss it on GitHub if it's a false positive), then delete the tag and tag again; nothing was drafted.
+
+`scripts/check-release-scan.sh` on its own checks main's latest scans and alerts, a quick look before tagging.
 
 ## Signing and notarization
 
