@@ -16,19 +16,21 @@ jobs:
   test:
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
       # The newest Xcode on the image, unless the XCODE_APP repository variable names one
       # (e.g. /Applications/Xcode_27.0.app).
       - name: Select Xcode
+        env:
+          XCODE_APP: ${{ vars.XCODE_APP }}
         run: |
-          xcode="${{ vars.XCODE_APP }}"
+          xcode="$XCODE_APP"
           [ -n "$xcode" ] || xcode="$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
           sudo xcode-select -s "$xcode"
           xcodebuild -version
           swift --version
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: .build
           key: spm-${{ runner.os }}-${{ hashFiles('Package.resolved') }}-${{ hashFiles('Package.swift') }}

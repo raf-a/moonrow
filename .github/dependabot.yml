@@ -1,0 +1,19 @@
+version: 2
+updates:
+  # swift-nio, swift-nio-ssl and Sparkle, from Package.swift and Package.resolved.
+  - package-ecosystem: swift
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      swift:
+        patterns: ['*']
+
+  # The actions in .github/workflows, which are pinned to commit SHAs.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ['*']
