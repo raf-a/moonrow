@@ -8,6 +8,13 @@ public actor SQLiteConnection: DatabaseConnection {
     public nonisolated let dialect: any Dialect = SQLiteDialect()
     public nonisolated let path: String
 
+    /// SQLite calls block (a long step, a busy timeout), so the actor runs on a queue of its
+    /// own rather than holding one of Swift's few concurrency threads while they do. Otherwise
+    /// a handful of slow statements can take every thread, including the ones that would
+    /// cancel them.
+    private let queue = DispatchSerialQueue(label: "moonrow.sqlite")
+    public nonisolated var unownedExecutor: UnownedSerialExecutor { queue.asUnownedSerialExecutor() }
+
     private let db: Handle<OpaquePointer>
     private var cursors: [Int: Cursor] = [:]
     private var nextCursorID = 0
@@ -67,37 +74,43 @@ public actor SQLiteConnection: DatabaseConnection {
 
     // MARK: - Streaming
 
+    /// Steps the statement a batch at a time, each when the consumer asks for it, so a slow or
+    /// endless result never runs ahead of what's been read. Cancelling the consumer interrupts
+    /// a step in progress and ends the stream quietly; dropping it early frees the statement.
     public nonisolated func stream(
         _ statement: SQLStatement, batchSize: Int
     ) -> AsyncThrowingStream<ResultBatch, any Error> {
-        AsyncThrowingStream { continuation in
-            let cancel = CancelFlag()
-            let task = Task {
-                let id: Int
-                do {
-                    id = try await self.open(statement, cancel: cancel)
-                } catch {
-                    continuation.finish(throwing: error)
-                    return
+        let stream = StreamState(self, statement, batchSize: max(1, batchSize))
+        return AsyncThrowingStream {
+            do {
+                return try await withTaskCancellationHandler {
+                    try await self.next(stream)
+                } onCancel: {
+                    stream.cancel.set()
                 }
-                do {
-                    while true {
-                        try Task.checkCancellation()
-                        let (batch, done) = try await self.step(id, batchSize: max(1, batchSize))
-                        continuation.yield(batch)
-                        if done { break }
-                    }
-                    await self.finish(id)
-                    continuation.finish()
-                } catch {
-                    await self.finish(id)
-                    continuation.finish(throwing: error)
-                }
+            } catch is CancellationError {
+                return nil
             }
-            continuation.onTermination = { _ in
-                cancel.set()
-                task.cancel()
+        }
+    }
+
+    /// The streamed statement's next batch, preparing it on the first call; nil once it's done.
+    private func next(_ stream: StreamState) throws -> ResultBatch? {
+        guard !stream.ended else { return nil }
+        do {
+            if stream.cancel.isSet { throw CancellationError() }
+            let id = try stream.id ?? open(stream.statement, cancel: stream.cancel)
+            stream.id = id
+            let (batch, done) = try step(id, batchSize: stream.batchSize)
+            if done {
+                stream.ended = true
+                finish(id)
             }
+            return batch
+        } catch {
+            stream.ended = true
+            if let id = stream.id { finish(id) }
+            throw error
         }
     }
 
@@ -158,7 +171,7 @@ public actor SQLiteConnection: DatabaseConnection {
         return (ResultBatch(columns: cursor.columns, rows: rows), false)
     }
 
-    private func finish(_ id: Int) {
+    fileprivate func finish(_ id: Int) {
         guard let cursor = cursors.removeValue(forKey: id) else { return }
         sqlite3_finalize(cursor.stmt)
         if let log = statementLog, log.isObserved {
@@ -488,6 +501,30 @@ private struct Cursor {
 private final class Trace: Sendable {
     let write: @Sendable (String) -> Void
     init(_ write: @escaping @Sendable (String) -> Void) { self.write = write }
+}
+
+/// A streamed statement's cursor. Its fields change only on the connection's actor.
+private final class StreamState: @unchecked Sendable {
+    let connection: SQLiteConnection
+    let statement: SQLStatement
+    let batchSize: Int
+    let cancel = CancelFlag()
+    var id: Int?
+    var ended = false
+
+    init(_ connection: SQLiteConnection, _ statement: SQLStatement, batchSize: Int) {
+        self.connection = connection
+        self.statement = statement
+        self.batchSize = batchSize
+    }
+
+    /// A consumer that stopped reading early stopped the statement.
+    deinit {
+        guard !ended, let id else { return }
+        cancel.set()
+        let connection = connection
+        Task { await connection.finish(id) }
+    }
 }
 
 private final class CancelFlag: @unchecked Sendable {

@@ -120,6 +120,24 @@ private func makeDB() async throws -> SQLiteConnection {
         #expect(try await db.execute("SELECT 42").rows == [[.integer(42)]])
     }
 
+    @Test func streamingStepsOnlyWhatTheConsumerReads() async throws {
+        let db = try SQLiteConnection(path: ":memory:")
+        let (entries, sink) = AsyncStream.makeStream(of: StatementLogEntry.self)
+        db.statementLog?.observe { sink.yield($0) }
+        let endless = "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n) SELECT i FROM n"
+        var seen = 0
+        for try await batch in db.stream(SQLStatement(endless), batchSize: 100) {
+            seen += batch.rows.count
+            // A slow consumer; the connection waits for it rather than buffering more rows.
+            try await Task.sleep(for: .milliseconds(20))
+            if seen >= 300 { break }
+        }
+        var log = entries.makeAsyncIterator()
+        let entry = await log.next()
+        #expect(entry?.rows == 300)
+        #expect(entry?.error == "Cancelled")
+    }
+
     @Test func cancellingTheTaskInterruptsALongStep() async throws {
         let db = try SQLiteConnection(path: ":memory:")
         // One step that never returns a row: counts an endless series.
