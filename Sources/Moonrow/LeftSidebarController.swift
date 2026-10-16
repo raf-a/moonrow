@@ -1,5 +1,6 @@
 import AppCore
 import AppKit
+import SQLScript
 
 /// The workspace sidebar: Items (tables and views), Queries (saved), History and Search (in
 /// database).
@@ -20,10 +21,10 @@ final class LeftSidebarController: NSViewController {
     private let container = NSView()
     private(set) var pane = Pane.items
 
-    init(items: SidebarViewController, savedQueries: SavedQueries, history: QueryHistory) {
+    init(items: SidebarViewController, savedQueries: SavedQueries, history: QueryHistory, dialect: LexerDialect) {
         self.items = items
         self.queries = SavedQueriesViewController(store: savedQueries)
-        self.history = HistoryViewController(history: history)
+        self.history = HistoryViewController(history: history, dialect: dialect)
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -743,14 +744,21 @@ final class SavedQueriesViewController: SidebarListController, NSOutlineViewData
 @MainActor
 final class HistoryViewController: SidebarListController {
     let history: QueryHistory
+    /// For colouring the SQL as the query editor does.
+    let dialect: LexerDialect
     var onInsert: ((String) -> Void)?
     var onOpenInNewTab: ((String) -> Void)?
     /// Date headings, each followed by its entries.
     private enum Row { case heading(String), entry(QueryHistory.Entry) }
     private var rows: [Row] = []
+    /// Measures entries' SQL for their rows' heights.
+    private lazy var measure = HistoryCell.makeSQLLabel()
+    /// The width rows were last measured at.
+    private var measuredWidth: CGFloat = 0
 
-    init(history: QueryHistory) {
+    init(history: QueryHistory, dialect: LexerDialect) {
         self.history = history
+        self.dialect = dialect
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -760,7 +768,6 @@ final class HistoryViewController: SidebarListController {
     override func loadView() {
         super.loadView()
         search.placeholderString = "Search history"
-        table.rowHeight = 58
         table.style = .plain
         table.usesAlternatingRowBackgroundColors = false
         // A plain table paints its own background; the sidebar's shows through the other panes.
@@ -774,10 +781,28 @@ final class HistoryViewController: SidebarListController {
         menu.addItem(withTitle: "Clear History…", action: #selector(clear(_:)), keyEquivalent: "").target = self
         table.menu = menu
         NotificationCenter.default.addObserver(self, selector: #selector(historyChanged), name: QueryHistory.didChange, object: history)
+        NotificationCenter.default.addObserver(self, selector: #selector(historyChanged), name: AppStyle.didChange, object: nil)
         reloadList()
     }
 
     @objc private func historyChanged() { reloadList() }
+
+    /// Entries wrap, so a new width means new heights.
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        let width = sqlWidth
+        guard width != measuredWidth, !rows.isEmpty else { return }
+        measuredWidth = width
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            table.noteHeightOfRows(withIndexesChanged: IndexSet(integersIn: 0..<rows.count))
+        }
+    }
+
+    /// The SQL's width in a row: the row's less the cell's margins.
+    private var sqlWidth: CGFloat {
+        max(0, (table.tableColumns.isEmpty ? table.bounds.width : table.rect(ofColumn: 0).width) - 2 * HistoryCell.margin)
+    }
 
     override func reloadList() {
         let found = history.search(search.stringValue)
@@ -811,7 +836,7 @@ final class HistoryViewController: SidebarListController {
         case .entry(let e):
             let id = NSUserInterfaceItemIdentifier("History")
             let cell = tableView.makeView(withIdentifier: id, owner: nil) as? HistoryCell ?? HistoryCell(self)
-            cell.show(e)
+            cell.show(e, dialect: dialect)
             return cell
         }
     }
@@ -822,8 +847,11 @@ final class HistoryViewController: SidebarListController {
     }
 
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-        if case .heading = rows[row] { return 22 }
-        return 58
+        guard case .entry(let e) = rows[row] else { return 22 }
+        measuredWidth = sqlWidth
+        measure.attributedStringValue = HistoryCell.styled(e.sql, dialect: dialect)
+        measure.preferredMaxLayoutWidth = measuredWidth
+        return HistoryCell.height(sql: ceil(measure.intrinsicContentSize.height))
     }
 
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool { entry(row) != nil }
@@ -881,13 +909,65 @@ final class HistoryViewController: SidebarListController {
     }
 
     private final class HistoryCell: NSTableCellView {
+        static let margin: CGFloat = 8
+        static let maxLines = 6
+        private static let topMargin: CGFloat = 5
+        private static let bottomMargin: CGFloat = 6
+        private static let font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        private static let whenFont = NSFont.systemFont(ofSize: 10)
         private let when: NSTextField
-        private let sql: NSTextField
+        private let sql = makeSQLLabel()
         private let status = NSImageView()
 
+        /// Up to `maxLines` lines, the last cut with an ellipsis.
+        static func makeSQLLabel() -> NSTextField {
+            let label = NSTextField(labelWithString: "")
+            label.font = font
+            label.lineBreakMode = .byWordWrapping
+            label.maximumNumberOfLines = maxLines
+            label.cell?.truncatesLastVisibleLine = true
+            label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            return label
+        }
+
+        /// The time's height, as a label lays it out.
+        private static let whenHeight: CGFloat = {
+            let label = NSTextField(labelWithString: "0")
+            label.font = whenFont
+            return ceil(label.intrinsicContentSize.height)
+        }()
+
+        /// A row's height for SQL this tall: the time above it, and margins.
+        static func height(sql: CGFloat) -> CGFloat {
+            topMargin + whenHeight + 2 + sql + bottomMargin
+        }
+
+        /// The statement's own lines, without blank ones, trailing spaces or the indent they all
+        /// share, coloured as the editor colours SQL, with no spacing between lines.
+        static func styled(_ text: String, dialect: LexerDialect) -> NSAttributedString {
+            var lines = text.split(whereSeparator: \.isNewline).map { line in
+                String(line.replacingOccurrences(of: "\t", with: "    ").reversed().drop(while: \.isWhitespace).reversed())
+            }.filter { !$0.isEmpty }
+            let indent = lines.map { $0.prefix(while: { $0 == " " }).count }.min() ?? 0
+            lines = lines.map { String($0.dropFirst(indent)) }
+            let shown = lines.joined(separator: "\n")
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.lineHeightMultiple = 1
+            paragraph.lineSpacing = 0
+            paragraph.paragraphSpacing = 0
+            paragraph.lineBreakMode = .byWordWrapping
+            let out = NSMutableAttributedString(string: shown, attributes: [
+                .font: font, .foregroundColor: AppStyle.colors.text, .paragraphStyle: paragraph,
+            ])
+            for run in SQLHighlighter.runs(shown, dialect: dialect) where run.style != .plain {
+                out.addAttribute(.foregroundColor, value: run.style.color,
+                                 range: NSRange(location: run.range.lowerBound, length: run.range.count))
+            }
+            return out
+        }
+
         init(_ owner: SidebarListController) {
-            when = owner.makeLabel(.systemFont(ofSize: 10), color: .secondaryLabelColor)
-            sql = owner.makeLabel(.monospacedSystemFont(ofSize: 11, weight: .regular), lines: 2)
+            when = owner.makeLabel(Self.whenFont, color: .secondaryLabelColor)
             super.init(frame: .zero)
             identifier = NSUserInterfaceItemIdentifier("History")
             status.symbolConfiguration = .init(pointSize: 9, weight: .regular)
@@ -896,21 +976,25 @@ final class HistoryViewController: SidebarListController {
                 addSubview(v)
             }
             NSLayoutConstraint.activate([
-                status.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+                status.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.margin),
                 status.centerYAnchor.constraint(equalTo: when.centerYAnchor),
                 when.leadingAnchor.constraint(equalTo: status.trailingAnchor, constant: 4),
                 when.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -8),
-                when.topAnchor.constraint(equalTo: topAnchor, constant: 5),
-                sql.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
-                sql.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+                when.topAnchor.constraint(equalTo: topAnchor, constant: Self.topMargin),
+                sql.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.margin),
+                sql.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.margin),
                 sql.topAnchor.constraint(equalTo: when.bottomAnchor, constant: 2),
             ])
+            // The row is measured to fit. Not required: a new cell starts out with no height.
+            let bottom = sql.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Self.bottomMargin)
+            bottom.priority = .init(999)
+            bottom.isActive = true
         }
 
         @available(*, unavailable)
         required init?(coder: NSCoder) { fatalError() }
 
-        func show(_ entry: QueryHistory.Entry) {
+        func show(_ entry: QueryHistory.Entry, dialect: LexerDialect) {
             // Under Today and Yesterday the heading has the day already.
             let calendar = Calendar.current
             let recent = calendar.isDateInToday(entry.date) || calendar.isDateInYesterday(entry.date)
@@ -921,8 +1005,8 @@ final class HistoryViewController: SidebarListController {
             when.stringValue = meta
             status.image = NSImage(systemSymbolName: entry.ok ? "checkmark.circle" : "xmark.circle", accessibilityDescription: entry.ok ? "Succeeded" : "Failed")
             status.contentTintColor = entry.ok ? .systemGreen : .systemRed
-            // Collapse whitespace so two lines show as much of the statement as possible.
-            sql.stringValue = entry.sql.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+            // Its own line breaks kept: a line comment then ends where it does in the editor.
+            sql.attributedStringValue = Self.styled(entry.sql, dialect: dialect)
             toolTip = entry.sql
         }
     }
