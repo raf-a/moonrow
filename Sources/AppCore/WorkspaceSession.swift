@@ -100,22 +100,27 @@ public struct WorkspaceSession: Codable, Sendable, Hashable {
     }
 
     public var connectionID: UUID
+    /// Postgres: the database the workspace had switched to with ⌘K, when it isn't the saved
+    /// connection's; the workspace reconnects there.
+    public var database: String?
     public var schema: String?
     public var panes: [Pane]
     public var activePane: Int
 
-    public init(connectionID: UUID, schema: String? = nil, panes: [Pane] = [Pane()], activePane: Int = 0) {
+    public init(connectionID: UUID, database: String? = nil, schema: String? = nil, panes: [Pane] = [Pane()], activePane: Int = 0) {
         self.connectionID = connectionID
+        self.database = database
         self.schema = schema
         self.panes = panes
         self.activePane = activePane
     }
 
-    private enum CodingKeys: String, CodingKey { case connectionID, schema, panes, activePane }
+    private enum CodingKeys: String, CodingKey { case connectionID, database, schema, panes, activePane }
 
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         connectionID = try c.decode(UUID.self, forKey: .connectionID)
+        database = try? c.decodeIfPresent(String.self, forKey: .database)
         schema = try c.decodeIfPresent(String.self, forKey: .schema)
         panes = (try c.decodeIfPresent([Lossy<Pane>].self, forKey: .panes) ?? []).compactMap(\.value)
         if panes.isEmpty { panes = [Pane()] }

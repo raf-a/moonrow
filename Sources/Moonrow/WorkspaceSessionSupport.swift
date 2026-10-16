@@ -19,7 +19,8 @@ extension WorkspaceWindowController {
             }
             return WorkspaceSession.Pane(tabs: tabs, selected: selected ?? (tabs.isEmpty ? nil : 0))
         }
-        return WorkspaceSession(connectionID: config.id, schema: sidebar.schema, panes: saved, activePane: panes.activeIndex)
+        return WorkspaceSession(connectionID: config.id, database: switchedDatabase, schema: sidebar.schema, panes: saved,
+                                activePane: panes.activeIndex)
     }
 
     private func sessionTab(_ tab: any WorkspaceTab) -> WorkspaceSession.Tab? {

@@ -65,6 +65,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     var revealAfterReload: TableRef?
     /// A schema to switch to once the schemas have loaded (restoring a session).
     var schemaToRestore: String?
+    /// A MySQL connection without a database listed nothing; the workspace opens ⌘K over it.
+    var onNoDatabase: (() -> Void)?
 
     private let connection: any DatabaseConnection
     private let outline = SidebarOutline()
@@ -79,6 +81,8 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
     /// The schema (Postgres) or database (MySQL) whose items are listed; nil for SQLite, or a
     /// MySQL connection without a default database.
     private(set) var schema: String?
+    /// The schemas (Postgres) or databases (MySQL) the workspace can list.
+    private(set) var schemaList: [String] = []
     private var schemasLoaded = false
     private var objects: [DatabaseObject] = []
     private var groups: [Group] = []
@@ -354,20 +358,41 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
 
     static func opens(_ object: DatabaseObject) -> Bool { object.kind.isRelation || object.kind.isRoutine }
 
-    /// The schemas (Postgres) or databases (MySQL) the switcher offers; empty for SQLite.
-    var schemaNames: [String] { schemaPopup.isHidden ? [] : schemaPopup.itemTitles }
+    /// The schemas (Postgres) or databases (MySQL) the workspace lists; empty for SQLite.
+    var schemaNames: [String] { schemaList }
 
-    /// Lists another schema, as if picked from the switcher. False if there is no such schema.
+    var showsSchemaSwitcher: Bool { !schemaPopup.isHidden }
+
+    /// Only Postgres has the switcher at the bottom: MySQL's databases are ⌘K's, and SQLite has
+    /// one namespace.
+    private var hasSchemaSwitcher: Bool { connection.dialect.lexer == .postgres }
+
+    /// Lists another schema (or MySQL database), as if picked from the switcher. False if there
+    /// is no such schema.
     @discardableResult
     func switchSchema(to name: String) -> Bool {
-        guard schemaPopup.item(withTitle: name) != nil else { return false }
-        schemaPopup.selectItem(withTitle: name)
-        schemaChosen(nil)
+        guard schemaList.contains(name) else { return false }
+        if schemaPopup.item(withTitle: name) != nil { schemaPopup.selectItem(withTitle: name) }
+        choose(name)
         return true
     }
 
+    /// Lists the schemas again, then the current one's items: after the connection moved to
+    /// another database, or a database was created or dropped.
+    func reloadSchemas() {
+        schemasLoaded = false
+        reload()
+    }
+
     @objc private func schemaChosen(_ sender: Any?) {
-        guard let chosen = schemaPopup.titleOfSelectedItem, chosen != schema else { return }
+        guard let chosen = schemaPopup.titleOfSelectedItem else { return }
+        choose(chosen)
+    }
+
+    private func choose(_ chosen: String) {
+        guard chosen != schema else { return }
+        // A listing still on its way would put back the schema it read before the switch.
+        loadTask?.cancel()
         schema = chosen
         Task {
             // Unqualified names in query tabs follow the switch too.
@@ -601,17 +626,20 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
             do {
                 if !schemasLoaded {
                     try await loadSchemas()
+                    // A newer listing replaced this one; it takes the schema to restore.
+                    guard !Task.isCancelled else { return }
                     if let wanted = schemaToRestore {
                         schemaToRestore = nil
                         if wanted != schema, switchSchema(to: wanted) { return }
                     }
                 }
-                // MySQL without a default database: nothing to list until one is chosen.
-                if schema == nil, !schemaPopup.isHidden {
+                // MySQL without a default database: nothing to list until one is chosen with ⌘K.
+                if schema == nil, !schemaList.isEmpty {
                     self.objects = []
                     rebuild()
-                    showMessage("Choose a database below.")
+                    showMessage("No database is open.")
                     onObjectsLoaded?([])
+                    onNoDatabase?()
                     return
                 }
                 let objects = try await connection.objects(schema: schema)
@@ -642,11 +670,11 @@ final class SidebarViewController: NSViewController, NSOutlineViewDataSource, NS
         guard !Task.isCancelled else { return }
         schemasLoaded = true
         schema = current
-        schemaPopup.isHidden = schemas.isEmpty
-        schemaPopup.removeAllItems()
-        schemaPopup.addItems(withTitles: schemas)
         // The current schema can be one the list leaves out (a system one).
-        if let current, !schemas.contains(current) { schemaPopup.addItem(withTitle: current) }
+        schemaList = schemas + (current.map { schemas.contains($0) ? [] : [$0] } ?? [])
+        schemaPopup.isHidden = schemaList.isEmpty || !hasSchemaSwitcher
+        schemaPopup.removeAllItems()
+        schemaPopup.addItems(withTitles: schemaList)
         if let current { schemaPopup.selectItem(withTitle: current) } else { schemaPopup.select(nil) }
     }
 

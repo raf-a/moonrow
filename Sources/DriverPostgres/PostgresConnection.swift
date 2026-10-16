@@ -6,17 +6,37 @@ import WireSupport
 /// which is opened again if the server drops it between statements.
 public final class PostgresConnection: DatabaseConnection, @unchecked Sendable {
     public let dialect: any Dialect = PostgresDialect()
+    /// As connected; `database` says which database the sessions use now.
     public let configuration: PostgresConfiguration
     /// `server_version` as reported at login, e.g. `18.0 (Debian 18.0-1.pgdg13+3)`.
     public let serverVersion: String
     public let statementLog: StatementLog?
     private let host: SessionHost<PGSession>
+    private let state = NSLock()
+    // Guarded by `state`.
+    private var currentDatabase: String?
 
     private init(configuration: PostgresConfiguration, first: PGSession, log: StatementLog) {
         self.configuration = configuration
         self.serverVersion = first.parameters["server_version"] ?? ""
         self.statementLog = log
+        self.currentDatabase = configuration.database
         self.host = SessionHost(first: first) { try await PGSession.open(configuration, log: log) }
+    }
+
+    /// The database the sessions connect to now: the configuration's until `switchDatabase`.
+    /// Nil is the server's default (the user's name).
+    public var database: String? { state.withLock { currentDatabase } }
+
+    /// Moves the connection to another database on the same server: a session is opened there
+    /// (bootstrap commands included) and replaces the current one, and later reconnects go there
+    /// too. A failure leaves the connection where it was.
+    public func switchDatabase(to name: String) async throws {
+        var c = configuration
+        c.database = name
+        let log = statementLog
+        try await host.replace { [c] in try await PGSession.open(c, log: log) }
+        state.withLock { currentDatabase = name }
     }
 
     public static func connect(_ configuration: PostgresConfiguration) async throws -> PostgresConnection {

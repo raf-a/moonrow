@@ -930,11 +930,6 @@ public enum ServerInfo {
         }
         return (nil, false)
     }
-
-    /// The CREATE DATABASE a restore into a new database runs first.
-    public static func createDatabase(_ name: String, dialect: any Dialect) -> String {
-        "CREATE DATABASE \(dialect.quoteIdentifier(name))"
-    }
 }
 
 /// Opens what a tool needs to reach the server: nothing for a direct connection, else the
