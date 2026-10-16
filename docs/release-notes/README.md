@@ -51,6 +51,8 @@ The brand style, sentence by sentence.
 
 - **Titles are the feature's name, in sentence case:** "Query folders", "Unsaved query indicators", "Error locations". Don't use slogans, puns, questions, "Introducing…" or "New:".
 - **The first sentence says what changed, plainly,** usually with "now". For example: "Saved queries are now plain `.sql` files in a folder for each connection."
+- **Say what the change is worth to people,** tied to something they can see: “so you can spot a past query at a glance”. Leave layout details, such as which row a button sits on, out of the body.
+- **The body is about what people get now.** Bugs belong in Fixes; a fix everyone sees daily can also be written in the body as a gain.
 - **Then say what people can do with it,** in the second person and present tense: "Edit a query in another editor and the Queries pane shows the change."
 - **For a larger change, one sentence on the problem can come first,** before the change itself: "A long script used to stop at its first error without saying where."
 - **Give one concrete example** when the feature is abstract: "For example, …"
@@ -67,5 +69,6 @@ The brand style, sentence by sentence.
 - **Improvements start with** Added, Improved, Changed or Removed, or say what happens "now": "Search now matches the SQL as well as names". **Fixes start with** Fixed and describe what people saw go wrong, not the cause: "Fixed the last row of the parameters sheet being cut off".
 - **No full stop at the end.**
 - **Use these areas,** and add one only when nothing fits: Connections, Sidebar, Tables, Structure, Editor, Results, Queries, History, Safe mode, Import & Export, Backup, SSH, Postgres, MySQL, SQLite, Settings, Updates. Each tag gets its colour from its name.
+- **Weigh each improvement by who notices it and how often,** and drop what hardly anyone would: fewer, stronger items read better than a complete list. Fixes are different: list every bug the release resolves.
 - **Only list what people on the previous release can notice.** A fix to something new in this release isn't a fix; the feature's own text covers it. Leave out internal work.
 - **Sort the items by area,** then by importance.
