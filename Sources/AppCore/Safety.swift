@@ -74,21 +74,26 @@ public struct SafetyCredential: Sendable {
     public enum Kind: Sendable, Hashable { case password, connectionName }
 
     public let kind: Kind
-    private let digest: SHA256.Digest
+    /// A key made for this credential alone, so the code below is useless outside this process.
+    private let key = SymmetricKey(size: .bits256)
+    private let code: HMAC<SHA256>.MAC
 
     public init(password: String?, connectionName: String) {
+        let answer: String
         if let password, !password.isEmpty {
             kind = .password
-            digest = SHA256.hash(data: Data(password.utf8))
+            answer = password
         } else {
             kind = .connectionName
-            digest = SHA256.hash(data: Data(connectionName.utf8))
+            answer = connectionName
         }
+        code = HMAC<SHA256>.authenticationCode(for: Data(answer.utf8), using: key)
     }
 
-    /// Compares digests, so the time taken doesn't depend on how much of the answer was right.
+    /// Checks the code in constant time, so the time taken doesn't depend on how much of the
+    /// answer was right.
     public func matches(_ typed: String) -> Bool {
-        SHA256.hash(data: Data(typed.utf8)) == digest
+        HMAC<SHA256>.isValidAuthenticationCode(code, authenticating: Data(typed.utf8), using: key)
     }
 
     /// What the prompt asks for.
