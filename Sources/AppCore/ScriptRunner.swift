@@ -14,11 +14,25 @@ public enum ScriptRunner {
         /// Skip the remaining statements after one fails.
         public var stopOnError: Bool
         public var batchSize: Int
+        /// How long each statement may run; one still running then is stopped as cancelling
+        /// stops it, and fails. Nil for no limit.
+        public var timeout: Duration?
 
-        public init(rowLimit: Int? = nil, stopOnError: Bool = true, batchSize: Int = 500) {
+        public init(rowLimit: Int? = nil, stopOnError: Bool = true, batchSize: Int = 500, timeout: Duration? = nil) {
             self.rowLimit = rowLimit.flatMap { $0 > 0 ? $0 : nil }
             self.stopOnError = stopOnError
             self.batchSize = max(1, batchSize)
+            self.timeout = timeout.flatMap { $0 > .zero ? $0 : nil }
+        }
+    }
+
+    /// A statement ran past `Options.timeout`.
+    public struct Timeout: Error, Sendable, LocalizedError {
+        public var limit: Duration
+
+        public var errorDescription: String? {
+            let seconds = limit.components.seconds
+            return "Stopped after \(seconds) \(seconds == 1 ? "second" : "seconds"), the query timeout."
         }
     }
 
@@ -83,33 +97,13 @@ public enum ScriptRunner {
                     continuation.yield(.started(index: index))
                     let clock = ContinuousClock()
                     let start = clock.now
-                    var rowCount = 0
-                    var sentColumns = false
-                    var rowsAffected: Int?
-                    var truncated = false
                     do {
-                        let stream = connection.stream(SQLStatement(statement.text), batchSize: options.batchSize)
-                        for try await batch in stream {
-                            if !sentColumns, !batch.columns.isEmpty {
-                                sentColumns = true
-                                continuation.yield(.columns(index: index, batch.columns))
-                            }
-                            var rows = batch.rows
-                            if let limit = options.rowLimit, rowCount + rows.count > limit {
-                                rows = Array(rows.prefix(limit - rowCount))
-                                truncated = true
-                            }
-                            if !rows.isEmpty {
-                                rowCount += rows.count
-                                continuation.yield(.rows(index: index, rows))
-                            }
-                            rowsAffected = batch.rowsAffected ?? rowsAffected
-                            // Leaving the loop ends the stream, which stops the statement.
-                            if truncated { break }
+                        let outcome = try await limited(options.timeout) {
+                            try await consume(statement, index: index, on: connection, options: options, into: continuation)
                         }
                         if Task.isCancelled { break }
                         continuation.yield(.finished(index: index, Outcome(
-                            rowCount: rowCount, rowsAffected: rowsAffected, truncated: truncated,
+                            rowCount: outcome.rowCount, rowsAffected: outcome.rowsAffected, truncated: outcome.truncated,
                             duration: clock.now - start)))
                     } catch {
                         if Task.isCancelled || error is CancellationError { break }
@@ -127,6 +121,54 @@ public enum ScriptRunner {
                 continuation.finish()
             }
             continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    /// Streams one statement's rows into `continuation`, up to the row limit.
+    private static func consume(
+        _ statement: SQLStatementRange, index: Int, on connection: any DatabaseConnection, options: Options,
+        into continuation: AsyncStream<Event>.Continuation
+    ) async throws -> Outcome {
+        var rowCount = 0
+        var sentColumns = false
+        var rowsAffected: Int?
+        var truncated = false
+        let stream = connection.stream(SQLStatement(statement.text), batchSize: options.batchSize)
+        for try await batch in stream {
+            if !sentColumns, !batch.columns.isEmpty {
+                sentColumns = true
+                continuation.yield(.columns(index: index, batch.columns))
+            }
+            var rows = batch.rows
+            if let limit = options.rowLimit, rowCount + rows.count > limit {
+                rows = Array(rows.prefix(limit - rowCount))
+                truncated = true
+            }
+            if !rows.isEmpty {
+                rowCount += rows.count
+                continuation.yield(.rows(index: index, rows))
+            }
+            rowsAffected = batch.rowsAffected ?? rowsAffected
+            // Leaving the loop ends the stream, which stops the statement.
+            if truncated { break }
+        }
+        return Outcome(rowCount: rowCount, rowsAffected: rowsAffected, truncated: truncated, duration: .zero)
+    }
+
+    /// Runs `body`, cancelling it (which stops its statement) and throwing `Timeout` once
+    /// `limit` has passed.
+    static func limited<T: Sendable>(_ limit: Duration?, _ body: @escaping @Sendable () async throws -> T) async throws -> T {
+        guard let limit else { return try await body() }
+        return try await withThrowingTaskGroup(of: T?.self) { group in
+            group.addTask { try await body() }
+            group.addTask {
+                try await Task.sleep(for: limit)
+                return nil
+            }
+            defer { group.cancelAll() }
+            guard let first = try await group.next() else { throw CancellationError() }
+            guard let value = first else { throw Timeout(limit: limit) }
+            return value
         }
     }
 

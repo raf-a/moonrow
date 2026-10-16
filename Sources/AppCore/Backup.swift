@@ -487,6 +487,10 @@ public enum BackupCommands {
             case .verifyFull: "verify-full"
             }
             env["PGSSLMODE"] = mode
+            // libpq 17+ reads it; older tools ignore it and negotiate as before.
+            if login.config.tlsDirect, ![.disable, .allow, .prefer].contains(login.config.tlsMode) {
+                env["PGSSLNEGOTIATION"] = "direct"
+            }
             for (key, path) in [("PGSSLROOTCERT", login.config.tlsCAPath), ("PGSSLCERT", login.config.tlsCertPath), ("PGSSLKEY", login.config.tlsKeyPath)] {
                 let p = path.trimmingCharacters(in: .whitespaces)
                 if !p.isEmpty { env[key] = (p as NSString).expandingTildeInPath }

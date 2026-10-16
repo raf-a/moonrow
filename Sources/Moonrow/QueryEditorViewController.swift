@@ -75,7 +75,7 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
     private var runTask: Task<Void, Never>?
     private(set) var isRunning = false
     /// Safe mode is asking about the statements to run.
-    private var isAwaitingApproval = false
+    private(set) var isAwaitingApproval = false
     private var autosaveTask: Task<Void, Never>?
     private var isDirty = false
     /// Text length when last highlighted; each change's length delta follows from it.
@@ -514,7 +514,8 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
     private func start(_ statements: [SQLStatementRange], fetchingAllInto target: ResultGridController? = nil) {
         clearErrorHighlight()
         let textAtStart = editor.string
-        let options = ScriptRunner.Options(rowLimit: target == nil ? rowLimit : nil, stopOnError: true)
+        let options = ScriptRunner.Options(
+            rowLimit: target == nil ? rowLimit : nil, stopOnError: true, timeout: AppStyle.settings.queryTimeLimit)
         let events = ScriptRunner.run(statements, on: environment.connection, options: options)
         if let target { results.beginFetchAll(target) } else { results.beginRun(statements) }
         setRunning(true)

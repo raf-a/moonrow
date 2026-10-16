@@ -45,6 +45,10 @@ public protocol DatabaseConnection: Sendable {
     /// nil. Returns the rows copied. Only Postgres has it.
     func copyIn(_ sql: String, from source: @escaping CopySource) async throws -> Int
 
+    /// Sends a `SELECT 1` once the session has been idle for `interval`, so firewalls and
+    /// servers don't drop it; nil stops. Connections without a server ignore it.
+    func setKeepAlive(_ interval: Duration?)
+
     func close() async
 }
 
@@ -68,6 +72,8 @@ struct ConnectionScope: TransactionScope {
 
 extension DatabaseConnection {
     public var statementLog: StatementLog? { nil }
+
+    public func setKeepAlive(_ interval: Duration?) {}
 
     /// BEGIN, the body's statements and COMMIT, each sent on its own (SQLite and test fakes).
     public func withTransaction<T: Sendable>(_ body: @Sendable (any TransactionScope) async throws -> T) async throws -> T {

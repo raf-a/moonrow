@@ -36,8 +36,20 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var postgresToolsFolder: String = ""
     /// The folder holding mysqldump and mysql (or MariaDB's); empty finds them.
     public var mysqlToolsFolder: String = ""
+    /// Seconds a query tab's statement may run before it's stopped as ⌘. stops it; 0 = no limit.
+    public var queryTimeout: Int = 300
+    /// Workspaces send `SELECT 1` on sessions idle for 30 seconds, so firewalls and servers
+    /// don't drop them.
+    public var keepAlive: Bool = false
+    /// Where safe mode asks for the password, Touch ID can answer instead.
+    public var safeModeTouchID: Bool = false
 
     public init() {}
+
+    public static let queryTimeouts: ClosedRange<Int> = 0...86_400
+
+    /// `queryTimeout` as a limit for `ScriptRunner`; nil without one.
+    public var queryTimeLimit: Duration? { queryTimeout > 0 ? .seconds(queryTimeout) : nil }
 
     public static let editorFontSizes: ClosedRange<Double> = 9...32
     public static let gridFontSizes: ClosedRange<Double> = 9...24
@@ -47,7 +59,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case appearance, editorTheme, editorFontName, editorFontSize, gridFontSize, alternatingRows
         case defaultSafeMode, keyBindings, reopenWorkspaces, queryParameters, runButtonRunsAll
-        case postgresToolsFolder, mysqlToolsFolder
+        case postgresToolsFolder, mysqlToolsFolder, queryTimeout, keepAlive, safeModeTouchID
     }
 
     // Each value is read on its own: one that's missing or not understood keeps its default
@@ -71,6 +83,9 @@ public struct AppSettings: Codable, Equatable, Sendable {
         runButtonRunsAll = value(.runButtonRunsAll, d.runButtonRunsAll)
         postgresToolsFolder = value(.postgresToolsFolder, d.postgresToolsFolder)
         mysqlToolsFolder = value(.mysqlToolsFolder, d.mysqlToolsFolder)
+        queryTimeout = min(max(value(.queryTimeout, d.queryTimeout), Self.queryTimeouts.lowerBound), Self.queryTimeouts.upperBound)
+        keepAlive = value(.keepAlive, d.keepAlive)
+        safeModeTouchID = value(.safeModeTouchID, d.safeModeTouchID)
     }
 
     /// Finds the backup tools with the folders chosen here.

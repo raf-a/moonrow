@@ -15,17 +15,12 @@ public final class MySQLConnection: DatabaseConnection, @unchecked Sendable {
         self.configuration = configuration
         self.serverVersion = first.serverVersion
         self.statementLog = log
-        self.host = SessionHost(first: first) {
-            let session = try await MySQLSession.open(configuration)
-            session.log = log
-            return session
-        }
+        self.host = SessionHost(first: first) { try await MySQLSession.open(configuration, log: log) }
     }
 
     public static func connect(_ configuration: MySQLConfiguration) async throws -> MySQLConnection {
         let log = StatementLog()
-        let first = try await MySQLSession.open(configuration)
-        first.log = log
+        let first = try await MySQLSession.open(configuration, log: log)
         return MySQLConnection(configuration: configuration, first: first, log: log)
     }
 
@@ -69,6 +64,10 @@ public final class MySQLConnection: DatabaseConnection, @unchecked Sendable {
 
     public func close() async {
         await host.close()
+    }
+
+    public func setKeepAlive(_ interval: Duration?) {
+        host.setKeepAlive(interval)
     }
 
     private func rows(_ sql: String, _ bindings: [DBValue] = []) async throws -> [[DBValue]] {

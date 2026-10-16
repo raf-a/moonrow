@@ -13,6 +13,13 @@ public actor AsyncLock {
         await withCheckedContinuation { waiters.append($0) }
     }
 
+    /// Takes the lock only if nobody holds it.
+    public func tryLock() -> Bool {
+        guard !isLocked else { return false }
+        isLocked = true
+        return true
+    }
+
     public func unlock() {
         if waiters.isEmpty {
             isLocked = false

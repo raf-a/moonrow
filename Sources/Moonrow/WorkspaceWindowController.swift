@@ -11,6 +11,16 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     var tag: ConnectionTag? {
         didSet { if tag != oldValue { titleView.connectionTag = tag } }
     }
+    /// The saved connection was edited while the workspace is open: its name and safe mode follow
+    /// at once; what the session uses (host, login, TLS, SSH, bootstrap, read-only) applies the
+    /// next time it connects.
+    func follow(_ saved: ConnectionConfig) {
+        guard saved.id == config.id else { return }
+        titleView.connectionName = saved.displayName
+        window?.title = saved.displayName
+        safety.follow(saved.safeMode)
+    }
+
     /// The database password the workspace logged in with (Backup and Restore reuse it).
     let loginPassword: String?
     let connection: any DatabaseConnection
@@ -1020,6 +1030,11 @@ final class WorkspaceTitleView: NSView {
 
     var connectionTag: ConnectionTag? {
         didSet { tagCapsule.show(connectionTag) }
+    }
+
+    var connectionName: String {
+        get { name.stringValue }
+        set { name.stringValue = newValue }
     }
 
     var subtitle: String {
