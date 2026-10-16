@@ -150,7 +150,8 @@ enum DevHarness {
         // `MOONROW_SHOW=Sample:users,events,?;Other` opens saved connections by name and, in each,
         // the tables listed (`?` is a query tab), then leaves the app running to be looked at.
         // `-users` marks a table for deletion, `~users` truncates it and `+` adds a new table, all
-        // staged; `=users` selects it in the list, `#report` a saved query in the Queries pane, and
+        // staged; `=users` selects it in the list, `#report` a saved query in the Queries pane, `!`
+        // shows the History pane, and
         // `/text` searches the database for text and clicks the first result.
         // With `MOONROW_SNAPSHOTS` it renders the windows instead and quits.
         if let spec = env["MOONROW_SHOW"] {
@@ -391,6 +392,8 @@ enum DevHarness {
                     search.start(nil)
                     _ = try await waitFor("search results") { !search.isSearching && !search.results.isEmpty ? true : nil }
                     search.list.selectRowIndexes([0], byExtendingSelection: false)
+                } else if name == "!" {
+                    workspace.leftSidebar.show(.history)
                 } else if name.hasPrefix("#") {
                     workspace.leftSidebar.show(.queries)
                     guard workspace.leftSidebar.queries.selectRow(String(name.dropFirst())) else {
