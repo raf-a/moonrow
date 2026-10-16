@@ -787,9 +787,8 @@ final class HistoryViewController: SidebarListController {
 
     @objc private func historyChanged() { reloadList() }
 
-    /// Entries wrap, so a new width means new heights.
-    override func viewDidLayout() {
-        super.viewDidLayout()
+    /// Entries wrap, so a new width means new heights. The column follows the sidebar's width.
+    func tableViewColumnDidResize(_ notification: Notification) {
         let width = sqlWidth
         guard width != measuredWidth, !rows.isEmpty else { return }
         measuredWidth = width
@@ -799,9 +798,10 @@ final class HistoryViewController: SidebarListController {
         }
     }
 
-    /// The SQL's width in a row: the row's less the cell's margins.
+    /// The SQL's width in a row: the cell's less its margins.
     private var sqlWidth: CGFloat {
-        max(0, (table.tableColumns.isEmpty ? table.bounds.width : table.rect(ofColumn: 0).width) - 2 * HistoryCell.margin)
+        let cell = rows.isEmpty ? table.rect(ofColumn: 0) : table.frameOfCell(atColumn: 0, row: 0)
+        return max(0, cell.width - 2 * HistoryCell.margin)
     }
 
     override func reloadList() {
@@ -993,7 +993,10 @@ final class HistoryViewController: SidebarListController {
                 sql.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.margin),
                 sql.topAnchor.constraint(equalTo: when.bottomAnchor, constant: 2),
             ])
-            // The row is measured to fit. Not required: a new cell starts out with no height.
+            // The row is measured to fit; if it falls short for a moment the SQL gives way, not the
+            // time. Not required: a new cell starts out with no height.
+            when.setContentCompressionResistancePriority(.required, for: .vertical)
+            sql.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
             let bottom = sql.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Self.bottomMargin)
             bottom.priority = .init(999)
             bottom.isActive = true
