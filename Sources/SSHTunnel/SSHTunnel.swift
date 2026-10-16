@@ -102,6 +102,18 @@ public struct SSHTunnelConfiguration: Sendable, Hashable {
                 "-o", "ProxyCommand=/usr/bin/false", "-W", target, "moonrow-tunnel"]
     }
 
+    /// Arguments for a command on the SSH server, through the master like a stream: its stdin
+    /// and stdout are ours, no terminal. The server's login shell runs `command`.
+    static func commandArguments(controlPath: String, command: String) -> [String] {
+        ["-F", "none", "-S", controlPath, "-o", "ControlMaster=no", "-o", "BatchMode=yes",
+         "-o", "ProxyCommand=/usr/bin/false", "-T", "moonrow-tunnel", command]
+    }
+
+    /// Quotes `s` as one word for a POSIX shell (also fine for bash, zsh and fish).
+    public static func shellQuoted(_ s: String) -> String {
+        "'" + s.replacingOccurrences(of: "'", with: #"'\''"#) + "'"
+    }
+
     /// ssh_config quoting for a value that may hold spaces (Application Support).
     static func configQuoted(_ s: String) -> String {
         s.contains(where: { $0 == " " || $0 == "\"" }) ? "\"\(s.replacingOccurrences(of: "\"", with: ""))\"" : s
@@ -203,6 +215,64 @@ public actor SSHTunnel {
             _ = await process.waitForExit(timeout: .seconds(2))
             return Self.cleaned(process.errors)
         }
+    }
+
+    /// An endpoint whose every stream is a new run of `command` on the SSH server, its stdin and
+    /// stdout the stream (remote SQLite's sqlite3).
+    public nonisolated func commandEndpoint(_ command: String, description: String) -> Endpoint {
+        let opener = StreamOpener(description: "\(description) via SSH \(configuration.server)", hostName: nil) {
+            try await self.openCommand(command)
+        }
+        return .stream(opener)
+    }
+
+    /// Runs `command` on the SSH server with its stdin and stdout on a socket that's ours.
+    public func openCommand(_ command: String) async throws -> OpenedStream {
+        let (descriptor, process) = try await startCommand(command)
+        return OpenedStream(descriptor: descriptor) {
+            _ = await process.waitForExit(timeout: .seconds(2))
+            return Self.cleaned(process.errors)
+        }
+    }
+
+    /// Runs `command` on the SSH server to its end and returns what it wrote to stdout. Nothing
+    /// is sent to its stdin. Fails with its error output when it exits with a status other than 0.
+    public func run(_ command: String) async throws -> Data {
+        let (descriptor, process) = try await startCommand(command)
+        shutdown(descriptor, SHUT_WR)
+        let output: Data = await Task.detached {
+            let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+            return (try? handle.readToEnd()) ?? Data()
+        }.value
+        let status = await process.waitForExit()
+        guard status == 0 else {
+            _ = await process.waitForExit(timeout: .seconds(2))
+            let errors = Self.cleaned(process.errors)
+            throw SSHTunnelError(errors.isEmpty ? "The command on the SSH server failed (status \(status))." : errors)
+        }
+        return output
+    }
+
+    private func startCommand(_ command: String) async throws -> (Int32, Subprocess) {
+        try await connect()
+        var pair: [Int32] = [-1, -1]
+        guard socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0 else {
+            throw SSHTunnelError("Can't create a socket for the SSH tunnel: \(String(cString: strerror(errno)))")
+        }
+        let process: Subprocess
+        do {
+            process = try Subprocess(
+                configuration.sshPath, SSHTunnelConfiguration.commandArguments(controlPath: controlPath, command: command),
+                environment: baseEnvironment, stdio: pair[1])
+        } catch {
+            Darwin.close(pair[0])
+            Darwin.close(pair[1])
+            throw error
+        }
+        Darwin.close(pair[1])
+        streams.removeAll { !$0.isRunning }
+        streams.append(process)
+        return (pair[0], process)
     }
 
     /// Carries an accepted socket to `host:port`: a mux client gets it as stdin and stdout, and

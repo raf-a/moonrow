@@ -1,6 +1,8 @@
 import AppCore
 import AppKit
 import DBKit
+import DriverRemoteSQLite
+import DriverSQLite
 import UniformTypeIdentifiers
 
 @MainActor
@@ -422,13 +424,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
                     }
                 }
                 let ssh = sshLogin(for: config, password: sshPassword, in: window)
-                let connection = try await ConnectionFactory.open(config, password: login, ssh: ssh)
+                let connection: any DatabaseConnection
+                var copy: String?
+                do {
+                    connection = try await ConnectionFactory.open(config, password: login, ssh: ssh)
+                } catch RemoteSQLiteError.noSQLite(let command) {
+                    // No sqlite3 on the server: a copy of the file, if the user wants one.
+                    guard await offerCopy(of: config, missing: command, in: window) else {
+                        onFailure?()
+                        return
+                    }
+                    connection = try await ConnectionFactory.open(config, password: login, ssh: ssh, remoteCopy: true)
+                    copy = (connection as? SQLiteConnection)?.path
+                }
                 let workspace = openWorkspace(config, connection, password: login, placement: placement)
+                workspace.isRemoteCopy = copy != nil
                 // Running Queries, imports, search and the diagram open sessions of their own the
-                // same way, in the database the workspace is in now.
+                // same way, in the database the workspace is in now (a remote file's copy: that copy).
                 workspace.openSession = { [weak workspace] in
                     var c = config
                     if config.driver == .postgres, let database = workspace?.currentDatabase { c.database = database }
+                    if let copy {
+                        c.overSSH = false
+                        c.filePath = copy
+                    }
                     return try await ConnectionFactory.open(c, password: login, ssh: ssh)
                 }
                 onOpen?(workspace)
@@ -459,6 +478,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             }
             do { try self?.store.save(saved) } catch { present(error, title: "Couldn't save the connection", in: window) }
         }
+    }
+
+    /// Asks whether to open a copy of a SQLite file on a server that has no sqlite3.
+    private func offerCopy(of config: ConnectionConfig, missing command: String, in window: NSWindow?) async -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "The server has no \(command)"
+        alert.informativeText = "\(config.displayName) is opened with the server's own sqlite3, which isn't there. "
+            + "A copy of the file can be opened instead: changes stay in the copy on this Mac and are never written back to the server."
+        alert.addButton(withTitle: "Open a Copy")
+        alert.addButton(withTitle: "Cancel")
+        let response: NSApplication.ModalResponse
+        if let window {
+            response = await withCheckedContinuation { c in alert.beginSheetModal(for: window) { c.resume(returning: $0) } }
+        } else {
+            response = alert.runModal()
+        }
+        return response == .alertFirstButtonReturn
     }
 
     /// What a tunnel needs to log in: the SSH secrets (typed in the form, else saved), sheets on

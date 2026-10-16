@@ -2,6 +2,8 @@ import AppCore
 import DBKit
 import DriverMySQL
 import DriverPostgres
+import DriverRemoteSQLite
+import DriverSQLite
 import Foundation
 import Testing
 import WireSupport
@@ -106,8 +108,10 @@ import WireSupport
         #expect(back == c)
         #expect(c.summary.hasSuffix("via SSH deploy@bastion.example"))
         #expect(throws: DatabaseError.self) { try c.applySSH(url: "postgres://x") }
-        // SQLite never goes over SSH, whatever the flag says.
-        #expect(!ConnectionConfig(driver: .sqlite, overSSH: true).usesSSH)
+        // A SQLite file over SSH is a path on the server, kept as typed for the server to expand.
+        let remote = ConnectionConfig(driver: .sqlite, filePath: "~/data/app.db", overSSH: true, sshHost: "bastion", sshUser: "deploy")
+        #expect(remote.usesSSH && remote.expandedFilePath == "~/data/app.db" && remote.remoteSQLiteCommand == "sqlite3")
+        #expect(remote.summary == "SQLite · ~/data/app.db · on deploy@bastion")
     }
 
     @Test func tunnelConfigurationFollowsPasswordMode() throws {
@@ -520,5 +524,110 @@ final class SavedLog: @unchecked Sendable {
     var values: [SSHSecret: String] { lock.withLock { saved } }
     var record: @Sendable (SSHSecret, String) -> Void {
         { secret, value in self.lock.withLock { self.saved[secret] = value } }
+    }
+}
+
+/// SQLite files on the SSH server: its own sqlite3 on the live file, or a copy when it has none.
+/// In the same serialized suite as the other tunnel tests, which count ssh processes.
+extension SSHTunnelServerTests {
+    private var sqliteLogin: SSHLogin {
+        SSHLogin(
+            password: SSHTestServer.url!.password, responder: PromptLog.trustingHostKeys().responder,
+            knownHostsFiles: [directory.appending(path: "known_hosts").path], configFile: "none", useAgent: false,
+            helperPath: SSHTestServer.helperPath)
+    }
+
+    private func sqliteConfig(_ path: String, sqlite3: String = "") -> ConnectionConfig {
+        let ssh = SSHTestServer.url!
+        var c = ConnectionConfig(driver: .sqlite, filePath: path, passwordMode: .none, overSSH: true,
+                                 sshHost: ssh.host!, sshPort: ssh.port, sshUser: ssh.user!)
+        c.sshPasswordMode = .keychain
+        c.sqliteCommand = sqlite3
+        return c
+    }
+
+    /// Runs `sql` on the server with its sqlite3, as another program would.
+    private func onServer(_ path: String, _ sql: String) async throws -> String {
+        let tunnel = try SSHTunnel(SSHTestServer.configuration(directory: directory, password: SSHTestServer.url!.password),
+                                   responder: PromptLog.trustingHostKeys().responder)
+        defer { Task { await tunnel.close() } }
+        let out = try await tunnel.run("sqlite3 \(SSHTunnelConfiguration.shellQuoted(path)) \(SSHTunnelConfiguration.shellQuoted(sql))")
+        return String(decoding: out, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Removes a test file (and its -wal and -shm) from the server.
+    private func remove(_ path: String) async {
+        guard let tunnel = try? SSHTunnel(SSHTestServer.configuration(directory: directory, password: SSHTestServer.url!.password),
+                                          responder: PromptLog.trustingHostKeys().responder) else { return }
+        let q = SSHTunnelConfiguration.shellQuoted(path)
+        _ = try? await tunnel.run("rm -f \(q) \(q)-wal \(q)-shm")
+        await tunnel.close()
+    }
+
+    @Test func liveFileThroughTheServersSQLite() async throws {
+        let before = try SSHTestServer.tunnelProcessCount()
+        let path = "/tmp/moonrow-m12-\(UUID().uuidString.prefix(8)).sqlite"
+        _ = try await onServer(path, "CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT); INSERT INTO notes (body) VALUES ('one');")
+        do {
+            let db = try await ConnectionFactory.open(sqliteConfig(path), ssh: sqliteLogin)
+            #expect((db as? RemoteSQLiteConnection)?.sqliteVersion.hasPrefix("3.") == true)
+            #expect(try await db.objects(schema: nil).map(\.ref.name) == ["notes"])
+            #expect(try await db.execute("SELECT body FROM notes").rows == [[.text("one")]])
+            #expect(try await db.execute(SQLStatement("INSERT INTO notes (body) VALUES (?)", bindings: [.text("it's two")])).rowsAffected == 1)
+            // Another program on the server sees the write, and we see its.
+            #expect(try await onServer(path, "SELECT body FROM notes WHERE id = 2") == "it's two")
+            _ = try await onServer(path, "INSERT INTO notes (body) VALUES ('three')")
+            #expect(try await db.execute("SELECT count(*) FROM notes").rows.first?.first == .integer(3))
+            // Stopping a long statement interrupts it on the server; the next one gets a new sqlite3.
+            let endless = Task { try await db.execute("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n) SELECT count(*) FROM n") }
+            try await Task.sleep(for: .milliseconds(500))
+            let clock = ContinuousClock(), start = clock.now
+            endless.cancel()
+            _ = await endless.result
+            #expect(clock.now - start < .seconds(5))
+            #expect(try await db.execute("SELECT count(*) FROM notes").rows.first?.first == .integer(3))
+            await db.close()
+        }
+        #expect(try await onServer(path, "PRAGMA integrity_check") == "ok")
+        await remove(path)
+        let deadline = ContinuousClock.now + .seconds(4)
+        while try SSHTestServer.tunnelProcessCount() != before, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        #expect(try SSHTestServer.tunnelProcessCount() == before)
+    }
+
+    @Test func remoteSQLiteMissingFileOrSQLite() async throws {
+        do {
+            _ = try await ConnectionFactory.open(sqliteConfig("/tmp/moonrow-no-such-file.sqlite"), ssh: sqliteLogin)
+            Issue.record("opened a missing file")
+        } catch let e as RemoteSQLiteError {
+            #expect(e.description == "There is no file at /tmp/moonrow-no-such-file.sqlite on the server.")
+        }
+        let path = "/tmp/moonrow-m12-\(UUID().uuidString.prefix(8)).sqlite"
+        _ = try await onServer(path, "CREATE TABLE t (x); INSERT INTO t VALUES (1);")
+        do {
+            _ = try await ConnectionFactory.open(sqliteConfig(path, sqlite3: "moonrow-sqlite3-missing"), ssh: sqliteLogin)
+            Issue.record("opened without sqlite3")
+        } catch let e as RemoteSQLiteError {
+            #expect(e.description == "The server has no moonrow-sqlite3-missing.")
+        }
+        await remove(path)
+    }
+
+    /// Without sqlite3 on the server: a copy, edited here only.
+    @Test func copyWhenTheServerHasNoSQLite() async throws {
+        let path = "/tmp/moonrow-m12-\(UUID().uuidString.prefix(8)).sqlite"
+        _ = try await onServer(path, "PRAGMA journal_mode = WAL; CREATE TABLE t (x); INSERT INTO t VALUES (1), (2);")
+        let db = try await ConnectionFactory.open(sqliteConfig(path, sqlite3: "moonrow-sqlite3-missing"), ssh: sqliteLogin, remoteCopy: true)
+        let sqlite = try #require(db as? SQLiteConnection)
+        #expect(await sqlite.copyOf?.hasSuffix(":" + path) == true)
+        #expect(try await db.execute("SELECT count(*) FROM t").rows.first?.first == .integer(2))
+        _ = try await db.execute("DELETE FROM t")
+        #expect(try await onServer(path, "SELECT count(*) FROM t") == "2")
+        let folder = URL(filePath: sqlite.path).deletingLastPathComponent()
+        await db.close()
+        #expect(!FileManager.default.fileExists(atPath: folder.path))
+        await remove(path)
     }
 }

@@ -72,6 +72,10 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     var hasOfferedDatabases = false
     /// The saved connection's database, which `switchedDatabase` compares with.
     var savedDatabase: String?
+    /// The workspace works on a downloaded copy of a SQLite file on a server (never uploaded).
+    var isRemoteCopy = false {
+        didSet { showSubtitle() }
+    }
     /// ⌘K's Open in New Tab: another workspace on the connection, in that database.
     var onOpenDatabaseInNewTab: ((String) -> Void)?
     /// Show Diagram's window, while it's open.
@@ -454,7 +458,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         let definitionTab = content.current as? DefinitionTabViewController
         var shown = config
         if isPostgres, let database = currentDatabase { shown.database = database }
-        let summary = shown.shortSummary
+        let summary = shown.shortSummary + (isRemoteCopy ? " · copy, changes stay on this Mac" : "")
         if let object = definitionTab?.object {
             subtitle = "\(object.ref) — \(summary)"
         } else if let table, tableTab?.newTableID == nil {

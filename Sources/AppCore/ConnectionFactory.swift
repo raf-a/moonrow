@@ -1,6 +1,7 @@
 import DBKit
 import DriverMySQL
 import DriverPostgres
+import DriverRemoteSQLite
 import DriverSQLite
 import Foundation
 @_exported import SSHTunnel
@@ -53,10 +54,17 @@ public enum ConnectionFactory {
     ///
     /// Over SSH the connection carries its tunnel: the drivers open every socket through it,
     /// and it ends (ssh processes included) when the connection is released.
+    ///
+    /// A SQLite file over SSH runs the server's own sqlite3 on the live file; when the server has
+    /// none, that fails with `RemoteSQLiteError.noSQLite`, and `remoteCopy` opens a copy of the
+    /// file instead, downloaded through the tunnel and never uploaded.
     public static func open(
-        _ config: ConnectionConfig, password: String? = nil, ssh: SSHLogin = SSHLogin()
+        _ config: ConnectionConfig, password: String? = nil, ssh: SSHLogin = SSHLogin(), remoteCopy: Bool = false
     ) async throws -> any DatabaseConnection {
         switch config.driver {
+        case .sqlite where config.usesSSH:
+            if remoteCopy { return try await openRemoteCopy(config, passphrase: password, ssh) }
+            return try await openRemoteSQLite(config, ssh)
         case .sqlite:
             return try await openSQLite(config, passphrase: config.passwordMode == .none ? nil : password)
         case .postgres:
@@ -180,6 +188,64 @@ public enum ConnectionFactory {
             mode: c.tlsMode, caCertificatePath: path(c.tlsCAPath),
             clientCertificatePath: path(c.tlsCertPath), clientKeyPath: path(c.tlsKeyPath),
             serverName: name.isEmpty ? nil : name)
+    }
+
+    /// The file's own sqlite3 on the SSH server, one process per session. Encrypted files can't
+    /// be opened this way (the server's sqlite3 has no SQLCipher), so the passphrase isn't used.
+    private static func openRemoteSQLite(_ config: ConnectionConfig, _ login: SSHLogin) async throws -> any DatabaseConnection {
+        let path = config.filePath.trimmingCharacters(in: .whitespaces)
+        guard !path.isEmpty else { throw DatabaseError("Enter the database file's path on the SSH server.") }
+        let tunnel = try makeTunnel(config, login)
+        let command = RemoteSQLiteConfiguration.command(sqlite3: config.remoteSQLiteCommand, path: path, readOnly: config.readOnly)
+        let remote = RemoteSQLiteConfiguration(
+            endpoint: tunnel.commandEndpoint(command, description: path), path: path, bootstrap: config.bootstrapStatements,
+            interrupt: { pid in _ = try? await tunnel.run("kill -INT \(pid)") })
+        do {
+            return try await RemoteSQLiteConnection.connect(remote)
+        } catch RemoteSQLiteError.noSQLite {
+            await tunnel.close()
+            throw RemoteSQLiteError.noSQLite(config.remoteSQLiteCommand)
+        } catch {
+            await tunnel.close()
+            throw error
+        }
+    }
+
+    /// A copy of the file on the SSH server (with its -wal, so recent writes come along),
+    /// downloaded through the tunnel into a private folder that goes when the connection closes.
+    private static func openRemoteCopy(_ config: ConnectionConfig, passphrase: String?, _ login: SSHLogin) async throws -> any DatabaseConnection {
+        let path = config.filePath.trimmingCharacters(in: .whitespaces)
+        guard !path.isEmpty else { throw DatabaseError("Enter the database file's path on the SSH server.") }
+        let tunnel = try makeTunnel(config, login)
+        defer { Task { await tunnel.close() } }
+        let folder = FileManager.default.temporaryDirectory.appending(path: "moonrow-remote-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        do {
+            let name = (path as NSString).lastPathComponent.isEmpty ? "database.sqlite" : (path as NSString).lastPathComponent
+            let local = folder.appending(path: name)
+            func read(_ suffix: String) -> String {
+                "exec sh -c " + SSHTunnelConfiguration.shellQuoted(
+                    #"f=$1; case $f in "~/"*) f=$HOME/${f#??};; esac; "# +
+                    (suffix.isEmpty ? #"[ -f "$f" ] || { echo "No file at $1" >&2; exit 3; }; cat -- "$f""#
+                                    : #"[ -f "$f\#(suffix)" ] && cat -- "$f\#(suffix)"; exit 0"#))
+                    + " sh " + SSHTunnelConfiguration.shellQuoted(path)
+            }
+            try await tunnel.run(read("")).write(to: local)
+            let wal = try await tunnel.run(read("-wal"))
+            if !wal.isEmpty { try wal.write(to: URL(filePath: local.path + "-wal")) }
+            var copy = config
+            copy.overSSH = false
+            copy.filePath = local.path
+            let connection = try await openSQLite(copy, passphrase: config.passwordMode == .none ? nil : passphrase)
+            if let sqlite = connection as? SQLiteConnection {
+                await sqlite.markAsCopy(of: "\(config.sshUser.isEmpty ? "" : config.sshUser + "@")\(config.sshHost):\(path)", removing: folder)
+            }
+            return connection
+        } catch {
+            try? FileManager.default.removeItem(at: folder)
+            throw error
+        }
     }
 
     /// `passphrase` opens a SQLCipher database; nil opens a plain one.
