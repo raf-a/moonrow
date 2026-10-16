@@ -262,7 +262,11 @@ extension DevHarness {
     }
 
     /// With `MOONROW_CONNECT` to a server with several schemas: Quick Open finds `table` in
-    /// another schema and opens it; Open Database (⌘K) switches to that schema and back.
+    /// another schema and opens it. Then Open Database (⌘K) lists the server's databases; New…
+    /// creates a scratch one with an encoding and a collation; opening it switches the workspace
+    /// (Postgres reconnects: the table's tab closes, the query tab stays; MySQL lists it); ⌘K
+    /// goes back, and Drop… removes the scratch database. A MySQL connection without a default
+    /// database starts with ⌘K's window open; MySQL has no switcher at the bottom of the sidebar.
     static func openDatabaseDemo(_ app: AppDelegate, table: String, snapshots: URL?) async throws {
         if let snapshots { try FileManager.default.createDirectory(at: snapshots, withIntermediateDirectories: true) }
         func check(_ ok: Bool, _ what: String) throws {
@@ -272,8 +276,24 @@ extension DevHarness {
         let workspace = try await waitFor("workspace") { app.workspaces.first }
         let window = try require(workspace.window, "workspace window")
         try await makeKey(window)
-        // The schema the workspace starts in.
-        let start: String = try await waitFor("schemas") { workspace.sidebar.schemaNames.isEmpty ? nil : workspace.sidebar.schema }
+        let isPostgres = workspace.isPostgres
+        _ = try await waitFor("schemas") { workspace.sidebar.schemaNames.isEmpty ? nil : true }
+        try check(workspace.sidebar.showsSchemaSwitcher == isPostgres,
+                  isPostgres ? "Postgres keeps the schema switcher" : "MySQL has no switcher at the bottom of the sidebar")
+        if !isPostgres, workspace.sidebar.schema == nil {
+            // No default database: the list is empty and ⌘K's window comes up over it.
+            let offered = try await waitFor("Open Database over the empty list") { workspace.databasePicker }
+            if let snapshots { snapshot(window, to: snapshots.appending(path: "opendb-0-no-database.png")) }
+            let first = try await waitFor("databases") { offered.databases.contains("m12") ? "m12" : nil }
+            offered.type(first)
+            offered.open(nil)
+            _ = try await waitFor("listed") { workspace.sidebar.schema == first ? true : nil }
+            _ = try await waitFor("sheet gone") { window.attachedSheet == nil ? true : nil }
+            try await makeKey(window)
+            try check(true, "choosing \(first) lists it")
+        }
+        let start = try require(workspace.currentDatabase, "a database to start in")
+        let startSchema = workspace.sidebar.schema
 
         try await pressMenu(#selector(MoonrowActions.quickOpen(_:)), in: window)
         let quick = try await waitFor("Quick Open") { workspace.picker }
@@ -281,30 +301,82 @@ extension DevHarness {
         quick.refresh()
         let found = try await waitFor("\(table) in another schema") { quick.rows.first { $0.title == table } }
         if let snapshots { snapshot(quick.panel, to: snapshots.appending(path: "opendb-1-quick-open.png")) }
-        try check(found.detail != start, "Quick Open lists \(table) from schema \(found.detail)")
+        try check(found.detail != startSchema, "Quick Open lists \(table) from schema \(found.detail)")
         quick.choose()
         let tab = try await waitFor("\(table) tab") { workspace.tableTab.flatMap { $0.table.name == table ? $0 : nil } }
         try check(tab.table.schema == found.detail && !tab.isPreview, "Return opens \(found.detail).\(table) in a regular tab")
+        let query = workspace.newQuery(text: "SELECT 1")
+
+        // ⌘K: the databases, the current one marked.
+        try await pressMenu(#selector(MoonrowActions.openDatabase(_:)), in: window)
+        let picker = try await waitFor("Open Database") { workspace.databasePicker }
+        _ = try await waitFor("databases listed") { picker.databases.contains(start) ? true : nil }
+        try check(picker.current == start && picker.selected == start, "⌘K lists the databases with \(start) selected")
+        if isPostgres { try check(!picker.databases.contains("template0"), "templates aren't listed") }
+        if let snapshots { snapshot(picker.window, to: snapshots.appending(path: "opendb-2-databases.png")) }
+
+        // New…: a name, an encoding and a collation.
+        let scratch = "moonrow_opendb_\(Int.random(in: 1000...9999))"
+        picker.newDatabase(nil)
+        let sheet = try await waitFor("New Database") { workspace.newDatabaseSheet }
+        _ = try await waitFor("encodings") { sheet.isLoaded ? true : nil }
+        sheet.nameField.stringValue = scratch
+        sheet.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification))
+        let encoding = isPostgres ? "UTF8" : "utf8mb4"
+        sheet.encodingPopup.selectItem(withTitle: encoding)
+        sheet.encodingPopup.sendAction(sheet.encodingPopup.action, to: sheet.encodingPopup.target)
+        let collation = isPostgres ? "C" : "utf8mb4_bin"
+        _ = try await waitFor("collations of \(encoding)") {
+            sheet.collationPopup.isEnabled && sheet.collationPopup.item(withTitle: collation) != nil ? true : nil
+        }
+        sheet.collationPopup.selectItem(withTitle: collation)
+        try check(sheet.newDatabase == NewDatabase(name: scratch, encoding: encoding, collation: sheet.collation)
+                  && sheet.collation?.name == collation, "New Database… takes \(encoding) and \(collation)")
+        if let snapshots { snapshot(sheet.sheet, to: snapshots.appending(path: "opendb-3-new-database.png")) }
+        sheet.okClicked(nil)
+        _ = try await waitFor("created and selected") { picker.selected == scratch && workspace.newDatabaseSheet == nil ? true : nil }
+        try check(true, "OK creates \(scratch) and selects it in the list")
+
+        // Open it.
+        picker.open(nil)
+        _ = try await waitFor("switched") { workspace.currentDatabase == scratch ? true : nil }
+        if isPostgres {
+            _ = try await waitFor("table tab closed") { workspace.panes.allTabs.contains { $0 === tab } ? nil : true }
+            try check(workspace.panes.allTabs.contains { $0 === query }, "the query tab stays")
+            let current = try await DatabaseCatalog.current(workspace.connection)
+            try check(current == scratch, "the workspace's session is in \(scratch)")
+            _ = try await waitFor("schemas of \(scratch)") { workspace.sidebar.schema == "public" ? true : nil }
+        }
+        try check(true, "opening \(scratch) switches the workspace to it")
+        if let snapshots { snapshot(window, to: snapshots.appending(path: "opendb-4-switched.png")) }
+
+        // Back, then Drop….
+        try await pressMenu(#selector(MoonrowActions.openDatabase(_:)), in: window)
+        let back = try await waitFor("Open Database") { workspace.databasePicker }
+        _ = try await waitFor("databases listed") { back.databases.contains(start) ? true : nil }
+        try check(back.current == scratch, "⌘K marks \(scratch) as current")
+        back.type(start)
+        back.open(nil)
+        _ = try await waitFor("switched back") { workspace.currentDatabase == start ? true : nil }
+        try check(true, "and back to \(start)")
 
         try await pressMenu(#selector(MoonrowActions.openDatabase(_:)), in: window)
-        let picker = try await waitFor("Open Database") { workspace.picker }
-        picker.field.stringValue = found.detail
-        picker.refresh()
-        _ = try await waitFor("schema row") { picker.rows.first?.title == found.detail ? true : nil }
-        if let snapshots { snapshot(picker.panel, to: snapshots.appending(path: "opendb-2-picker.png")) }
-        picker.choose()
-        _ = try await waitFor("switched") { workspace.sidebar.schema == found.detail ? true : nil }
-        let listed = try await waitFor("listed") { workspace.environment.catalog.objects.first { $0.ref.schema == found.detail } }
-        try check(listed.ref.schema == found.detail, "⌘K switches the workspace to \(found.detail) and lists its items")
-        if let snapshots, let w = workspace.window { snapshot(w, to: snapshots.appending(path: "opendb-3-switched.png")) }
-        try await pressMenu(#selector(MoonrowActions.openDatabase(_:)), in: window)
-        let back = try await waitFor("Open Database") { workspace.picker }
-        back.field.stringValue = start
-        back.refresh()
-        _ = try await waitFor("schema row") { back.rows.first?.title == start ? true : nil }
-        back.choose()
-        _ = try await waitFor("switched back") { workspace.sidebar.schema == start ? true : nil }
-        print("ok: and back to \(start)")
+        let dropping = try await waitFor("Open Database") { workspace.databasePicker }
+        _ = try await waitFor("databases listed") { dropping.databases.contains(scratch) ? true : nil }
+        dropping.onDrop?(scratch)
+        let alert = try await waitFor("Drop question") { dropping.window.attachedSheet }
+        if let snapshots { snapshot(alert, to: snapshots.appending(path: "opendb-5-drop.png")) }
+        let drop = try require(alert.contentView.flatMap { findButton("Drop", in: $0) }, "Drop button")
+        drop.performClick(nil)
+        _ = try await waitFor("dropped") { dropping.databases.contains(scratch) ? nil : true }
+        try check(true, "Drop… removes \(scratch)")
+        dropping.close()
+    }
+
+    private static func findButton(_ title: String, in view: NSView) -> NSButton? {
+        if let b = view as? NSButton, b.title == title { return b }
+        for v in view.subviews { if let b = findButton(title, in: v) { return b } }
+        return nil
     }
 
     /// Groups in the welcome window: listing, collapsing (kept in the store), searching by tag,

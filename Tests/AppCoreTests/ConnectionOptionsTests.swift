@@ -266,3 +266,117 @@ final class Sent: @unchecked Sendable {
     func add(_ s: String) { lock.withLock { sql.append(s) } }
     var all: [String] { lock.withLock { sql } }
 }
+
+/// Open Database (⌘K) and New Database…: listing, switching, creating with encoding and
+/// collation, renaming and dropping.
+@Suite(.serialized) struct DatabaseCatalogTests {
+    static let servers = Backend.all.filter { $0.kind != .sqlite }
+
+    private func open(_ backend: Backend) async throws -> any DatabaseConnection {
+        let (config, password) = try #require(ConnectionConfig.parse(url: backend.url!.absoluteString))
+        var c = config
+        c.tlsMode = .disable
+        return try await ConnectionFactory.open(c, password: password)
+    }
+
+    @Test func createStatements() {
+        let pg = PostgresDialect(), my = MySQLDialect()
+        #expect(DatabaseCatalog.createSQL(NewDatabase(name: "shop"), dialect: pg) == #"CREATE DATABASE "shop""#)
+        #expect(DatabaseCatalog.createSQL(NewDatabase(name: "shop", encoding: "LATIN1"), dialect: pg)
+            == #"CREATE DATABASE "shop" ENCODING 'LATIN1' TEMPLATE template0"#)
+        #expect(DatabaseCatalog.createSQL(NewDatabase(name: "s", encoding: "UTF8", collation: DatabaseCollation(name: "en_US", locale: "en_US.utf8")), dialect: pg)
+            == #"CREATE DATABASE "s" ENCODING 'UTF8' LOCALE 'en_US.utf8' TEMPLATE template0"#)
+        #expect(DatabaseCatalog.createSQL(NewDatabase(name: "s", collation: DatabaseCollation(name: "de-x-icu", provider: .icu, locale: "de")), dialect: pg)
+            == #"CREATE DATABASE "s" LOCALE_PROVIDER icu ICU_LOCALE 'de' TEMPLATE template0"#)
+        #expect(DatabaseCatalog.createSQL(NewDatabase(name: "s", collation: DatabaseCollation(name: "pg_c_utf8", provider: .builtin, locale: "C.UTF-8")), dialect: pg)
+            == #"CREATE DATABASE "s" LOCALE_PROVIDER builtin BUILTIN_LOCALE 'C.UTF-8' TEMPLATE template0"#)
+        #expect(DatabaseCatalog.createSQL(NewDatabase(name: "shop", encoding: "latin1", collation: DatabaseCollation(name: "latin1_swedish_ci")), dialect: my)
+            == "CREATE DATABASE `shop` CHARACTER SET `latin1` COLLATE `latin1_swedish_ci`")
+        #expect(DatabaseCatalog.renameSQL("a", to: "b", dialect: pg) == #"ALTER DATABASE "a" RENAME TO "b""#)
+        #expect(DatabaseCatalog.renameSQL("a", to: "b", dialect: my) == nil)
+        #expect(DatabaseCatalog.dropSQL("a", dialect: my) == "DROP DATABASE `a`")
+    }
+
+    @Test(arguments: servers) func listsEncodingsAndCollations(_ backend: Backend) async throws {
+        let db = try await open(backend)
+        defer { Task { await db.close() } }
+        let encodings = try await DatabaseCatalog.encodings(db)
+        let utf8 = backend.kind == .postgres ? "UTF8" : "utf8mb4"
+        #expect(encodings.contains(utf8))
+        // Client-only encodings can't be a database's.
+        #expect(!encodings.contains("SJIS"))
+        let all = try await DatabaseCatalog.collations(db, encoding: nil)
+        let latin = try await DatabaseCatalog.collations(db, encoding: backend.kind == .postgres ? "LATIN1" : "latin1")
+        #expect(latin.count < all.count)
+        if backend.kind == .postgres {
+            #expect(latin.contains { $0.name == "C" })
+            #expect(!latin.contains { $0.name == "en_US.utf8" })
+            #expect(all.contains { $0.provider == .icu })
+        } else {
+            #expect(latin.contains { $0.name == "latin1_swedish_ci" })
+            #expect(latin.allSatisfy { $0.name.hasPrefix("latin1_") })
+        }
+    }
+
+    /// Created with an encoding and collation, listed, switched to and back, renamed (Postgres)
+    /// and dropped.
+    @Test(arguments: servers) func createsSwitchesRenamesAndDrops(_ backend: Backend) async throws {
+        let db = try await open(backend)
+        defer { Task { await db.close() } }
+        let name = "moonrow_m12_\(Int.random(in: 1000...9999))"
+        let home = try #require(try await DatabaseCatalog.current(db) ?? (backend.kind == .postgres ? nil : "mysql"))
+        let new = backend.kind == .postgres
+            ? NewDatabase(name: name, encoding: "UTF8", collation: DatabaseCollation(name: "C", locale: "C"))
+            : NewDatabase(name: name, encoding: "latin1", collation: DatabaseCollation(name: "latin1_swedish_ci"))
+        _ = try await db.execute(SQLStatement(DatabaseCatalog.createSQL(new, dialect: db.dialect)))
+        var dropName = name
+        defer {
+            let drop = DatabaseCatalog.dropSQL(dropName, dialect: db.dialect)
+            Task {
+                let cleanup = try? await open(backend)
+                _ = try? await cleanup?.execute(SQLStatement(drop))
+                await cleanup?.close()
+            }
+        }
+        #expect(try await DatabaseCatalog.switchable(db).contains(name))
+        if backend.kind == .postgres {
+            #expect(try await !DatabaseCatalog.switchable(db).contains("template0"))
+        }
+
+        try await DatabaseCatalog.switchTo(name, on: db)
+        #expect(try await DatabaseCatalog.current(db) == name)
+        if backend.kind == .postgres {
+            let row = try await db.execute("SELECT pg_encoding_to_char(encoding), datcollate FROM pg_database WHERE datname = current_database()").rows.first
+            #expect(row?.first == .text("UTF8") && row?.last == .text("C"))
+        } else {
+            let row = try await db.execute("SELECT @@character_set_database, @@collation_database").rows.first
+            #expect(row?.first == .text("latin1") && row?.last == .text("latin1_swedish_ci"))
+        }
+        // A session the server drops comes back in the new database.
+        if backend.kind == .postgres {
+            let watcher = try await open(backend)
+            let pid = try #require(await ServerSessions.ownID(of: db))
+            try await ServerSessions.kill(pid, terminate: true, on: watcher)
+            await watcher.close()
+            var now: String?
+            for _ in 0..<20 {
+                if let n = try? await DatabaseCatalog.current(db) { now = n; break }
+                try await Task.sleep(for: .milliseconds(100))
+            }
+            #expect(now == name)
+            // A database that isn't there leaves the connection where it was.
+            await #expect(throws: (any Error).self) { try await DatabaseCatalog.switchTo("moonrow_no_such_db", on: db) }
+            #expect(try await DatabaseCatalog.current(db) == name)
+        }
+
+        try await DatabaseCatalog.switchTo(home, on: db)
+        #expect(try await DatabaseCatalog.current(db) == home)
+        if let rename = DatabaseCatalog.renameSQL(name, to: name + "_r", dialect: db.dialect) {
+            _ = try await db.execute(SQLStatement(rename))
+            dropName = name + "_r"
+            #expect(try await DatabaseCatalog.switchable(db).contains(dropName))
+        }
+        _ = try await db.execute(SQLStatement(DatabaseCatalog.dropSQL(dropName, dialect: db.dialect)))
+        #expect(try await !DatabaseCatalog.switchable(db).contains(dropName))
+    }
+}

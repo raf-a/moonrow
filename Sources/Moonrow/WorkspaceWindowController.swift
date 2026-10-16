@@ -19,6 +19,7 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         titleView.connectionName = saved.displayName
         window?.title = saved.displayName
         safety.follow(saved.safeMode)
+        savedDatabase = saved.database
     }
 
     /// The database password the workspace logged in with (Backup and Restore reuse it).
@@ -64,6 +65,15 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     /// Quick Open's items from the last time it listed every schema.
     var quickOpenItems: [QuickOpen.Item] = []
     var picker: PickerPanel?
+    /// Open Database (⌘K) and its New Database sheet, while they're open.
+    var databasePicker: DatabasePicker?
+    var newDatabaseSheet: NewDatabaseSheet?
+    /// ⌘K's window came up by itself over an empty MySQL list; it does so once per window.
+    var hasOfferedDatabases = false
+    /// The saved connection's database, which `switchedDatabase` compares with.
+    var savedDatabase: String?
+    /// ⌘K's Open in New Tab: another workspace on the connection, in that database.
+    var onOpenDatabaseInNewTab: ((String) -> Void)?
     /// Show Diagram's window, while it's open.
     private(set) var diagram: DiagramWindowController?
 
@@ -141,6 +151,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         // A single click previews and leaves the focus in the list; a double-click keeps the tab.
         sidebar.onOpen = { [weak self] object, intent in self?.open(object, intent: intent, focus: intent != .preview) }
         sidebar.onObjectsLoaded = { [weak self] objects in self?.environment.catalog.setObjects(objects) }
+        // MySQL without a default database: ⌘K's window comes up over the empty list.
+        sidebar.onNoDatabase = { [weak self] in self?.offerDatabases() }
         sidebar.markFor = { [weak self] object in self?.changes.mark(for: object) }
         sidebar.stagedNewTables = { [weak self] in
             self?.changes.newTables.map { ($0.id, $0.editor.name) } ?? []
@@ -431,17 +443,32 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         }
         leftSidebar.queries.reveal(queryController?.savedQuery)
         revealSearchResult()
-        if let object = definitionTab?.object {
-            subtitle = "\(object.ref) — \(config.shortSummary)"
-        } else if let table, tableTab?.newTableID == nil {
-            subtitle = "\(table) — \(config.shortSummary)"
-        } else if let editor = queryController {
-            subtitle = "\(editor.tabItem.title) — \(config.shortSummary)"
-        } else {
-            subtitle = config.shortSummary
-        }
+        showSubtitle()
         if !isNavigating, let tab = content.current { history.visit(NavigationPlace(tab)) }
         onSessionChange?()
+    }
+
+    /// The open table or query, then the connection's summary (in the database it's in now).
+    func showSubtitle() {
+        let table = tableTab?.table
+        let definitionTab = content.current as? DefinitionTabViewController
+        var shown = config
+        if isPostgres, let database = currentDatabase { shown.database = database }
+        let summary = shown.shortSummary
+        if let object = definitionTab?.object {
+            subtitle = "\(object.ref) — \(summary)"
+        } else if let table, tableTab?.newTableID == nil {
+            subtitle = "\(table) — \(summary)"
+        } else if let editor = queryController {
+            subtitle = "\(editor.tabItem.title) — \(summary)"
+        } else {
+            subtitle = summary
+        }
+    }
+
+    /// Back / Forward forget the tables of a database the workspace left.
+    func forgetObjectPlaces() {
+        history.removeAll { $0.object != nil }
     }
 
     /// The Search pane selects the result the selected tab shows, if it shows one.

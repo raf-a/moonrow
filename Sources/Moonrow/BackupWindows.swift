@@ -856,9 +856,9 @@ final class RestoreWindowController: ToolWindowController {
 
     @objc private func newDatabase(_ sender: Any?) {
         guard let window, session != nil else { return }
-        let sheet = NewDatabaseSheet(existing: databases) { [weak self] name in
+        let sheet = NewDatabaseSheet(existing: databases, connection: session!) { [weak self] new in
             guard let self else { return false }
-            return await self.createDatabase(name)
+            return await self.createDatabase(new)
         }
         newDatabaseSheet = sheet
         window.beginSheet(sheet.sheet) { [weak self] _ in self?.newDatabaseSheet = nil }
@@ -867,9 +867,10 @@ final class RestoreWindowController: ToolWindowController {
     /// Creates a database on the selected connection, as safe mode allows, and selects it.
     /// False when it wasn't created (the sheet stays open). For the dev harness too.
     @discardableResult
-    func createDatabase(_ name: String) async -> Bool {
+    func createDatabase(_ new: NewDatabase) async -> Bool {
+        let name = new.name
         guard let window, let selected, let session, !selected.readOnly else { return false }
-        let sql = ServerInfo.createDatabase(name, dialect: session.dialect)
+        let sql = DatabaseCatalog.createSQL(new, dialect: session.dialect)
         let level = selected.safeMode
         if level.requirement(for: [sql], dialect: session.dialect.lexer) != .none {
             let prompt = SafetyPrompt(
@@ -961,74 +962,4 @@ final class RestoreWindowController: ToolWindowController {
             try await job.run(log: log)
         }
     }
-}
-
-/// Asks for a new database's name. `create` makes it; the sheet closes when that works.
-@MainActor
-final class NewDatabaseSheet: NSObject, NSTextFieldDelegate {
-    let sheet: NSWindow
-    let nameField = NSTextField()
-    private let errorLabel = NSTextField(wrappingLabelWithString: "")
-    private let createButton = NSButton(title: "Create", target: nil, action: nil)
-    private let existing: [String]
-    private let create: (String) async -> Bool
-
-    init(existing: [String], create: @escaping (String) async -> Bool) {
-        self.existing = existing
-        self.create = create
-        sheet = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 380, height: 120), styleMask: [.titled], backing: .buffered, defer: true)
-        super.init()
-        let title = NSTextField(labelWithString: "New Database")
-        title.font = .systemFont(ofSize: 13, weight: .semibold)
-        nameField.placeholderString = "Name"
-        nameField.delegate = self
-        errorLabel.font = .systemFont(ofSize: 11)
-        errorLabel.textColor = .systemRed
-        errorLabel.isHidden = true
-        let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancel(_:)))
-        cancel.keyEquivalent = "\u{1b}"
-        createButton.target = self
-        createButton.action = #selector(createClicked(_:))
-        createButton.keyEquivalent = "\r"
-        createButton.isEnabled = false
-        let row = NSStackView(views: [NSTextField(labelWithString: "Name:"), nameField])
-        row.alignment = .firstBaseline
-        let buttons = NSStackView(views: [NSView(), cancel, createButton])
-        let main = NSStackView(views: [title, row, errorLabel, buttons])
-        main.orientation = .vertical
-        main.alignment = .leading
-        main.spacing = 10
-        main.edgeInsets = NSEdgeInsets(top: 16, left: 18, bottom: 16, right: 18)
-        for v in [row, errorLabel, buttons] { v.widthAnchor.constraint(equalTo: main.widthAnchor, constant: -36).isActive = true }
-        sheet.contentView = main
-        sheet.initialFirstResponder = nameField
-    }
-
-    func show(error: String) {
-        errorLabel.stringValue = error
-        errorLabel.isHidden = false
-    }
-
-    private var name: String { nameField.stringValue.trimmingCharacters(in: .whitespaces) }
-
-    func controlTextDidChange(_ obj: Notification) {
-        let taken = existing.contains { $0.caseInsensitiveCompare(name) == .orderedSame }
-        errorLabel.stringValue = taken ? "A database named \(name) exists already." : ""
-        errorLabel.isHidden = !taken
-        createButton.isEnabled = !name.isEmpty && !taken
-    }
-
-    @objc private func createClicked(_ sender: Any?) {
-        let name = name
-        createButton.isEnabled = false
-        Task {
-            if await create(name) {
-                sheet.sheetParent?.endSheet(sheet)
-            } else {
-                createButton.isEnabled = true
-            }
-        }
-    }
-
-    @objc private func cancel(_ sender: Any?) { sheet.sheetParent?.endSheet(sheet) }
 }

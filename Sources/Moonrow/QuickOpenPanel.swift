@@ -263,20 +263,6 @@ extension WorkspaceWindowController {
         loadQuickOpenItems(into: panel)
     }
 
-    /// Better matches first, then alphabetically; everything when nothing is typed.
-    private static func rankNames(_ names: [String], query: String) -> [String] {
-        guard !query.isEmpty else { return names }
-        var matched: [(name: String, tier: Int)] = []
-        for name in names {
-            if let tier = SQLCompletion.matchTier(name, query: query) { matched.append((name, tier)) }
-        }
-        matched.sort { a, b in
-            if a.tier != b.tier { return a.tier > b.tier }
-            return a.name.localizedStandardCompare(b.name) == .orderedAscending
-        }
-        return matched.map(\.name)
-    }
-
     private var savedQueryItems: [QuickOpen.Item] {
         QuickOpen.items(objects: [], savedQueries: environment.savedQueries.queries)
     }
@@ -317,31 +303,5 @@ extension WorkspaceWindowController {
         }
         guard let object = item.object else { return }
         if SidebarViewController.opens(object) { open(object, intent: .regular) }
-    }
-
-    /// ⌘K: the server's databases (MySQL, MariaDB) or schemas (Postgres); choosing one switches
-    /// the workspace to it, as the sidebar's switcher does.
-    @objc func openDatabase(_ sender: Any?) {
-        guard let window, !sidebar.schemaNames.isEmpty else { return NSSound.beep() }
-        picker?.close()
-        let isMySQL = connection.dialect.lexer == .mysql
-        let panel = PickerPanel(placeholder: isMySQL ? "Open a database" : "Open a schema")
-        var shown: [String] = []
-        panel.rowsFor = { [weak self] query in
-            guard let self else { return [] }
-            shown = Self.rankNames(self.sidebar.schemaNames, query: query)
-            return shown.map { name in
-                PickerPanel.Row(title: name, detail: name == self.sidebar.schema ? "Current" : "",
-                                symbol: isMySQL ? "cylinder" : "folder", tint: .systemTeal)
-            }
-        }
-        panel.onChoose = { [weak self] i in
-            guard let self, shown.indices.contains(i) else { return }
-            self.leftSidebar.show(.items)
-            self.sidebar.switchSchema(to: shown[i])
-        }
-        panel.onClose = { [weak self, weak panel] in if self?.picker === panel { self?.picker = nil } }
-        picker = panel
-        panel.show(over: window)
     }
 }

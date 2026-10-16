@@ -243,7 +243,7 @@ extension DevHarness {
         let restore = try require(app.restoreWindow, "restore window")
         _ = try await waitFor("databases listed for restore") { restore.databases.isEmpty ? nil : true }
         let restored = "m11_restored_\(Int.random(in: 1000...9999))"
-        try check(await restore.createDatabase(restored), "New Database… creates \(restored)")
+        try check(await restore.createDatabase(NewDatabase(name: restored)), "New Database… creates \(restored)")
         try check(restore.selectedDatabase == restored, "the new database is selected")
         try await Task.sleep(for: .milliseconds(200))
         snap("transfer-13-restore.png", restore.window)

@@ -62,7 +62,8 @@ public final class CancelSignal: @unchecked Sendable {
 /// `DatabaseConnection.stream`.
 public final class SessionHost<Session: WireSession>: @unchecked Sendable {
     private let lock = AsyncLock()
-    private let open: @Sendable () async throws -> Session
+    // Guarded by `lock`.
+    private var open: @Sendable () async throws -> Session
     // Guarded by `lock`.
     private var session: Session?
     private var isClosed = false
@@ -121,6 +122,20 @@ public final class SessionHost<Session: WireSession>: @unchecked Sendable {
         let s = try await open()
         session = s
         return s
+    }
+
+    /// Opens a session with `open` and, once it's up, closes the current one and makes `open`
+    /// the way to open replacements (another database, say). If it fails, nothing changes.
+    public func replace(with open: @escaping @Sendable () async throws -> Session) async throws {
+        try await lock.withLock {
+            if self.isClosed { throw DatabaseError("The connection is closed.") }
+            let new = try await open()
+            let old = self.session
+            self.session = new
+            self.open = open
+            await old?.close()
+        }
+        activity.withLock { lastUsed = .now }
     }
 
     public func stream(_ statement: SQLStatement, batchSize: Int) -> AsyncThrowingStream<ResultBatch, any Error> {

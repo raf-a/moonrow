@@ -121,9 +121,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     private func reopenWorkspaces() -> Int {
         var count = 0
         for session in sessions.load() {
-            guard let config = store.connection(id: session.connectionID) else {
+            guard var config = store.connection(id: session.connectionID) else {
                 continue  // the connection was deleted since
             }
+            // Back in the database ⌘K had switched to; the saved connection keeps its own.
+            if config.driver == .postgres, let database = session.database { config.database = database }
             count += 1
             unrestored.append(session)
             connect(config, presentingErrorsIn: nil,
@@ -314,8 +316,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     /// The frontmost workspace's connection and database, for the windows to start on.
     private var frontmostTarget: (id: UUID, database: String?)? {
         guard let workspace = frontmostWorkspace, workspace.config.driver.isServer, store.connection(id: workspace.config.id) != nil else { return nil }
-        let database = workspace.config.driver == .postgres ? (workspace.config.database.isEmpty ? nil : workspace.config.database) : workspace.sidebar.schema
-        return (workspace.config.id, database)
+        return (workspace.config.id, workspace.currentDatabase)
     }
 
     /// File ▸ Backup… and the welcome window's button.
@@ -422,8 +423,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
                 let ssh = sshLogin(for: config, password: sshPassword, in: window)
                 let connection = try await ConnectionFactory.open(config, password: login, ssh: ssh)
                 let workspace = openWorkspace(config, connection, password: login, placement: placement)
-                // Running Queries opens a session of its own the same way.
-                workspace.openSession = { try await ConnectionFactory.open(config, password: login, ssh: ssh) }
+                // Running Queries, imports, search and the diagram open sessions of their own the
+                // same way, in the database the workspace is in now.
+                workspace.openSession = { [weak workspace] in
+                    var c = config
+                    if config.driver == .postgres, let database = workspace?.currentDatabase { c.database = database }
+                    return try await ConnectionFactory.open(c, password: login, ssh: ssh)
+                }
                 onOpen?(workspace)
                 offerServerKind(ConnectionFactory.serverKind(of: connection), for: config, in: workspace)
             } catch {
@@ -549,6 +555,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             config: config, tag: tag(of: config), connection: connection, history: history, savedQueries: saved,
             password: password)
         workspace.environment.columnLayouts = layouts
+        workspace.savedDatabase = store.connection(id: config.id)?.database ?? config.database
+        workspace.onOpenDatabaseInNewTab = { [weak self, weak workspace] database in
+            guard let self, let workspace else { return }
+            var c = workspace.config
+            c.database = database
+            self.connect(c, password: .some(workspace.loginPassword), presentingErrorsIn: workspace.window, placement: .tab)
+        }
         connection.setKeepAlive(keepAliveInterval)
         // A level picked in the toolbar is kept with the saved connection.
         workspace.safety.onLevelChange = { [weak self] level in

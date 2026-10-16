@@ -316,7 +316,7 @@ final class Lines: @unchecked Sendable {
         let dir = try temporaryFolder()
         defer { try? FileManager.default.removeItem(at: dir) }
         do {
-            _ = try await s.admin.execute(SQLStatement(ServerInfo.createDatabase(source, dialect: s.admin.dialect)))
+            _ = try await s.admin.execute(SQLStatement(DatabaseCatalog.createSQL(NewDatabase(name: source), dialect: s.admin.dialect)))
             let db = try await open(s, database: source)
             try await seed(db)
             let expected = try await contents(db)
@@ -341,7 +341,7 @@ final class Lines: @unchecked Sendable {
 
                 let target = source + "_r\(i)"
                 created.append(target)
-                _ = try await s.admin.execute(SQLStatement(ServerInfo.createDatabase(target, dialect: s.admin.dialect)))
+                _ = try await s.admin.execute(SQLStatement(DatabaseCatalog.createSQL(NewDatabase(name: target), dialect: s.admin.dialect)))
                 let role = try #require(RestoreJob.role(for: kind, driver: s.config.driver))
                 let restoreTool = try #require(Self.locator.choose(role, serverMajor: major, mariaDBServer: maria).0)
                 try await RestoreJob(config: s.config, password: s.password, database: target, file: file, kind: kind,
