@@ -16,6 +16,10 @@ public protocol WireSession: AnyObject, Sendable {
     ) async throws
 
     func close() async
+
+    /// A statement that costs the server nothing (`SELECT 1`), left out of the query log; for
+    /// keeping an idle session alive.
+    func ping() async throws
 }
 
 /// Set when a statement's consumer goes away. The session registers how to stop the statement
@@ -62,6 +66,10 @@ public final class SessionHost<Session: WireSession>: @unchecked Sendable {
     // Guarded by `lock`.
     private var session: Session?
     private var isClosed = false
+    // Guarded by `activity`.
+    private let activity = NSLock()
+    private var lastUsed = ContinuousClock.now
+    private var keepAliveTask: Task<Void, Never>?
 
     /// `first` is the session opened while connecting; `open` makes replacements.
     public init(first: Session, open: @escaping @Sendable () async throws -> Session) {
@@ -70,9 +78,39 @@ public final class SessionHost<Session: WireSession>: @unchecked Sendable {
     }
 
     public func withSession<T: Sendable>(_ body: @Sendable (Session) async throws -> T) async throws -> T {
-        try await lock.withLock {
+        defer { activity.withLock { lastUsed = .now } }
+        return try await lock.withLock {
             try await body(self.liveSession())
         }
+    }
+
+    /// Pings the session once it has been idle for `interval`, as long as it's open; nil stops.
+    /// A session that's busy (a long statement) or already dropped is left alone: a dropped one
+    /// is opened again by the next statement, as always.
+    public func setKeepAlive(_ interval: Duration?) {
+        let task: Task<Void, Never>? = interval.map { interval in
+            Task { [weak self] in
+                // Checked three times per interval, so an idle session is pinged within 4/3 of it.
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: interval / 3)
+                    guard !Task.isCancelled, let self else { return }
+                    await self.pingIfIdle(for: interval)
+                }
+            }
+        }
+        let old = activity.withLock {
+            defer { keepAliveTask = task }
+            return keepAliveTask
+        }
+        old?.cancel()
+    }
+
+    private func pingIfIdle(for interval: Duration) async {
+        guard activity.withLock({ ContinuousClock.now - lastUsed >= interval }) else { return }
+        guard await lock.tryLock() else { return }
+        if !isClosed, let s = session, s.isAlive { try? await s.ping() }
+        activity.withLock { lastUsed = .now }
+        await lock.unlock()
     }
 
     private func liveSession() async throws -> Session {
@@ -111,6 +149,7 @@ public final class SessionHost<Session: WireSession>: @unchecked Sendable {
     }
 
     public func close() async {
+        setKeepAlive(nil)
         await lock.lock()
         isClosed = true
         let s = session

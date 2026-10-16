@@ -253,3 +253,14 @@ public struct DatabaseError: Error, Sendable, CustomStringConvertible, Localized
     public var description: String { message }
     public var errorDescription: String? { message }
 }
+
+extension DatabaseError {
+    /// A connection's bootstrap command failed, which fails the connect: the database's message
+    /// with the statement, so the form or the workspace can show which one.
+    public static func bootstrap(_ error: any Error, sql: String) -> DatabaseError {
+        var e = error as? DatabaseError ?? DatabaseError(String(describing: error))
+        e.message = "A bootstrap command failed: " + e.message
+        e.sql = sql
+        return e
+    }
+}

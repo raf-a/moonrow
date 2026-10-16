@@ -1,6 +1,7 @@
 import CryptoKit
 import DBKit
 import Foundation
+import SQLScript
 import WireSupport
 
 public enum DriverKind: String, Codable, Sendable, CaseIterable {
@@ -19,6 +20,15 @@ public enum DriverKind: String, Codable, Sendable, CaseIterable {
     }
 
     public var isServer: Bool { self != .sqlite }
+
+    /// How the database's SQL is split into statements.
+    public var lexer: LexerDialect {
+        switch self {
+        case .sqlite: .sqlite
+        case .postgres: .postgres
+        case .mysql, .mariadb: .mysql
+        }
+    }
 
     public var defaultPort: Int {
         switch self {
@@ -131,6 +141,12 @@ public struct ConnectionConfig: Codable, Hashable, Sendable, Identifiable {
     public var tlsCAPath: String
     public var tlsCertPath: String
     public var tlsKeyPath: String
+    /// The server name sent in TLS's SNI and checked by VERIFY_IDENTITY, for proxies that route
+    /// by it; empty uses the host. The form offers it for MySQL and MariaDB.
+    public var tlsServerName: String
+    /// Postgres 17+: start TLS at once instead of asking first (`sslnegotiation=direct`). Only
+    /// when the TLS mode requires TLS.
+    public var tlsDirect: Bool
     public var readOnly: Bool
     /// Servers: reach the database through an SSH server. `host` and `port` are then as that
     /// server sees them (127.0.0.1 is the SSH server itself).
@@ -154,16 +170,25 @@ public struct ConnectionConfig: Codable, Hashable, Sendable, Identifiable {
     /// (starting with `/` or `~`) to any folder. Connections with the same folder share their
     /// queries. Empty uses the connection's name (`SavedQueries.directory(root:for:)`).
     public var queriesFolder: String
+    /// SQL every session runs right after connecting (and after reconnecting), before anything
+    /// else: session settings such as `SET search_path` or `SET time_zone`.
+    public var bootstrapSQL: String
+    /// MySQL / MariaDB: the user chose to keep the type although the server is the other kind.
+    /// Changing the host or port forgets it.
+    public var keepsDriverForOtherServer: Bool
+    /// SQLite over SSH: the server's sqlite3, a name on its PATH or a path; empty is `sqlite3`.
+    public var sqliteCommand: String
 
     public init(
         id: UUID = UUID(), name: String = "", driver: DriverKind = .sqlite,
         filePath: String = "", host: String = "", port: Int? = nil, user: String = "", database: String = "",
         passwordMode: PasswordMode = .keychain, tlsMode: TLSMode? = nil,
         tlsCAPath: String = "", tlsCertPath: String = "", tlsKeyPath: String = "",
-        readOnly: Bool = false,
+        tlsServerName: String = "", tlsDirect: Bool = false, readOnly: Bool = false,
         overSSH: Bool = false, sshHost: String = "", sshPort: Int? = nil, sshUser: String = "",
         sshPasswordMode: PasswordMode = .keychain, sshKeyPath: String = "",
-        safeMode: SafeMode = .silent, tagID: UUID? = nil, groupID: UUID? = nil, queriesFolder: String = ""
+        safeMode: SafeMode = .silent, tagID: UUID? = nil, groupID: UUID? = nil, queriesFolder: String = "",
+        bootstrapSQL: String = "", keepsDriverForOtherServer: Bool = false, sqliteCommand: String = ""
     ) {
         self.id = id
         self.name = name
@@ -178,6 +203,8 @@ public struct ConnectionConfig: Codable, Hashable, Sendable, Identifiable {
         self.tlsCAPath = tlsCAPath
         self.tlsCertPath = tlsCertPath
         self.tlsKeyPath = tlsKeyPath
+        self.tlsServerName = tlsServerName
+        self.tlsDirect = tlsDirect
         self.readOnly = readOnly
         self.overSSH = overSSH
         self.sshHost = sshHost
@@ -189,14 +216,19 @@ public struct ConnectionConfig: Codable, Hashable, Sendable, Identifiable {
         self.tagID = tagID
         self.groupID = groupID
         self.queriesFolder = queriesFolder
+        self.bootstrapSQL = bootstrapSQL
+        self.keepsDriverForOtherServer = keepsDriverForOtherServer
+        self.sqliteCommand = sqliteCommand
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, name, driver, filePath, host, port, user, database, passwordMode
-        case tlsMode, tlsCAPath, tlsCertPath, tlsKeyPath, readOnly
+        case tlsMode, tlsCAPath, tlsCertPath, tlsKeyPath, tlsServerName, tlsDirect, readOnly
         case overSSH, sshHost, sshPort, sshUser, sshPasswordMode, sshKeyPath
         case safeMode, groupID, queriesFolder
         case tagID = "tag"
+        case bootstrapSQL = "bootstrap"
+        case keepsDriverForOtherServer, sqliteCommand
     }
 
     // Fields added in later versions get defaults, so older files keep loading.
@@ -215,6 +247,8 @@ public struct ConnectionConfig: Codable, Hashable, Sendable, Identifiable {
         tlsCAPath = try c.decodeIfPresent(String.self, forKey: .tlsCAPath) ?? ""
         tlsCertPath = try c.decodeIfPresent(String.self, forKey: .tlsCertPath) ?? ""
         tlsKeyPath = try c.decodeIfPresent(String.self, forKey: .tlsKeyPath) ?? ""
+        tlsServerName = try c.decodeIfPresent(String.self, forKey: .tlsServerName) ?? ""
+        tlsDirect = try c.decodeIfPresent(Bool.self, forKey: .tlsDirect) ?? false
         readOnly = try c.decodeIfPresent(Bool.self, forKey: .readOnly) ?? false
         overSSH = try c.decodeIfPresent(Bool.self, forKey: .overSSH) ?? false
         sshHost = try c.decodeIfPresent(String.self, forKey: .sshHost) ?? ""
@@ -235,6 +269,23 @@ public struct ConnectionConfig: Codable, Hashable, Sendable, Identifiable {
         }
         groupID = try? c.decodeIfPresent(UUID.self, forKey: .groupID)
         queriesFolder = try c.decodeIfPresent(String.self, forKey: .queriesFolder) ?? ""
+        bootstrapSQL = try c.decodeIfPresent(String.self, forKey: .bootstrapSQL) ?? ""
+        keepsDriverForOtherServer = try c.decodeIfPresent(Bool.self, forKey: .keepsDriverForOtherServer) ?? false
+        sqliteCommand = try c.decodeIfPresent(String.self, forKey: .sqliteCommand) ?? ""
+    }
+
+    /// The type to suggest when a MySQL connection reached a MariaDB server or the other way
+    /// round (`server` is what the server says it is); nil when they agree or the user kept it.
+    public func suggestedDriver(forServer server: DriverKind?) -> DriverKind? {
+        guard let server, server != driver, [.mysql, .mariadb].contains(driver), [.mysql, .mariadb].contains(server),
+              !keepsDriverForOtherServer else { return nil }
+        return server
+    }
+
+    /// `bootstrapSQL` as statements, split as the query editor splits them (MySQL's `DELIMITER`
+    /// included); comment-only statements are dropped.
+    public var bootstrapStatements: [String] {
+        SQLSplitter.split(bootstrapSQL, dialect: driver.lexer).map(\.text)
     }
 
     /// Whether connecting goes through SSH (servers only).

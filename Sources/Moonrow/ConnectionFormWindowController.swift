@@ -17,6 +17,11 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
     /// How Test logs in to the SSH server, given the SSH password and key passphrase typed.
     var sshLogin: ((ConnectionConfig, String?, String?) -> SSHLogin)?
     var onClose: (() -> Void)?
+    /// Whether a workspace on the connection is open; the form then says when edits apply.
+    var isOpenInWorkspace: ((UUID) -> Bool)? {
+        didSet { showOpenNote() }
+    }
+    let openNote = NSTextField(wrappingLabelWithString: "")
     /// Before an edited connection that uses another queries folder is saved: moves or copies
     /// the old folder's queries (or leaves them, nil) and switches its open workspaces over.
     var onQueriesFolderChange: ((ConnectionConfig, SavedQueries.FolderChange, SavedQueries.Transfer?) throws -> Void)?
@@ -31,6 +36,8 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
     private let passwordModePopup = NSPopUpButton()
     private let databaseField = NSTextField()
     private let tlsPopup = NSPopUpButton()
+    private let negotiationPopup = NSPopUpButton()
+    private let serverNameField = NSTextField()
     private let caField = NSTextField()
     private let certField = NSTextField()
     private let keyField = NSTextField()
@@ -43,6 +50,10 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
     private let safeModeHint = NSTextField(wrappingLabelWithString: "")
     private let readOnlyBox = NSButton(checkboxWithTitle: "Read-only", target: nil, action: nil)
     let queriesField = NSTextField()
+    /// The bootstrap SQL as last typed in its popover.
+    private var bootstrapSQL = ""
+    private let bootstrapLabel = NSTextField(labelWithString: "")
+    private(set) var bootstrapPopover: NSPopover?
     private let sshBox = NSButton(checkboxWithTitle: "Connect through an SSH server", target: nil, action: nil)
     private let sshHostField = NSTextField()
     private let sshPortField = NSTextField()
@@ -53,10 +64,15 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
     private let sshKeyField = NSTextField()
     private let sshPassphraseField = NSSecureTextField()
     private let status = NSTextField(wrappingLabelWithString: "")
+    /// Shown after Test when the server is the other kind of the MySQL family.
+    let changeTypeButton = NSButton(title: "", target: nil, action: nil)
+    private var suggestedDriver: DriverKind?
     private let spinner = NSProgressIndicator()
     private let grid = NSGridView()
     private var fileRows: [Int] = []
     private var serverRows: [Int] = []
+    private var postgresRows: [Int] = []
+    private var mysqlRows: [Int] = []
     private var sshRows: [Int] = []
     private var sshKeyRows: [Int] = []
     private var testTask: Task<Void, Never>?
@@ -106,6 +122,11 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         passwordModePopup.addItems(withTitles: ["Save in Keychain", "Ask every time", "No password"])
         passwordModePopup.target = self
         passwordModePopup.action = #selector(passwordModeChanged(_:))
+        tlsPopup.target = self
+        tlsPopup.action = #selector(tlsModeChanged(_:))
+        negotiationPopup.addItems(withTitles: ["PostgreSQL", "Direct"])
+        negotiationPopup.toolTip = "Direct starts TLS at once, without asking the server first (PostgreSQL 17 and later)."
+        serverNameField.placeholderString = "Same as the host"
         for f in [caField, certField, keyField] {
             f.placeholderString = "None"
             f.lineBreakMode = .byTruncatingMiddle
@@ -159,6 +180,8 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
             ("Password", passwordRow, .server),
             ("Database", databaseField, .server),
             ("TLS", tlsPopup, .server),
+            ("TLS negotiation", negotiationPopup, .postgres),
+            ("SNI server name", serverNameField, .mysql),
             ("CA certificate", row(caField, button("Choose…", #selector(chooseCA(_:)))), .server),
             ("Client certificate", row(certField, button("Choose…", #selector(chooseCert(_:)))), .server),
             ("Client key", row(keyField, button("Choose…", #selector(chooseKey(_:)))), .server),
@@ -174,11 +197,14 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
             ("", safeModeHint, .both),
             ("", readOnlyBox, .both),
             ("Queries folder", row(queriesField, button("Choose…", #selector(chooseQueriesFolder(_:)))), .both),
+            ("Bootstrap", row(bootstrapLabel, button("Edit…", #selector(editBootstrap(_:)))), .both),
         ]
         for (i, (title, view, kind)) in rows.enumerated() {
             grid.addRow(with: [title.isEmpty ? NSGridCell.emptyContentView : NSTextField(labelWithString: title), view])
             if kind == .file { fileRows.append(i) }
-            if kind == .server { serverRows.append(i) }
+            if kind == .server || kind == .postgres || kind == .mysql { serverRows.append(i) }
+            if kind == .postgres { postgresRows.append(i) }
+            if kind == .mysql { mysqlRows.append(i) }
             if kind == .ssh || kind == .sshKey { sshRows.append(i) }
             if kind == .sshKey { sshKeyRows.append(i) }
         }
@@ -193,7 +219,11 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         spinner.style = .spinning
         spinner.controlSize = .small
         spinner.isDisplayedWhenStopped = false
-        let statusRow = NSStackView(views: [spinner, status])
+        changeTypeButton.target = self
+        changeTypeButton.action = #selector(changeType(_:))
+        changeTypeButton.controlSize = .small
+        changeTypeButton.isHidden = true
+        let statusRow = NSStackView(views: [spinner, status, changeTypeButton])
         statusRow.spacing = 6
 
         let test = NSButton(title: "Test", target: self, action: #selector(testClicked(_:)))
@@ -205,7 +235,10 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         let buttons = NSStackView(views: [test, NSView(), cancel, save, connect])
         buttons.spacing = 8
 
-        let stack = NSStackView(views: [grid, statusRow, buttons])
+        openNote.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        openNote.textColor = .secondaryLabelColor
+        openNote.isHidden = true
+        let stack = NSStackView(views: [grid, openNote, statusRow, buttons])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 14
@@ -214,6 +247,7 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         // Holds the grid inside the right inset too; a leading-aligned stack only pins the left.
         grid.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40).isActive = true
         statusRow.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor, constant: -40).isActive = true
+        openNote.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40).isActive = true
 
         let root = NSView()
         root.addSubview(stack)
@@ -221,7 +255,18 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         return root
     }
 
-    private enum Kind { case both, file, server, ssh, sshKey }
+    /// An edited connection with an open workspace: its name, tag, safe mode and queries folder
+    /// follow at once, the rest at its next connect.
+    private func showOpenNote() {
+        let open = !isNew && (isOpenInWorkspace?(config.id) ?? false)
+        openNote.stringValue = open
+            ? "\(config.displayName) is open. Its name, tag, safe mode and queries folder change there at once; other changes apply the next time it connects."
+            : ""
+        openNote.isHidden = !open
+        if let window, let content = window.contentView { window.fit(to: content) }
+    }
+
+    private enum Kind { case both, file, server, postgres, mysql, ssh, sshKey, sqliteSSH }
 
     private func row(_ views: NSView...) -> NSStackView {
         let s = NSStackView(views: views)
@@ -238,6 +283,8 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         let d = driver
         for i in fileRows { grid.row(at: i).isHidden = d.isServer }
         for i in serverRows { grid.row(at: i).isHidden = !d.isServer }
+        for i in postgresRows { grid.row(at: i).isHidden = d != .postgres }
+        for i in mysqlRows { grid.row(at: i).isHidden = d != .mysql && d != .mariadb }
         let ssh = d.isServer && sshBox.state == .on
         for i in sshRows { grid.row(at: i).isHidden = !ssh }
         for i in sshKeyRows where ssh { grid.row(at: i).isHidden = sshKeyBox.state != .on }
@@ -250,6 +297,7 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         tlsPopup.removeAllItems()
         tlsPopup.addItems(withTitles: d.tlsModes.map { d.label(for: $0) })
         if let selected, let i = d.tlsModes.firstIndex(of: selected) { tlsPopup.selectItem(at: i) }
+        updateNegotiation()
         passwordField.isEnabled = passwordModePopup.indexOfSelectedItem != 2
         sshPasswordField.isEnabled = sshPasswordModePopup.indexOfSelectedItem == 0
         window?.title = (isNew ? "New \(d.displayName) Connection" : "Edit \(config.displayName)")
@@ -278,12 +326,16 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         caField.stringValue = c.tlsCAPath
         certField.stringValue = c.tlsCertPath
         keyField.stringValue = c.tlsKeyPath
+        negotiationPopup.selectItem(at: c.tlsDirect ? 1 : 0)
+        serverNameField.stringValue = c.tlsServerName
         tagID = store.tag(id: c.tagID)?.id
         rebuildTagMenu()
         safeModePopup.selectItem(at: SafeMode.allCases.firstIndex(of: c.safeMode) ?? 0)
         safeModeHint.stringValue = c.safeMode.detail
         readOnlyBox.state = c.readOnly ? .on : .off
         queriesField.stringValue = c.queriesFolder
+        bootstrapSQL = c.bootstrapSQL
+        showBootstrapCount()
         sshBox.state = c.overSSH ? .on : .off
         sshHostField.stringValue = c.sshHost
         sshPortField.stringValue = c.sshPort.map(String.init) ?? ""
@@ -315,6 +367,12 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         c.tlsCAPath = text(caField)
         c.tlsCertPath = text(certField)
         c.tlsKeyPath = text(keyField)
+        c.tlsDirect = c.driver == .postgres && negotiationPopup.indexOfSelectedItem == 1
+        c.tlsServerName = c.driver == .mysql || c.driver == .mariadb ? text(serverNameField) : ""
+        // Another server (or type) gets checked again.
+        if c.driver != config.driver || c.host != config.host || c.port != config.port {
+            c.keepsDriverForOtherServer = false
+        }
         c.tagID = tagID
         c.safeMode = SafeMode.allCases[max(0, safeModePopup.indexOfSelectedItem)]
         c.readOnly = readOnlyBox.state == .on
@@ -327,6 +385,7 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         // Named after the connection unless given; renaming the connection later keeps it.
         c.queriesFolder = text(queriesField)
         if c.queriesFolder.isEmpty { c.queriesFolder = SavedQueries.defaultFolder(for: c) }
+        c.bootstrapSQL = bootstrapSQL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : bootstrapSQL
         return c
     }
 
@@ -413,8 +472,26 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
 
     // MARK: - Actions
 
+    /// Direct negotiation applies only when the mode requires TLS.
+    private func updateNegotiation() {
+        let mode = currentTLSModes[safe: tlsPopup.indexOfSelectedItem]
+        negotiationPopup.isEnabled = mode.map { ![.disable, .allow, .prefer].contains($0) } ?? false
+    }
+
+    @objc private func tlsModeChanged(_ sender: Any?) { updateNegotiation() }
+
+    /// Switches the type to what Test found the server to be.
+    @objc private func changeType(_ sender: Any?) {
+        guard let kind = suggestedDriver, let i = DriverKind.allCases.firstIndex(of: kind) else { return }
+        driverPopup.selectItem(at: i)
+        driverChanged(nil)
+    }
+
     @objc private func driverChanged(_ sender: Any?) {
         status.stringValue = ""
+        suggestedDriver = nil
+        changeTypeButton.isHidden = true
+        showBootstrapCount()
         layoutForDriver()
     }
 
@@ -496,6 +573,32 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         }
     }
 
+    // MARK: Bootstrap commands
+
+    @objc func editBootstrap(_ sender: Any?) {
+        guard let anchor = sender as? NSView ?? bootstrapLabel.superview else { return }
+        let controller = BootstrapCommandsController(text: bootstrapSQL, dialect: driver.lexer)
+        controller.onChange = { [weak self] text in
+            self?.bootstrapSQL = text
+            self?.showBootstrapCount()
+        }
+        let popover = NSPopover()
+        popover.contentViewController = controller
+        popover.behavior = .transient
+        popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .maxX)
+        bootstrapPopover = popover
+    }
+
+    /// "None", or how many statements the bootstrap holds.
+    private func showBootstrapCount() {
+        var c = config
+        c.driver = driver
+        c.bootstrapSQL = bootstrapSQL
+        let n = c.bootstrapStatements.count
+        bootstrapLabel.stringValue = n == 0 ? "None" : n == 1 ? "1 statement" : "\(n) statements"
+        bootstrapLabel.textColor = n == 0 ? .secondaryLabelColor : .labelColor
+    }
+
     @objc private func chooseCA(_ sender: Any?) { choose(into: caField, message: "Choose the CA certificate (PEM)") }
     @objc private func chooseCert(_ sender: Any?) { choose(into: certField, message: "Choose the client certificate (PEM)") }
     @objc private func chooseKey(_ sender: Any?) { choose(into: keyField, message: "Choose the client key (PEM)") }
@@ -526,11 +629,21 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         testTask?.cancel()
         spinner.startAnimation(nil)
         status.stringValue = ""
+        changeTypeButton.isHidden = true
         testTask = Task {
             defer { spinner.stopAnimation(nil) }
             do {
-                try await ConnectionFactory.test(c, password: password, ssh: ssh)
+                let server = try await ConnectionFactory.test(c, password: password, ssh: ssh)
                 guard !Task.isCancelled else { return }
+                var tested = c
+                tested.keepsDriverForOtherServer = false
+                if let other = tested.suggestedDriver(forServer: server) {
+                    suggestedDriver = other
+                    setStatus("Connection works. The server is \(other.displayName), not \(c.driver.displayName).", ok: true)
+                    changeTypeButton.title = "Change Type to \(other.displayName)"
+                    changeTypeButton.isHidden = false
+                    return
+                }
                 setStatus("Connection works.", ok: true)
             } catch {
                 guard !Task.isCancelled else { return }

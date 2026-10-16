@@ -28,6 +28,10 @@ public final class PostgresConnection: DatabaseConnection, @unchecked Sendable {
         await host.close()
     }
 
+    public func setKeepAlive(_ interval: Duration?) {
+        host.setKeepAlive(interval)
+    }
+
     /// The backend process serving this connection right now (`pg_backend_pid()`).
     public func backendProcessID() async throws -> Int32 {
         try await host.withSession { $0.processID }

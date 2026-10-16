@@ -70,9 +70,20 @@ public enum ConnectionFactory {
         }
     }
 
-    /// Opens, checks and closes. For the form's Test button.
-    public static func test(_ config: ConnectionConfig, password: String? = nil, ssh: SSHLogin = SSHLogin()) async throws {
-        try await open(config, password: password, ssh: ssh).close()
+    /// Opens, checks and closes. For the form's Test button. Returns what the server is (MySQL or
+    /// MariaDB) for the MySQL family, else nil.
+    @discardableResult
+    public static func test(_ config: ConnectionConfig, password: String? = nil, ssh: SSHLogin = SSHLogin()) async throws -> DriverKind? {
+        let connection = try await open(config, password: password, ssh: ssh)
+        let kind = serverKind(of: connection)
+        await connection.close()
+        return kind
+    }
+
+    /// MySQL or MariaDB, as the server reports its version; nil for other databases.
+    public static func serverKind(of connection: any DatabaseConnection) -> DriverKind? {
+        guard let my = connection as? MySQLConnection else { return nil }
+        return my.isMariaDB ? .mariadb : .mysql
     }
 
     /// The tunnel settings for a connection over SSH.
@@ -142,13 +153,15 @@ public enum ConnectionFactory {
         }
         return PostgresConfiguration(
             endpoint: endpoint, user: c.user.isEmpty ? NSUserName() : c.user, password: password,
-            database: c.database.isEmpty ? nil : c.database, tls: tls(c), readOnly: c.readOnly)
+            database: c.database.isEmpty ? nil : c.database, tls: tls(c), directTLS: c.tlsDirect, readOnly: c.readOnly,
+            bootstrap: c.bootstrapStatements)
     }
 
     static func mysqlConfiguration(_ c: ConnectionConfig, password: String?) -> MySQLConfiguration {
         MySQLConfiguration(
             endpoint: endpoint(c), user: c.user.isEmpty ? "root" : c.user, password: password ?? "",
-            database: c.database.isEmpty ? nil : c.database, tls: tls(c), readOnly: c.readOnly)
+            database: c.database.isEmpty ? nil : c.database, tls: tls(c), readOnly: c.readOnly,
+            bootstrap: c.bootstrapStatements)
     }
 
     private static func endpoint(_ c: ConnectionConfig) -> Endpoint {
@@ -162,9 +175,11 @@ public enum ConnectionFactory {
             let t = s.trimmingCharacters(in: .whitespaces)
             return t.isEmpty ? nil : (t as NSString).expandingTildeInPath
         }
+        let name = c.tlsServerName.trimmingCharacters(in: .whitespaces)
         return TLSSettings(
             mode: c.tlsMode, caCertificatePath: path(c.tlsCAPath),
-            clientCertificatePath: path(c.tlsCertPath), clientKeyPath: path(c.tlsKeyPath))
+            clientCertificatePath: path(c.tlsCertPath), clientKeyPath: path(c.tlsKeyPath),
+            serverName: name.isEmpty ? nil : name)
     }
 
     private static func openSQLite(_ config: ConnectionConfig) async throws -> any DatabaseConnection {
@@ -184,6 +199,15 @@ public enum ConnectionFactory {
         } catch {
             await connection.close()
             throw error
+        }
+        // A file has one session, opened once, so its bootstrap runs once.
+        for sql in config.bootstrapStatements {
+            do {
+                _ = try await connection.execute(SQLStatement(sql))
+            } catch {
+                await connection.close()
+                throw DatabaseError.bootstrap(error, sql: sql)
+            }
         }
         return connection
     }

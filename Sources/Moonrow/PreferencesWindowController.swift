@@ -114,6 +114,10 @@ final class GeneralPreferences: NSViewController {
     private let safeModeHint = hint("")
     let reopenCheckbox = NSButton(checkboxWithTitle: "Reopen workspaces at launch", target: nil, action: nil)
     let parametersCheckbox = NSButton(checkboxWithTitle: "Ask for query parameters before running", target: nil, action: nil)
+    let timeoutField = NSTextField()
+    let keepAliveCheckbox = NSButton(checkboxWithTitle: "Keep connections alive", target: nil, action: nil)
+    let touchIDCheckbox = NSButton(checkboxWithTitle: "Use Touch ID instead of the password", target: nil, action: nil)
+    private let touchIDHint = hint("")
     private let updater: SPUUpdater
     let updatesCheckbox = NSButton(checkboxWithTitle: "Automatically check for updates", target: nil, action: nil)
     private let lastCheckHint = hint("")
@@ -138,6 +142,21 @@ final class GeneralPreferences: NSViewController {
         reopenCheckbox.action = #selector(changed(_:))
         parametersCheckbox.target = self
         parametersCheckbox.action = #selector(changed(_:))
+        let seconds = NumberFormatter()
+        seconds.allowsFloats = false
+        seconds.minimum = NSNumber(value: AppSettings.queryTimeouts.lowerBound)
+        seconds.maximum = NSNumber(value: AppSettings.queryTimeouts.upperBound)
+        timeoutField.formatter = seconds
+        timeoutField.alignment = .right
+        timeoutField.widthAnchor.constraint(equalToConstant: 70).isActive = true
+        timeoutField.target = self
+        timeoutField.action = #selector(changed(_:))
+        let timeoutRow = NSStackView(views: [timeoutField, NSTextField(labelWithString: "seconds")])
+        timeoutRow.spacing = 6
+        keepAliveCheckbox.target = self
+        keepAliveCheckbox.action = #selector(changed(_:))
+        touchIDCheckbox.target = self
+        touchIDCheckbox.action = #selector(changed(_:))
         // Sparkle keeps this setting in the user defaults.
         updatesCheckbox.bind(.value, to: updater, withKeyPath: #keyPath(SPUUpdater.automaticallyChecksForUpdates))
         let grid = formGrid([
@@ -147,10 +166,17 @@ final class GeneralPreferences: NSViewController {
 
             ("SQL editor", parametersCheckbox),
             ("", hint("Placeholders such as :name, $1 (PostgreSQL) and ? (MySQL, SQLite) are filled in before the statements run.")),
+            ("Query timeout", timeoutRow),
+            ("", hint("A statement in a query tab that runs longer is stopped. 0 means no limit.")),
+
+            ("Connections", keepAliveCheckbox),
+            ("", hint("Workspaces send SELECT 1 on sessions idle for 30 seconds, so servers and firewalls don't close them.")),
 
             ("Safe mode for new connections", safeModePopup),
             ("", safeModeHint),
             ("", hint("Each connection keeps its own level: set it in the connection's form, or from the shield in a workspace's toolbar.")),
+            ("", touchIDCheckbox),
+            ("", touchIDHint),
 
             ("Updates", updatesCheckbox),
             ("", lastCheckHint),
@@ -175,6 +201,12 @@ final class GeneralPreferences: NSViewController {
         safeModeHint.stringValue = s.defaultSafeMode.detail
         reopenCheckbox.state = s.reopenWorkspaces ? .on : .off
         parametersCheckbox.state = s.queryParameters ? .on : .off
+        timeoutField.integerValue = s.queryTimeout
+        keepAliveCheckbox.state = s.keepAlive ? .on : .off
+        touchIDCheckbox.state = s.safeModeTouchID ? .on : .off
+        touchIDHint.stringValue = BiometricUnlock.isAvailable
+            ? "Where safe mode asks for the password, Touch ID can answer, and the password still works."
+            : "This Mac has no Touch ID set up."
         lastCheckHint.stringValue = updater.lastUpdateCheckDate.map {
             "Last checked \($0.formatted(date: .abbreviated, time: .shortened))."
         } ?? "Not checked yet."
@@ -185,11 +217,17 @@ final class GeneralPreferences: NSViewController {
         let safeMode = SafeMode.allCases[max(0, safeModePopup.indexOfSelectedItem)]
         let reopen = reopenCheckbox.state == .on
         let parameters = parametersCheckbox.state == .on
+        let timeout = timeoutField.stringValue.isEmpty ? AppSettings().queryTimeout : timeoutField.integerValue
+        let keepAlive = keepAliveCheckbox.state == .on
+        let touchID = touchIDCheckbox.state == .on
         save(settings, in: view) {
             $0.appearance = appearance
             $0.defaultSafeMode = safeMode
             $0.reopenWorkspaces = reopen
             $0.queryParameters = parameters
+            $0.queryTimeout = min(max(timeout, AppSettings.queryTimeouts.lowerBound), AppSettings.queryTimeouts.upperBound)
+            $0.keepAlive = keepAlive
+            $0.safeModeTouchID = touchID
         }
         refresh()
         // Safe-mode hints run from one line to two; the grid is pinned top and bottom.

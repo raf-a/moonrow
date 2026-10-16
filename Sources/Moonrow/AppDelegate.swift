@@ -69,11 +69,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         if old.keyBindings != settings.settings.keyBindings {
             NSApp.mainMenu = MainMenu.build(keyBindings: settings.settings.keyBindings)
         }
+        if old.keepAlive != settings.settings.keepAlive {
+            for w in workspaces { w.connection.setKeepAlive(keepAliveInterval) }
+        }
     }
+
+    /// How often idle workspace sessions are pinged; nil when Keep connection alive is off.
+    var keepAliveInterval: Duration? { settings.settings.keepAlive ? .seconds(30) : nil }
 
     /// Workspace titles follow edits to a connection's tag and to the tags themselves.
     @objc private func storeChanged() {
-        for w in workspaces { w.tag = tag(of: w.config) }
+        for w in workspaces {
+            w.tag = tag(of: w.config)
+            if let saved = store.connection(id: w.config.id) { w.follow(saved) }
+        }
     }
 
     /// The saved connection's tag (its config as opened when it isn't saved).
@@ -367,6 +376,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             return
         }
         let form = ConnectionFormWindowController(config: config, isNew: isNew, store: store, secrets: secrets, dataRoot: dataRoot)
+        form.isOpenInWorkspace = { [weak self] id in self?.workspaces.contains { $0.config.id == id } ?? false }
         form.onQueriesFolderChange = { [weak self] config, change, transfer in
             try self?.changeQueriesFolder(of: config, change, transfer)
         }
@@ -410,15 +420,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
                     }
                 }
                 let ssh = sshLogin(for: config, password: sshPassword, in: window)
-                let workspace = openWorkspace(
-                    config, try await ConnectionFactory.open(config, password: login, ssh: ssh), password: login, placement: placement)
+                let connection = try await ConnectionFactory.open(config, password: login, ssh: ssh)
+                let workspace = openWorkspace(config, connection, password: login, placement: placement)
                 // Running Queries opens a session of its own the same way.
                 workspace.openSession = { try await ConnectionFactory.open(config, password: login, ssh: ssh) }
                 onOpen?(workspace)
+                offerServerKind(ConnectionFactory.serverKind(of: connection), for: config, in: workspace)
             } catch {
                 present(error, title: "Couldn't connect to \(config.displayName)", in: window)
                 onFailure?()
             }
+        }
+    }
+
+    /// A MySQL connection that reached a MariaDB server (or the other way round) offers to change
+    /// its type, or to keep it, which is remembered. The open workspace keeps its type until the
+    /// next connect.
+    private func offerServerKind(_ server: DriverKind?, for config: ConnectionConfig, in workspace: WorkspaceWindowController) {
+        guard var saved = store.connection(id: config.id), let other = saved.suggestedDriver(forServer: server),
+              let window = workspace.window else { return }
+        let alert = NSAlert()
+        alert.messageText = "“\(config.displayName)” is a \(other.displayName) server"
+        alert.informativeText = "It's saved as a \(saved.driver.displayName) connection."
+        alert.addButton(withTitle: "Change to \(other.displayName)")
+        alert.addButton(withTitle: "Keep \(saved.driver.displayName)")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            if response == .alertFirstButtonReturn {
+                saved.driver = other
+            } else {
+                saved.keepsDriverForOtherServer = true
+            }
+            do { try self?.store.save(saved) } catch { present(error, title: "Couldn't save the connection", in: window) }
         }
     }
 
@@ -517,6 +549,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             config: config, tag: tag(of: config), connection: connection, history: history, savedQueries: saved,
             password: password)
         workspace.environment.columnLayouts = layouts
+        connection.setKeepAlive(keepAliveInterval)
         // A level picked in the toolbar is kept with the saved connection.
         workspace.safety.onLevelChange = { [weak self] level in
             guard let self, var saved = self.store.connection(id: config.id) else { return }

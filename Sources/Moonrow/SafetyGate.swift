@@ -1,6 +1,33 @@
 import AppCore
 import AppKit
+import LocalAuthentication
 import SQLScript
+
+/// Touch ID for safe mode (Settings ▸ General).
+@MainActor
+enum BiometricUnlock {
+    /// For the dev harness: answers in place of Touch ID, and makes it count as available.
+    static var override: ((String) async -> Bool)?
+
+    /// Touch ID is set up on this Mac.
+    static var isAvailable: Bool {
+        if override != nil { return true }
+        var error: NSError?
+        return LAContext().canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error)
+    }
+
+    /// Whether password prompts offer Touch ID: turned on, and there is Touch ID.
+    static var isOffered: Bool { AppStyle.settings.safeModeTouchID && isAvailable }
+
+    /// Asks for a fingerprint; `reason` completes "Moonrow is trying to …". False when it fails or
+    /// is cancelled.
+    static func authenticate(reason: String) async -> Bool {
+        if let override { return await override(reason) }
+        let context = LAContext()
+        context.localizedFallbackTitle = ""
+        return (try? await context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: reason)) ?? false
+    }
+}
 
 /// A workspace's safe mode: decides whether statements the user sends need a confirmation or
 /// the password first, and asks with a sheet on the workspace window.
@@ -68,6 +95,13 @@ final class SafetyGate {
         NotificationCenter.default.post(name: Self.levelDidChange, object: self)
     }
 
+    /// Takes the level the saved connection now has (edited in its form, which asks nothing).
+    func follow(_ saved: SafeMode) {
+        guard saved != level else { return }
+        level = saved
+        NotificationCenter.default.post(name: Self.levelDidChange, object: self)
+    }
+
     private func show(_ prompt: SafetyPrompt, in window: NSWindow) async -> Bool {
         self.prompt = prompt
         defer { if self.prompt === prompt { self.prompt = nil } }
@@ -84,9 +118,15 @@ final class SafetyPrompt: NSObject, NSTextFieldDelegate {
     private let errorLabel = NSTextField(labelWithString: "")
     private let credential: SafetyCredential?
     private var continuation: CheckedContinuation<Bool, Never>?
+    /// Shown when Touch ID may answer for the password.
+    let touchIDButton = NSButton(title: "Use Touch ID", target: nil, action: nil)
+    private let usesTouchID: Bool
+    private let touchIDReason: String
 
     init(title: String, message: String, sql: String?, credential: SafetyCredential?, connectionName: String, confirm: String) {
         self.credential = credential
+        usesTouchID = credential != nil && BiometricUnlock.isOffered
+        touchIDReason = "unlock safe mode for “\(connectionName)”"
         sheet = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 200), styleMask: [.titled], backing: .buffered, defer: true)
         super.init()
         sheet.title = title
@@ -135,7 +175,12 @@ final class SafetyPrompt: NSObject, NSTextFieldDelegate {
         cancel.keyEquivalent = "\u{1b}"
         let ok = NSButton(title: confirm, target: self, action: #selector(confirm(_:)))
         ok.keyEquivalent = "\r"
-        let buttons = NSStackView(views: [NSView(), cancel, ok])
+        touchIDButton.target = self
+        touchIDButton.action = #selector(useTouchID(_:))
+        touchIDButton.image = NSImage(systemSymbolName: "touchid", accessibilityDescription: nil)
+        touchIDButton.imagePosition = .imageLeading
+        touchIDButton.isHidden = !usesTouchID
+        let buttons = NSStackView(views: [touchIDButton, NSView(), cancel, ok])
         buttons.spacing = 8
         views.append(buttons)
 
@@ -153,10 +198,23 @@ final class SafetyPrompt: NSObject, NSTextFieldDelegate {
         sheet.initialFirstResponder = credential == nil ? ok : passwordField
     }
 
+    /// Shows the sheet until it's answered. With Touch ID offered, it's asked for at once; the
+    /// password field stays for when it fails or is cancelled.
     func run(on window: NSWindow) async -> Bool {
         await withCheckedContinuation { c in
             continuation = c
             window.beginSheet(sheet)
+            // Once the sheet is up, so Touch ID's own panel comes over it.
+            if usesTouchID { DispatchQueue.main.async { self.useTouchID(nil) } }
+        }
+    }
+
+    @objc func useTouchID(_ sender: Any?) {
+        touchIDButton.isEnabled = false
+        Task {
+            let ok = await BiometricUnlock.authenticate(reason: touchIDReason)
+            touchIDButton.isEnabled = true
+            if ok, continuation != nil { finish(true) }
         }
     }
 

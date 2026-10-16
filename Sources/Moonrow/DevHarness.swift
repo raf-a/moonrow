@@ -1044,6 +1044,31 @@ enum DevHarness {
         p.respond(password: answer)
         print("right answer: \(try await finished())")
 
+        // Touch ID answers in place of the password (a stand-in here); a failed one leaves the
+        // sheet and its password field.
+        try app.settings.update { $0.safeModeTouchID = true }
+        _ = try await waitFor("previous run done") { !query.isRunning && !query.isAwaitingApproval ? true : nil }
+        let asked = HarnessLog()
+        BiometricUnlock.override = { reason in
+            asked.add(reason)
+            return true
+        }
+        run("select count(*) from \(table)")
+        _ = try await waitFor("Touch ID asked") { asked.lines.isEmpty ? nil : true }
+        _ = try await waitFor("sheet closed") { gate.prompt == nil ? true : nil }
+        print("touch id: \(try await finished()); asked \(asked.lines.count) time(s), to \(asked.lines.first ?? "-")")
+        BiometricUnlock.override = { _ in false }
+        _ = try await waitFor("previous run done") { !query.isRunning && !query.isAwaitingApproval ? true : nil }
+        run("select count(*) from \(table)")
+        p = try await prompt()
+        try await Task.sleep(for: .milliseconds(100))
+        snap("s2b-touch-id-sheet.png", p.sheet)
+        print("touch id failed: sheet still open \(p.sheet.isVisible), Use Touch ID shown \(!p.touchIDButton.isHidden)")
+        p.respond(password: answer)
+        print("then the password: \(try await finished())")
+        BiometricUnlock.override = nil
+        try app.settings.update { $0.safeModeTouchID = false }
+
         let lowering = Task { await gate.change(to: .silent) }
         p = try await prompt()
         snap("s3-lowering-sheet.png", p.sheet)
@@ -1051,6 +1076,14 @@ enum DevHarness {
         await lowering.value
         print("lowered to: \(gate.level.title)")
         snap("s4-toolbar.png", window)
+    }
+
+    /// Lines collected from callbacks.
+    final class HarnessLog: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: [String] = []
+        func add(_ line: String) { lock.withLock { stored.append(line) } }
+        var lines: [String] { lock.withLock { stored } }
     }
 
     /// Each settings pane, a rebinding from the Keymap pane, then a workspace in another style.

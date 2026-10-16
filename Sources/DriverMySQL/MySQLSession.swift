@@ -14,11 +14,13 @@ public struct MySQLConfiguration: Sendable, Hashable {
     public var readOnly: Bool
     /// Seconds to wait for the socket to connect.
     public var connectTimeout: TimeInterval
+    /// Statements every new session runs right after logging in, before anything else.
+    public var bootstrap: [String]
 
     public init(
         endpoint: Endpoint = .tcp(host: "127.0.0.1", port: 3306), user: String = "root", password: String = "",
         database: String? = nil, tls: TLSSettings = TLSSettings(), readOnly: Bool = false,
-        connectTimeout: TimeInterval = 15
+        connectTimeout: TimeInterval = 15, bootstrap: [String] = []
     ) {
         self.endpoint = endpoint
         self.user = user
@@ -27,6 +29,7 @@ public struct MySQLConfiguration: Sendable, Hashable {
         self.tls = tls
         self.readOnly = readOnly
         self.connectTimeout = connectTimeout
+        self.bootstrap = bootstrap
     }
 }
 
@@ -121,6 +124,21 @@ final class MySQLSession: WireSession, @unchecked Sendable {
         self.connectionID = connectionID
         self.serverVersion = serverVersion
         self.capabilities = capabilities
+    }
+
+    /// A session ready for statements: logged in, then the bootstrap commands run (and logged).
+    static func open(_ c: MySQLConfiguration, log: StatementLog?) async throws -> MySQLSession {
+        let session = try await open(c)
+        session.log = log
+        for sql in c.bootstrap {
+            do {
+                _ = try await session.collect(SQLStatement(sql))
+            } catch {
+                await session.close()
+                throw DatabaseError.bootstrap(error, sql: sql)
+            }
+        }
+        return session
     }
 
     static func open(_ c: MySQLConfiguration) async throws -> MySQLSession {
@@ -296,6 +314,10 @@ final class MySQLSession: WireSession, @unchecked Sendable {
     }
 
     // MARK: - Statements
+
+    func ping() async throws {
+        try await send(SQLStatement("SELECT 1"), batchSize: 1, cancel: CancelSignal()) { _ in }
+    }
 
     func run(
         _ statement: SQLStatement, batchSize: Int, cancel: CancelSignal,

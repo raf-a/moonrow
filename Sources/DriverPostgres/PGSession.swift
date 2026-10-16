@@ -18,11 +18,13 @@ public struct PostgresConfiguration: Sendable, Hashable {
     public var applicationName: String
     /// Seconds.
     public var connectTimeout: Int64
+    /// Statements every new session runs right after logging in, before anything else.
+    public var bootstrap: [String]
 
     public init(
         endpoint: Endpoint, user: String, password: String? = nil, database: String? = nil,
         tls: TLSSettings = TLSSettings(), directTLS: Bool = false, readOnly: Bool = false,
-        applicationName: String = "Moonrow", connectTimeout: Int64 = 15
+        applicationName: String = "Moonrow", connectTimeout: Int64 = 15, bootstrap: [String] = []
     ) {
         self.endpoint = endpoint
         self.user = user
@@ -33,6 +35,7 @@ public struct PostgresConfiguration: Sendable, Hashable {
         self.readOnly = readOnly
         self.applicationName = applicationName
         self.connectTimeout = connectTimeout
+        self.bootstrap = bootstrap
     }
 }
 
@@ -61,9 +64,18 @@ final class PGSession: WireSession, @unchecked Sendable {
 
     // MARK: - Connecting
 
+    /// A session ready for statements: logged in, then the bootstrap commands run (and logged).
     static func open(_ c: PostgresConfiguration, log: StatementLog?) async throws -> PGSession {
         let session = try await open(c)
         session.log = log
+        for sql in c.bootstrap {
+            do {
+                try await session.query(sql)
+            } catch {
+                await session.close()
+                throw DatabaseError.bootstrap(error, sql: sql)
+            }
+        }
         return session
     }
 
@@ -229,6 +241,10 @@ final class PGSession: WireSession, @unchecked Sendable {
     }
 
     // MARK: - Statements
+
+    func ping() async throws {
+        try await send(SQLStatement("SELECT 1"), batchSize: 1, cancel: CancelSignal()) { _ in }
+    }
 
     func run(
         _ statement: SQLStatement, batchSize: Int, cancel: CancelSignal,
