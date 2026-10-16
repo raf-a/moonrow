@@ -774,8 +774,18 @@ final class HistoryViewController: SidebarListController, NSOutlineViewDataSourc
     private var reloading = false
     /// Measures entries' SQL for their rows' heights.
     private lazy var measure = HistoryCell.makeSQLLabel()
+    /// Where an entry's content starts in its cell, in line with the headings' text (the outline
+    /// sets headings' cells further in), and how far in from the column's edges the outline puts
+    /// entries' cells. Taken from laid-out rows; they don't change with the width.
+    private var entryInset = HistoryCell.margin
+    private var entryEdges: (leading: CGFloat, trailing: CGFloat) = (0, 0)
     /// The width rows were last measured at.
     private var measuredWidth: CGFloat = 0
+
+    /// The width entries' SQL wraps at.
+    private var sqlWidth: CGFloat {
+        max(0, outline.rect(ofColumn: 0).width - entryEdges.leading - entryEdges.trailing - entryInset - HistoryCell.margin)
+    }
 
     init(history: QueryHistory, dialect: LexerDialect) {
         self.history = history
@@ -793,6 +803,7 @@ final class HistoryViewController: SidebarListController, NSOutlineViewDataSourc
         search.placeholderString = "Search history"
         outline.dataSource = self
         outline.delegate = self
+        outline.rowSizeStyle = .default
         outline.floatsGroupRows = false
         outline.autosaveExpandedItems = false
         let menu = NSMenu()
@@ -811,21 +822,37 @@ final class HistoryViewController: SidebarListController, NSOutlineViewDataSourc
     @objc private func historyChanged() { reloadList() }
 
     /// Entries wrap, so a new width means new heights. The column follows the sidebar's width.
-    func outlineViewColumnDidResize(_ notification: Notification) {
-        let width = sqlWidth
-        guard width != measuredWidth, outline.numberOfRows > 0 else { return }
-        measuredWidth = width
+    func outlineViewColumnDidResize(_ notification: Notification) { remeasureRows() }
+
+    /// Measures rows again when the SQL's width has changed since.
+    private func remeasureRows() {
+        guard sqlWidth != measuredWidth, outline.numberOfRows > 0 else { return }
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0
             outline.noteHeightOfRows(withIndexesChanged: IndexSet(integersIn: 0..<outline.numberOfRows))
         }
     }
 
-    /// The SQL's width in an entry's row: its cell's less the cell's margins. Entries are a level
-    /// in from the headings.
-    private var sqlWidth: CGFloat {
-        let cell = outline.rect(ofColumn: 0)
-        return max(0, cell.width - outline.indentationPerLevel - 2 * HistoryCell.margin)
+    /// Takes `entryInset` and `entryEdges` from laid-out rows, then measures rows again if they
+    /// changed. Not while rows are being measured: placing a cell needs their heights.
+    private func measureEntryLayout() {
+        let rows = 0..<outline.numberOfRows
+        guard let h = rows.first(where: { outline.item(atRow: $0) is Section }),
+              let e = rows.first(where: { outline.item(atRow: $0) is Node }) else { return }
+        // The views as placed: a group row's cell isn't where `frameOfCell` says.
+        guard let headingView = outline.view(atColumn: 0, row: h, makeIfNecessary: false),
+              let entryView = outline.view(atColumn: 0, row: e, makeIfNecessary: false),
+              headingView.bounds.width > 0, entryView.bounds.width > 0 else { return }
+        let heading = headingView.convert(headingView.bounds, to: outline)
+        let cell = entryView.convert(entryView.bounds, to: outline)
+        let column = outline.rect(ofColumn: 0)
+        let inset = heading.minX + HeadingCell.inset - cell.minX
+        if inset != entryInset {
+            entryInset = inset
+            outline.enumerateAvailableRowViews { rowView, _ in (rowView.view(atColumn: 0) as? HistoryCell)?.inset = inset }
+        }
+        entryEdges = (cell.minX - column.minX, column.maxX - cell.maxX)
+        remeasureRows()
     }
 
     override func reloadList() {
@@ -835,6 +862,8 @@ final class HistoryViewController: SidebarListController, NSOutlineViewDataSourc
         outline.reloadData()
         for section in sections where !collapsed.contains(section.title) { outline.expandItem(section) }
         reloading = false
+        // Once the rows are laid out.
+        DispatchQueue.main.async { [weak self] in self?.measureEntryLayout() }
         empty.stringValue = history.entries.isEmpty ? "No History" : "No Results"
         empty.isHidden = !found.isEmpty
     }
@@ -872,6 +901,8 @@ final class HistoryViewController: SidebarListController, NSOutlineViewDataSourc
     func outlineViewItemDidExpand(_ notification: Notification) {
         guard !reloading, let section = notification.userInfo?["NSObject"] as? Section else { return }
         collapsed.remove(section.title)
+        // The first entries shown may be these.
+        DispatchQueue.main.async { [weak self] in self?.measureEntryLayout() }
     }
 
     func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
@@ -884,14 +915,16 @@ final class HistoryViewController: SidebarListController, NSOutlineViewDataSourc
         guard let node = item as? Node else { return nil }
         let id = NSUserInterfaceItemIdentifier("History")
         let cell = outlineView.makeView(withIdentifier: id, owner: nil) as? HistoryCell ?? HistoryCell()
+        cell.inset = entryInset
         cell.show(node.entry, dialect: dialect)
         return cell
     }
 
     func outlineView(_ outlineView: NSOutlineView, heightOfRowByItem item: Any) -> CGFloat {
         guard let node = item as? Node else { return HeadingCell.height }
-        measuredWidth = sqlWidth
         measure.attributedStringValue = HistoryCell.styled(node.entry.sql, dialect: dialect)
+        // Until rows are laid out, from guessed edges; `measureEntryLayout` corrects them.
+        measuredWidth = sqlWidth
         measure.preferredMaxLayoutWidth = measuredWidth
         return HistoryCell.height(sql: ceil(measure.intrinsicContentSize.height))
     }
@@ -944,9 +977,12 @@ final class HistoryViewController: SidebarListController, NSOutlineViewDataSourc
         override var allowsVibrancy: Bool { false }
     }
 
-    /// A date heading, with room above it to set it apart from the entries before.
+    /// A date heading, as tall as the Items pane's and placed as they are.
     private final class HeadingCell: NSTableCellView {
-        static let height: CGFloat = 28
+        /// A source list's group rows, as the system sizes the Items pane's.
+        static let height: CGFloat = 19
+        /// The text's distance from the cell's leading edge.
+        static let inset: CGFloat = 2
         let label = SolidLabel(labelWithString: "")
 
         init(identifier: NSUserInterfaceItemIdentifier) {
@@ -957,8 +993,8 @@ final class HistoryViewController: SidebarListController, NSOutlineViewDataSourc
             label.translatesAutoresizingMaskIntoConstraints = false
             addSubview(label)
             NSLayoutConstraint.activate([
-                label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
-                label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -5),
+                label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.inset),
+                label.centerYAnchor.constraint(equalTo: centerYAnchor),
             ])
         }
 
@@ -981,6 +1017,11 @@ final class HistoryViewController: SidebarListController, NSOutlineViewDataSourc
         private let when = SolidLabel(labelWithString: "")
         private let sql = makeSQLLabel()
         private let status = SolidImageView()
+        private var leading: [NSLayoutConstraint] = []
+        /// Where the mark and the SQL start.
+        var inset = margin {
+            didSet { for c in leading { c.constant = inset } }
+        }
 
         /// Up to `maxLines` lines, the last cut with an ellipsis.
         static func makeSQLLabel() -> NSTextField {
@@ -1041,19 +1082,23 @@ final class HistoryViewController: SidebarListController, NSOutlineViewDataSourc
                 v.translatesAutoresizingMaskIntoConstraints = false
                 addSubview(v)
             }
-            NSLayoutConstraint.activate([
-                status.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.margin),
+            leading = [
+                status.leadingAnchor.constraint(equalTo: leadingAnchor, constant: inset),
+                sql.leadingAnchor.constraint(equalTo: leadingAnchor, constant: inset),
+            ]
+            NSLayoutConstraint.activate(leading + [
                 status.centerYAnchor.constraint(equalTo: when.centerYAnchor),
                 when.leadingAnchor.constraint(equalTo: status.trailingAnchor, constant: 4),
                 when.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -8),
                 when.topAnchor.constraint(equalTo: topAnchor, constant: Self.topMargin),
-                sql.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.margin),
                 sql.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.margin),
                 sql.topAnchor.constraint(equalTo: when.bottomAnchor, constant: 2),
             ])
             // The row is measured to fit; if it falls short for a moment the SQL gives way, not the
             // time. Not required: a new cell starts out with no height.
             when.setContentCompressionResistancePriority(.required, for: .vertical)
+            when.setContentHuggingPriority(.required, for: .vertical)
+            sql.setContentHuggingPriority(.defaultLow, for: .vertical)
             sql.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
             let bottom = sql.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Self.bottomMargin)
             bottom.priority = .init(999)
