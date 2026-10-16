@@ -288,10 +288,19 @@ public struct ConnectionConfig: Codable, Hashable, Sendable, Identifiable {
         SQLSplitter.split(bootstrapSQL, dialect: driver.lexer).map(\.text)
     }
 
-    /// Whether connecting goes through SSH (servers only).
-    public var usesSSH: Bool { driver.isServer && overSSH }
+    /// Whether connecting goes through SSH: a server's sockets, or a SQLite file on the SSH
+    /// server (`filePath` is then the path there, and its own sqlite3 runs the statements).
+    public var usesSSH: Bool { overSSH }
 
-    public var expandedFilePath: String { (filePath as NSString).expandingTildeInPath }
+    /// SQLite over SSH: the sqlite3 to run on the server.
+    public var remoteSQLiteCommand: String {
+        let c = sqliteCommand.trimmingCharacters(in: .whitespaces)
+        return c.isEmpty ? "sqlite3" : c
+    }
+
+    /// The file's path on this Mac, `~` expanded; a file on an SSH server keeps its path as typed
+    /// (the server expands `~`).
+    public var expandedFilePath: String { usesSSH ? filePath : (filePath as NSString).expandingTildeInPath }
 
     public var effectivePort: Int { port ?? driver.defaultPort }
 
@@ -333,6 +342,7 @@ public struct ConnectionConfig: Codable, Hashable, Sendable, Identifiable {
             if usesSSH { parts.append("via SSH " + (sshUser.isEmpty ? "" : sshUser + "@") + sshHost) }
         } else if !filePath.isEmpty {
             parts.append(file)
+            if usesSSH { parts.append("on " + (sshUser.isEmpty ? "" : sshUser + "@") + sshHost) }
         }
         if readOnly { parts.append("read-only") }
         if safeMode != .silent { parts.append("safe mode") }

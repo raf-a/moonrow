@@ -65,6 +65,11 @@ let package = Package(
         ),
         .target(name: "DriverPostgres", dependencies: ["DBKit", "WireSupport"]),
         .target(name: "DriverMySQL", dependencies: ["DBKit", "WireSupport"]),
+        // SQLite files on a server, through the server's own sqlite3 over SSH.
+        .target(
+            name: "DriverRemoteSQLite",
+            dependencies: ["DBKit", "SQLScript", "DriverSQLite", "WireSupport", .product(name: "NIOCore", package: "swift-nio")]
+        ),
         // Database sockets carried over the system's OpenSSH client.
         .target(
             name: "SSHTunnel",
@@ -78,7 +83,7 @@ let package = Package(
         // next to the app's executable.
         .executableTarget(name: "moonrow-ssh-helper"),
         // App logic without AppKit, so `swift test` covers it.
-        .target(name: "AppCore", dependencies: ["SQLScript", "DBKit", "WireSupport", "SSHTunnel", "DriverSQLite", "DriverPostgres", "DriverMySQL"]),
+        .target(name: "AppCore", dependencies: ["SQLScript", "DBKit", "WireSupport", "SSHTunnel", "DriverSQLite", "DriverPostgres", "DriverMySQL", "DriverRemoteSQLite"]),
         // The AppKit app. `scripts/build-app.sh` wraps it into Moonrow.app.
         .executableTarget(
             name: "Moonrow",
@@ -97,11 +102,11 @@ let package = Package(
         .testTarget(name: "DriverSQLiteTests", dependencies: ["DriverSQLite"]),
         .testTarget(name: "DriverPostgresTests", dependencies: ["DriverPostgres", "WireSupport"]),
         .testTarget(name: "DriverMySQLTests", dependencies: ["DriverMySQL", "WireSupport"]),
-        .testTarget(name: "AppCoreTests", dependencies: ["AppCore", "WireSupport", "DriverSQLite", "DriverPostgres", "DriverMySQL"]),
+        .testTarget(name: "AppCoreTests", dependencies: ["AppCore", "WireSupport", "DriverSQLite", "DriverPostgres", "DriverMySQL", "DriverRemoteSQLite"]),
         // Depends on the helper so `swift test` builds it next to the test bundle.
         .testTarget(
             name: "SSHTunnelTests",
-            dependencies: ["SSHTunnel", "AppCore", "WireSupport", "DriverPostgres", "DriverMySQL", "moonrow-ssh-helper"],
+            dependencies: ["SSHTunnel", "AppCore", "WireSupport", "DriverPostgres", "DriverMySQL", "DriverSQLite", "DriverRemoteSQLite", "moonrow-ssh-helper"],
             exclude: ["Fixtures"]
         ),
     ]

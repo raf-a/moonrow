@@ -29,14 +29,14 @@ env_vars() {
 }
 
 # OpenSSH on the databases' network: user `moonrow` with a password, and the throwaway keys in
-# Tests/SSHTunnelTests/Fixtures authorized.
+# Tests/SSHTunnelTests/Fixtures authorized. sqlite3 is installed for remote SQLite files.
 up_ssh() {
     docker network create $NETWORK >/dev/null 2>&1 || true
     docker rm -f moonrow-test-ssh >/dev/null 2>&1 || true
     docker run -d --name moonrow-test-ssh --network $NETWORK -p 127.0.0.1:52222:22 \
         -e AUTHORIZED_KEYS="$(cat "$KEYS"/*.pub)" -e PASSWORD=$PASSWORD \
         $SSH_IMAGE sh -c '
-            apk add --no-cache openssh-server >/dev/null && ssh-keygen -A >/dev/null &&
+            apk add --no-cache openssh-server sqlite >/dev/null && ssh-keygen -A >/dev/null &&
             adduser -D -s /bin/sh moonrow && echo "moonrow:$PASSWORD" | chpasswd 2>/dev/null &&
             mkdir -p /home/moonrow/.ssh && echo "$AUTHORIZED_KEYS" > /home/moonrow/.ssh/authorized_keys &&
             chown -R moonrow /home/moonrow/.ssh && chmod 700 /home/moonrow/.ssh &&

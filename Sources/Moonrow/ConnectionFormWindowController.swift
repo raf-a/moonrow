@@ -55,6 +55,10 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
     private let bootstrapLabel = NSTextField(labelWithString: "")
     private(set) var bootstrapPopover: NSPopover?
     private let sshBox = NSButton(checkboxWithTitle: "Connect through an SSH server", target: nil, action: nil)
+    /// SQLite over SSH: the server's sqlite3.
+    private let sqliteCommandField = NSTextField()
+    private var chooseFileButton: NSButton!
+    private let sshHint = NSTextField(wrappingLabelWithString: "")
     private let sshHostField = NSTextField()
     private let sshPortField = NSTextField()
     private let sshUserField = NSTextField()
@@ -75,6 +79,7 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
     private var mysqlRows: [Int] = []
     private var sshRows: [Int] = []
     private var sshKeyRows: [Int] = []
+    private var sqliteSSHRows: [Int] = []
     private var testTask: Task<Void, Never>?
 
     init(config: ConnectionConfig, isNew: Bool, store: ConnectionStore, secrets: any SecretStore, dataRoot: URL) {
@@ -150,9 +155,7 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         sshPassphraseField.placeholderString = "Asked for when needed"
         queriesField.placeholderString = "Same as the name"
         queriesField.lineBreakMode = .byTruncatingMiddle
-        let sshHint = NSTextField(wrappingLabelWithString:
-            "Without a key file, ssh uses your ~/.ssh/config, the SSH agent and your default keys. "
-            + "Host and port above are as the SSH server sees them.")
+        sqliteCommandField.placeholderString = "sqlite3"
         sshHint.textColor = .secondaryLabelColor
         sshHint.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         sshHint.preferredMaxLayoutWidth = 360
@@ -170,11 +173,12 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         let passwordRow = row(passwordField, passwordModePopup)
         passwordField.widthAnchor.constraint(greaterThanOrEqualToConstant: 180).isActive = true
 
+        chooseFileButton = button("Choose…", #selector(chooseFile(_:)))
         let rows: [(String, NSView, Kind)] = [
             ("Type", driverPopup, .both),
             ("Name", nameField, .both),
             ("Tag", tagPopup, .both),
-            ("Database file", row(pathField, button("Choose…", #selector(chooseFile(_:)))), .file),
+            ("Database file", row(pathField, chooseFileButton), .file),
             ("Host", hostRow, .server),
             ("User", userField, .server),
             ("Password", passwordRow, .both),
@@ -185,13 +189,14 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
             ("CA certificate", row(caField, button("Choose…", #selector(chooseCA(_:)))), .server),
             ("Client certificate", row(certField, button("Choose…", #selector(chooseCert(_:)))), .server),
             ("Client key", row(keyField, button("Choose…", #selector(chooseKey(_:)))), .server),
-            ("SSH", sshBox, .server),
+            ("SSH", sshBox, .both),
             ("SSH server", row(sshHostField, NSTextField(labelWithString: "Port"), sshPortField), .ssh),
             ("SSH user", sshUserField, .ssh),
             ("SSH password", row(sshPasswordField, sshPasswordModePopup), .ssh),
             ("", sshKeyBox, .ssh),
             ("Key file", row(sshKeyField, button("Choose…", #selector(chooseSSHKey(_:)))), .sshKey),
-            ("Passphrase", sshPassphraseField, .sshKey),
+            ("Key passphrase", sshPassphraseField, .sshKey),
+            ("sqlite3 command", sqliteCommandField, .sqliteSSH),
             ("", sshHint, .ssh),
             ("Safe mode", safeModePopup, .both),
             ("", safeModeHint, .both),
@@ -206,6 +211,7 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
             if kind == .postgres { postgresRows.append(i) }
             if kind == .mysql { mysqlRows.append(i) }
             if kind == .ssh || kind == .sshKey { sshRows.append(i) }
+            if kind == .sqliteSSH { sqliteSSHRows.append(i) }
             if kind == .sshKey { sshKeyRows.append(i) }
         }
         grid.rowSpacing = 9
@@ -285,9 +291,19 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         for i in serverRows { grid.row(at: i).isHidden = !d.isServer }
         for i in postgresRows { grid.row(at: i).isHidden = d != .postgres }
         for i in mysqlRows { grid.row(at: i).isHidden = d != .mysql && d != .mariadb }
-        let ssh = d.isServer && sshBox.state == .on
+        let ssh = sshBox.state == .on
         for i in sshRows { grid.row(at: i).isHidden = !ssh }
         for i in sshKeyRows where ssh { grid.row(at: i).isHidden = sshKeyBox.state != .on }
+        for i in sqliteSSHRows { grid.row(at: i).isHidden = !(ssh && !d.isServer) }
+        // A file on the SSH server is a path there, typed; the server's own sqlite3 opens it.
+        chooseFileButton.isHidden = ssh && !d.isServer
+        if let row = grid.cell(for: pathField)?.row, let label = row.cell(at: 0).contentView as? NSTextField {
+            label.stringValue = ssh && !d.isServer ? "File on the server" : "Database file"
+        }
+        pathField.placeholderString = ssh && !d.isServer ? "/var/lib/app/data.sqlite, or ~/data.sqlite" : "/path/to/database.sqlite"
+        sshHint.stringValue = "Without a key file, ssh uses your ~/.ssh/config, the SSH agent and your default keys. "
+            + (d.isServer ? "Host and port above are as the SSH server sees them."
+                          : "The server's own sqlite3 runs the statements on the file there; encrypted files can't be opened this way.")
         hostField.placeholderString = ssh ? "127.0.0.1 (the SSH server itself)" : "127.0.0.1, or a socket path"
         portField.placeholderString = d.isServer ? String(d.defaultPort) : ""
         userField.placeholderString = d == .postgres ? NSUserName() : "root"
@@ -342,6 +358,7 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         bootstrapSQL = c.bootstrapSQL
         showBootstrapCount()
         sshBox.state = c.overSSH ? .on : .off
+        sqliteCommandField.stringValue = c.sqliteCommand
         sshHostField.stringValue = c.sshHost
         sshPortField.stringValue = c.sshPort.map(String.init) ?? ""
         sshUserField.stringValue = c.sshUser
@@ -382,6 +399,7 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         c.safeMode = SafeMode.allCases[max(0, safeModePopup.indexOfSelectedItem)]
         c.readOnly = readOnlyBox.state == .on
         c.overSSH = sshBox.state == .on
+        c.sqliteCommand = c.driver == .sqlite ? text(sqliteCommandField) : ""
         c.sshHost = text(sshHostField)
         c.sshPort = Int(text(sshPortField))
         c.sshUser = text(sshUserField)
