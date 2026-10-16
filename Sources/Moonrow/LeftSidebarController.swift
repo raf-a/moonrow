@@ -797,8 +797,9 @@ final class HistoryViewController: SidebarListController {
     override func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         switch rows[row] {
         case .heading(let title):
-            let label = makeLabel(.systemFont(ofSize: 11, weight: .semibold), color: .secondaryLabelColor)
-            label.stringValue = title
+            let label = SolidLabel(labelWithString: title)
+            label.font = .systemFont(ofSize: 11, weight: .semibold)
+            label.textColor = .secondaryLabelColor
             let cell = NSTableCellView()
             label.translatesAutoresizingMaskIntoConstraints = false
             cell.addSubview(label)
@@ -871,6 +872,12 @@ final class HistoryViewController: SidebarListController {
         alert.beginSheetModal(for: window) { [weak self] response in
             if response == .alertFirstButtonReturn { try? self?.history.clear() }
         }
+    }
+
+    /// A date heading's label. Drawn without vibrancy: blended with the sidebar, its grey washes
+    /// out to barely legible.
+    private final class SolidLabel: NSTextField {
+        override var allowsVibrancy: Bool { false }
     }
 
     private final class HistoryCell: NSTableCellView {
