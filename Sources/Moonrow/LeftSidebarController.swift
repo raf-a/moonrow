@@ -763,6 +763,8 @@ final class HistoryViewController: SidebarListController {
         table.rowHeight = 58
         table.style = .plain
         table.usesAlternatingRowBackgroundColors = false
+        // A plain table paints its own background; the sidebar's shows through the other panes.
+        table.backgroundColor = .clear
         let menu = NSMenu()
         for (title, action) in [("Insert into Editor", #selector(insert(_:))), ("Open in New Tab", #selector(openInNewTab(_:))),
                                 ("Copy", #selector(copy(_:))), ("Delete", #selector(delete(_:)))] {
