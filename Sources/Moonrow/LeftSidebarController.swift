@@ -835,7 +835,7 @@ final class HistoryViewController: SidebarListController {
             return cell
         case .entry(let e):
             let id = NSUserInterfaceItemIdentifier("History")
-            let cell = tableView.makeView(withIdentifier: id, owner: nil) as? HistoryCell ?? HistoryCell(self)
+            let cell = tableView.makeView(withIdentifier: id, owner: nil) as? HistoryCell ?? HistoryCell()
             cell.show(e, dialect: dialect)
             return cell
         }
@@ -902,9 +902,14 @@ final class HistoryViewController: SidebarListController {
         }
     }
 
-    /// A date heading's label. Drawn without vibrancy: blended with the sidebar, its grey washes
-    /// out to barely legible.
+    /// A date heading's label, or an entry's time. Drawn without vibrancy: blended with the
+    /// sidebar, its grey washes out to barely legible.
     private final class SolidLabel: NSTextField {
+        override var allowsVibrancy: Bool { false }
+    }
+
+    /// An entry's success or failure mark, drawn without vibrancy as its time is.
+    private final class SolidImageView: NSImageView {
         override var allowsVibrancy: Bool { false }
     }
 
@@ -915,9 +920,9 @@ final class HistoryViewController: SidebarListController {
         private static let bottomMargin: CGFloat = 6
         private static let font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
         private static let whenFont = NSFont.systemFont(ofSize: 10)
-        private let when: NSTextField
+        private let when = SolidLabel(labelWithString: "")
         private let sql = makeSQLLabel()
-        private let status = NSImageView()
+        private let status = SolidImageView()
 
         /// Up to `maxLines` lines, the last cut with an ellipsis.
         static func makeSQLLabel() -> NSTextField {
@@ -966,11 +971,14 @@ final class HistoryViewController: SidebarListController {
             return out
         }
 
-        init(_ owner: SidebarListController) {
-            when = owner.makeLabel(Self.whenFont, color: .secondaryLabelColor)
+        init() {
             super.init(frame: .zero)
+            when.font = Self.whenFont
+            when.textColor = .secondaryLabelColor
+            when.lineBreakMode = .byTruncatingTail
+            when.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             identifier = NSUserInterfaceItemIdentifier("History")
-            status.symbolConfiguration = .init(pointSize: 9, weight: .regular)
+            status.symbolConfiguration = .init(pointSize: 9, weight: .semibold)
             for v in [status, when, sql] {
                 v.translatesAutoresizingMaskIntoConstraints = false
                 addSubview(v)
