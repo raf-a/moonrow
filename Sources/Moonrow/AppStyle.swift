@@ -265,8 +265,8 @@ final class GlassCapsule: NSView {
     }
 }
 
-/// A search field for the sidebars, quieter than the system's: no bezel, a light grey rounded
-/// fill, as in Xcode's navigators.
+/// A search field for the sidebars, quieter than the system's: no bezel, a grey rounded fill,
+/// as in Xcode's navigators.
 final class SidebarSearchField: NSSearchField {
     static let radius: CGFloat = 7
 
@@ -283,6 +283,16 @@ final class SidebarSearchField: NSSearchField {
         wantsLayer = true
         layer?.cornerRadius = Self.radius
         updateFill()
+        // The clear button in grey, darker while pressed, instead of near black; the cross is the
+        // first layer, the circle the second.
+        func clear(_ color: NSColor) -> NSImage? {
+            NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Clear")?
+                .withSymbolConfiguration(.init(pointSize: 12, weight: .regular).applying(.init(paletteColors: [.textBackgroundColor, color])))
+        }
+        if let button = (cell as? NSSearchFieldCell)?.cancelButtonCell {
+            button.image = clear(.secondaryLabelColor)
+            button.alternateImage = clear(.labelColor)
+        }
     }
 
     @available(*, unavailable)
@@ -290,6 +300,39 @@ final class SidebarSearchField: NSSearchField {
 
     override var intrinsicContentSize: NSSize {
         NSSize(width: super.intrinsicContentSize.width, height: 26)
+    }
+
+    /// A button at the end of the field, after the clear button and a thin separator, such as
+    /// the Search pane's search / stop.
+    private(set) var accessory: NSButton?
+    private let separator = NSBox()
+    /// The room the accessory and its separator take at the end.
+    fileprivate var trailingReserve: CGFloat { accessory == nil ? 0 : 27 }
+
+    func setAccessory(symbol: String, description: String, target: AnyObject?, action: Selector) {
+        let button = NSButton(title: "", target: target, action: action)
+        button.isBordered = false
+        button.imagePosition = .imageOnly
+        button.contentTintColor = .labelColor
+        separator.boxType = .separator
+        addSubview(separator)
+        addSubview(button)
+        accessory = button
+        setAccessorySymbol(symbol, description: description)
+        needsLayout = true
+    }
+
+    func setAccessorySymbol(_ symbol: String, description: String) {
+        accessory?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: description)?
+            .withSymbolConfiguration(.init(pointSize: 12, weight: .medium))
+        accessory?.toolTip = description
+    }
+
+    override func layout() {
+        super.layout()
+        guard let accessory else { return }
+        accessory.frame = NSRect(x: bounds.maxX - 24, y: bounds.midY - 9, width: 20, height: 18)
+        separator.frame = NSRect(x: bounds.maxX - 27, y: bounds.midY - 7, width: 1, height: 14)
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -300,26 +343,28 @@ final class SidebarSearchField: NSSearchField {
     private func updateFill() {
         // Resolved here so the colour follows the appearance.
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            layer?.backgroundColor = NSColor.quaternarySystemFill.cgColor
+            layer?.backgroundColor = NSColor.secondarySystemFill.cgColor
         }
     }
 
     /// Without a bezel the system lays the field out from the top; this centres the magnifier,
-    /// the text and the clear button.
+    /// the text and the clear button, and keeps clear of the accessory.
     private final class Cell: NSSearchFieldCell {
+        private var reserve: CGFloat { (controlView as? SidebarSearchField)?.trailingReserve ?? 0 }
+
         override func searchButtonRect(forBounds rect: NSRect) -> NSRect {
             NSRect(x: rect.minX + 6, y: rect.midY - 8, width: 16, height: 16)
         }
 
         override func cancelButtonRect(forBounds rect: NSRect) -> NSRect {
-            NSRect(x: rect.maxX - 22, y: rect.midY - 8, width: 16, height: 16)
+            NSRect(x: rect.maxX - 22 - reserve, y: rect.midY - 8, width: 16, height: 16)
         }
 
         override func searchTextRect(forBounds rect: NSRect) -> NSRect {
             let font = font ?? .systemFont(ofSize: NSFont.systemFontSize)
             let height = ceil(font.ascender - font.descender + font.leading)
             return NSRect(x: rect.minX + 26, y: (rect.midY - height / 2).rounded(.down),
-                          width: max(0, rect.width - 26 - 24), height: height)
+                          width: max(0, rect.width - 26 - 24 - reserve), height: height)
         }
 
         override func drawingRect(forBounds rect: NSRect) -> NSRect { searchTextRect(forBounds: rect) }
@@ -346,6 +391,84 @@ final class SidebarSearchField: NSSearchField {
                              delegate: Any?, start selStart: Int, length selLength: Int) {
             super.select(withFrame: searchTextRect(forBounds: rect), in: controlView, editor: textObj,
                          delegate: delegate, start: selStart, length: selLength)
+        }
+    }
+}
+
+/// A pop-up button drawn as its text with a lighter up/down chevron right after it: no bezel and
+/// little padding, for a row of options under a sidebar search field. A pull-down shows its first
+/// item, as usual.
+final class InlinePopUpButton: NSPopUpButton {
+    override class var cellClass: AnyClass? {
+        get { Cell.self }
+        set {}
+    }
+
+    override init(frame: NSRect, pullsDown: Bool) {
+        super.init(frame: frame, pullsDown: pullsDown)
+        isBordered = false
+        (cell as? NSPopUpButtonCell)?.arrowPosition = .noArrow
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    // The system sizes and aligns a pop-up for its bezel; without one, the cell's size is the size.
+    override var intrinsicContentSize: NSSize { cell?.cellSize ?? super.intrinsicContentSize }
+    override var alignmentRectInsets: NSEdgeInsets { NSEdgeInsetsZero }
+
+    private final class Cell: NSPopUpButtonCell {
+        static let padding: CGFloat = 2
+        static let gap: CGFloat = 3
+
+        private var shownTitle: String {
+            (pullsDown ? itemArray.first?.title : titleOfSelectedItem) ?? ""
+        }
+
+        private var textFont: NSFont { font ?? .systemFont(ofSize: NSFont.smallSystemFontSize) }
+
+        private var chevron: NSImage? {
+            let config = NSImage.SymbolConfiguration(pointSize: textFont.pointSize - 2, weight: .semibold)
+                .applying(.init(paletteColors: [isEnabled ? .secondaryLabelColor : .tertiaryLabelColor]))
+            return NSImage(systemSymbolName: "chevron.up.chevron.down", accessibilityDescription: nil)?
+                .withSymbolConfiguration(config)
+        }
+
+        private func attributedTitle(truncating: Bool) -> NSAttributedString {
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.lineBreakMode = truncating ? .byTruncatingTail : .byClipping
+            return NSAttributedString(string: shownTitle, attributes: [
+                .font: textFont,
+                .foregroundColor: isEnabled ? (isHighlighted ? NSColor.secondaryLabelColor : .labelColor) : .tertiaryLabelColor,
+                .paragraphStyle: paragraph,
+            ])
+        }
+
+        override func cellSize(forBounds rect: NSRect) -> NSSize {
+            let text = attributedTitle(truncating: false).size()
+            let mark = chevron?.size ?? .zero
+            return NSSize(width: ceil(Self.padding * 2 + text.width + Self.gap + mark.width),
+                          height: max(super.cellSize(forBounds: rect).height, ceil(text.height)))
+        }
+
+        override func draw(withFrame cellFrame: NSRect, in controlView: NSView) {
+            drawInterior(withFrame: cellFrame, in: controlView)
+        }
+
+        /// The text, cut at the end when the row is short, then the chevron.
+        override func drawInterior(withFrame cellFrame: NSRect, in controlView: NSView) {
+            let title = attributedTitle(truncating: true)
+            let mark = chevron
+            let markSize = mark?.size ?? .zero
+            let room = cellFrame.width - Self.padding * 2 - Self.gap - markSize.width
+            let textSize = title.size()
+            let textWidth = min(ceil(textSize.width), max(0, room))
+            let textRect = NSRect(x: cellFrame.minX + Self.padding, y: cellFrame.midY - textSize.height / 2,
+                                  width: textWidth, height: textSize.height)
+            title.draw(with: textRect, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
+            mark?.draw(in: NSRect(x: textRect.maxX + Self.gap, y: (cellFrame.midY - markSize.height / 2).rounded(),
+                                  width: markSize.width, height: markSize.height),
+                       from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
         }
     }
 }
