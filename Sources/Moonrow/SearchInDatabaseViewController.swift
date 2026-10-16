@@ -70,17 +70,16 @@ final class SearchInDatabaseViewController: NSViewController, NSTableViewDataSou
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = false
 
-        // One row: how to match, where, and the Search / Stop button at the right. In a narrow
-        // sidebar the popups shrink, never the button.
-        let controls = NSStackView(views: [operatorPopup, scopeButton, NSView(), startButton])
+        // How to match and where share a row evenly, so in a narrow sidebar both shrink alike;
+        // the Search / Stop button gets the row below to itself.
+        let controls = NSStackView(views: [operatorPopup, scopeButton])
         controls.spacing = 6
+        controls.distribution = .fillEqually
         for popup in [operatorPopup, scopeButton] {
             popup.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         }
-        startButton.setContentCompressionResistancePriority(.required, for: .horizontal)
-        startButton.setContentHuggingPriority(.required, for: .horizontal)
         let root = NSView(frame: NSRect(x: 0, y: 0, width: 250, height: 600))
-        for v in [field, controls, statusLabel, scroll] {
+        for v in [field, controls, startButton, statusLabel, scroll] {
             v.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview(v)
         }
@@ -91,7 +90,10 @@ final class SearchInDatabaseViewController: NSViewController, NSTableViewDataSou
             controls.topAnchor.constraint(equalTo: field.bottomAnchor, constant: 6),
             controls.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 10),
             controls.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -10),
-            statusLabel.topAnchor.constraint(equalTo: controls.bottomAnchor, constant: 6),
+            startButton.topAnchor.constraint(equalTo: controls.bottomAnchor, constant: 6),
+            startButton.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 10),
+            startButton.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -10),
+            statusLabel.topAnchor.constraint(equalTo: startButton.bottomAnchor, constant: 6),
             statusLabel.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
             statusLabel.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
             scroll.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 6),
