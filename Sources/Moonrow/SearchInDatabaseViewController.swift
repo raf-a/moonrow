@@ -18,10 +18,9 @@ final class SearchInDatabaseViewController: NSViewController, NSTableViewDataSou
     /// (`.preview`), a double-click keeps the tab.
     var onOpenRows: ((DatabaseObject, [FilterCondition], TabPlacement.Intent) -> Void)?
 
-    let field: NSSearchField = SidebarSearchField()
-    private let operatorPopup = NSPopUpButton()
-    private let scopeButton = NSPopUpButton(frame: .zero, pullsDown: true)
-    private let startButton = NSButton(title: "Search", target: nil, action: nil)
+    let field = SidebarSearchField()
+    private let operatorPopup = InlinePopUpButton(frame: .zero, pullsDown: false)
+    private let scopeButton = InlinePopUpButton(frame: .zero, pullsDown: true)
     private let statusLabel = NSTextField(labelWithString: "")
     let list = NSTableView()
     /// Tables chosen in the scope menu; empty means every table.
@@ -51,10 +50,7 @@ final class SearchInDatabaseViewController: NSViewController, NSTableViewDataSou
         scopeButton.menu?.delegate = self
         scopeButton.toolTip = "Which tables to search"
         updateScopeTitle()
-        startButton.controlSize = .small
-        startButton.bezelStyle = .rounded
-        startButton.target = self
-        startButton.action = #selector(startOrStop(_:))
+        field.setAccessory(symbol: "return", description: "Search", target: self, action: #selector(startOrStop(_:)))
         statusLabel.font = .systemFont(ofSize: 11)
         statusLabel.textColor = .secondaryLabelColor
         // One line, so the list below never moves as the status changes during a search.
@@ -74,16 +70,18 @@ final class SearchInDatabaseViewController: NSViewController, NSTableViewDataSou
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = false
 
-        // How to match and where share a row evenly, so in a narrow sidebar both shrink alike;
-        // the Search / Stop button gets the row below to itself.
-        let controls = NSStackView(views: [operatorPopup, scopeButton])
-        controls.spacing = 6
-        controls.distribution = .fillEqually
+        // One row: how to match and where, each as wide as its text. In a narrow sidebar the
+        // scope gives way first, then the operator.
+        let controls = NSStackView(views: [operatorPopup, scopeButton, NSView()])
+        controls.spacing = 4
+        controls.distribution = .fill
+        operatorPopup.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        scopeButton.setContentCompressionResistancePriority(.defaultLow - 1, for: .horizontal)
         for popup in [operatorPopup, scopeButton] {
-            popup.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            popup.setContentHuggingPriority(.defaultHigh, for: .horizontal)
         }
         let root = NSView(frame: NSRect(x: 0, y: 0, width: 250, height: 600))
-        for v in [field, controls, startButton, statusLabel, scroll] {
+        for v in [field, controls, statusLabel, scroll] {
             v.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview(v)
         }
@@ -94,10 +92,7 @@ final class SearchInDatabaseViewController: NSViewController, NSTableViewDataSou
             controls.topAnchor.constraint(equalTo: field.bottomAnchor, constant: 6),
             controls.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 10),
             controls.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -10),
-            startButton.topAnchor.constraint(equalTo: controls.bottomAnchor, constant: 6),
-            startButton.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 10),
-            startButton.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -10),
-            statusLabel.topAnchor.constraint(equalTo: startButton.bottomAnchor, constant: 6),
+            statusLabel.topAnchor.constraint(equalTo: controls.bottomAnchor, constant: 6),
             statusLabel.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
             statusLabel.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
             scroll.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 6),
@@ -232,7 +227,7 @@ final class SearchInDatabaseViewController: NSViewController, NSTableViewDataSou
 
     private func setSearching(_ on: Bool) {
         isSearching = on
-        startButton.title = on ? "Stop" : "Search"
+        field.setAccessorySymbol(on ? "stop.fill" : "return", description: on ? "Stop" : "Search")
         if !on { task = nil }
     }
 
