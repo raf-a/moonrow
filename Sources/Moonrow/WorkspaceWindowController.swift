@@ -70,7 +70,8 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
             connectionName: config.displayName, dialect: connection.dialect.lexer)
         environment = QueryEnvironment(connection: connection, history: history, savedQueries: savedQueries, safety: safety)
         sidebar = SidebarViewController(connection: connection)
-        leftSidebar = LeftSidebarController(items: sidebar, savedQueries: savedQueries, history: history)
+        leftSidebar = LeftSidebarController(items: sidebar, savedQueries: savedQueries, history: history,
+                                            dialect: connection.dialect.lexer)
 
         let sideItem = NSSplitViewItem(sidebarWithViewController: leftSidebar)
         sideItem.minimumThickness = 180
