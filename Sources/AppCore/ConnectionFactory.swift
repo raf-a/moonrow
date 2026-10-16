@@ -58,7 +58,7 @@ public enum ConnectionFactory {
     ) async throws -> any DatabaseConnection {
         switch config.driver {
         case .sqlite:
-            return try await openSQLite(config)
+            return try await openSQLite(config, passphrase: config.passwordMode == .none ? nil : password)
         case .postgres:
             var c = postgresConfiguration(config, password: password)
             if config.usesSSH { c.endpoint = try tunnelEndpoint(config, ssh) }
@@ -182,7 +182,8 @@ public enum ConnectionFactory {
             serverName: name.isEmpty ? nil : name)
     }
 
-    private static func openSQLite(_ config: ConnectionConfig) async throws -> any DatabaseConnection {
+    /// `passphrase` opens a SQLCipher database; nil opens a plain one.
+    private static func openSQLite(_ config: ConnectionConfig, passphrase: String?) async throws -> any DatabaseConnection {
         let path = config.expandedFilePath
         guard !path.isEmpty else { throw DatabaseError("Choose a database file.") }
         // SQLite would otherwise create an empty database at a mistyped path.
@@ -192,14 +193,8 @@ public enum ConnectionFactory {
         }
         guard !isDirectory.boolValue else { throw DatabaseError("\(path) is a folder, not a database file.") }
 
-        let connection = try SQLiteConnection(path: path, readOnly: config.readOnly)
-        do {
-            // Opening succeeds for any file; reading the schema is what rejects non-databases.
-            _ = try await connection.execute("SELECT count(*) FROM sqlite_master")
-        } catch {
-            await connection.close()
-            throw error
-        }
+        // Reading the schema (inside `open`) is what rejects non-databases and wrong passphrases.
+        let connection = try await SQLiteConnection.open(path: path, readOnly: config.readOnly, passphrase: passphrase)
         // A file has one session, opened once, so its bootstrap runs once.
         for sql in config.bootstrapStatements {
             do {

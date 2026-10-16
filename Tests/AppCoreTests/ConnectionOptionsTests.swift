@@ -380,3 +380,99 @@ final class Sent: @unchecked Sendable {
         #expect(try await !DatabaseCatalog.switchable(db).contains(dropName))
     }
 }
+
+/// Encrypted SQLite (SQLCipher) through the factory, as a saved connection opens it.
+@Suite struct SQLCipherTests {
+    private func path() -> String {
+        FileManager.default.temporaryDirectory.appending(path: "moonrow-cipher-\(UUID().uuidString).sqlite").path
+    }
+
+    private func config(_ path: String) -> ConnectionConfig {
+        ConnectionConfig(driver: .sqlite, filePath: path, passwordMode: .keychain)
+    }
+
+    /// A database encrypted with `statements` run first (PRAGMA key, compatibility), then a table.
+    private func make(_ path: String, _ setup: [String]) async throws {
+        let db = try SQLiteConnection(path: path)
+        for sql in setup { _ = try await db.execute(SQLStatement(sql)) }
+        _ = try await db.execute("CREATE TABLE secrets (id INTEGER PRIMARY KEY, note TEXT)")
+        _ = try await db.execute("INSERT INTO secrets (note) VALUES ('hidden')")
+        await db.close()
+    }
+
+    @Test func libraryIsSQLCipher() async throws {
+        let db = try SQLiteConnection(path: ":memory:")
+        #expect(try await db.execute("SELECT sqlite_version()").rows.first?.first == .text("3.53.4"))
+        guard case .text(let cipher)? = try await db.execute("PRAGMA cipher_version").rows.first?.first else {
+            Issue.record("no cipher_version")
+            return
+        }
+        #expect(cipher.hasPrefix("4.19.0"))
+        #expect(try await db.execute("SELECT sqlite_compileoption_used('ENABLE_FTS5')").rows.first?.first == .integer(1))
+        await db.close()
+    }
+
+    @Test func opensWithItsPassphraseOnly() async throws {
+        let p = path()
+        defer { try? FileManager.default.removeItem(atPath: p) }
+        let passphrase = #"pa"ss'wörd"#
+        try await make(p, ["PRAGMA key = 'pa\"ss''wörd'"])
+        // The bytes on disk aren't SQLite's plain header.
+        let header = try FileHandle(forReadingFrom: URL(filePath: p)).read(upToCount: 16) ?? Data()
+        #expect(header != Data("SQLite format 3\0".utf8))
+
+        let db = try await ConnectionFactory.open(config(p), password: passphrase)
+        #expect(try await db.execute("SELECT note FROM secrets").rows.first?.first == .text("hidden"))
+        #expect(await (db as? SQLiteConnection)?.cipherCompatibility == nil)
+        await db.close()
+
+        do {
+            _ = try await ConnectionFactory.open(config(p), password: nil)
+            Issue.record("opened without the passphrase")
+        } catch let e as DatabaseError {
+            #expect(e.message.hasPrefix("This file is encrypted"))
+        }
+        do {
+            _ = try await ConnectionFactory.open(config(p), password: "wrong")
+            Issue.record("opened with a wrong passphrase")
+        } catch let e as DatabaseError {
+            #expect(e.message.hasPrefix("The passphrase doesn't open this database"))
+        }
+        // "No password" never sends one.
+        var none = config(p)
+        none.passwordMode = .none
+        await #expect(throws: DatabaseError.self) { try await ConnectionFactory.open(none, password: passphrase) }
+    }
+
+    @Test func rawKeyInHex() async throws {
+        let p = path()
+        defer { try? FileManager.default.removeItem(atPath: p) }
+        let key = "x'2DD29CA851E7B56E4697B0E1F08507293D761A05CE4D1B628663F411A8086D99'"
+        try await make(p, ["PRAGMA key = \"\(key)\""])
+        let db = try await ConnectionFactory.open(config(p), password: key)
+        #expect(try await db.execute("SELECT count(*) FROM secrets").rows.first?.first == .integer(1))
+        await db.close()
+    }
+
+    /// A SQLCipher 3 file opens in compatibility mode and stays a version 3 file.
+    @Test func olderFormatOpensWithoutMigrating() async throws {
+        let p = path()
+        defer { try? FileManager.default.removeItem(atPath: p) }
+        try await make(p, ["PRAGMA key = 'old'", "PRAGMA cipher_compatibility = 3"])
+        let before = try Data(contentsOf: URL(filePath: p))
+        let db = try await ConnectionFactory.open(config(p), password: "old")
+        #expect(await (db as? SQLiteConnection)?.cipherCompatibility == 3)
+        #expect(try await db.execute("SELECT note FROM secrets").rows.first?.first == .text("hidden"))
+        await db.close()
+        #expect(try Data(contentsOf: URL(filePath: p)) == before)
+    }
+
+    @Test func plainDatabasesIgnoreNoPassphrase() async throws {
+        let p = path()
+        defer { try? FileManager.default.removeItem(atPath: p) }
+        try await make(p, [])
+        let db = try await ConnectionFactory.open(config(p), password: nil)
+        #expect(try await db.execute("SELECT count(*) FROM secrets").rows.first?.first == .integer(1))
+        await db.close()
+    }
+}

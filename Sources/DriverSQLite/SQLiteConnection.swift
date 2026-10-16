@@ -1,7 +1,7 @@
 import DBKit
 import Foundation
 import SQLScript
-import SQLite3
+import CSQLCipher
 
 /// A connection to a SQLite file (or `:memory:`). All work is serialized by the actor.
 public actor SQLiteConnection: DatabaseConnection {
@@ -21,6 +21,75 @@ public actor SQLiteConnection: DatabaseConnection {
     private var isClosed = false
     private var trace: Trace?
     public nonisolated let statementLog: StatementLog? = StatementLog()
+
+    /// SQLCipher's compatibility mode the file opened in (1–3 for files made by those major
+    /// versions); nil for the current format, or a database that isn't encrypted.
+    public private(set) var cipherCompatibility: Int?
+    /// Set for a copy of a file on a server (`user@host:path`), which is never uploaded.
+    public private(set) var copyOf: String?
+    /// A folder removed when the connection closes (a downloaded copy's).
+    private var removeOnClose: URL?
+
+    /// Marks the connection as working on a copy of `source`, kept in `folder` until it closes.
+    public func markAsCopy(of source: String, removing folder: URL) {
+        copyOf = source
+        removeOnClose = folder
+    }
+
+    /// Opens a file, encrypted with SQLCipher when `passphrase` is given (a passphrase, or a raw
+    /// key written `x'…'` in hex). A file made by SQLCipher 1–3 opens in that version's
+    /// compatibility mode; it's never migrated. Reading the schema checks the key, so a wrong
+    /// passphrase (or a file that isn't a database) fails here.
+    public static func open(path: String, readOnly: Bool = false, passphrase: String?) async throws -> SQLiteConnection {
+        guard let passphrase, !passphrase.isEmpty else {
+            let connection = try SQLiteConnection(path: path, readOnly: readOnly)
+            do {
+                try await connection.checkReadable(encrypted: false)
+            } catch {
+                await connection.close()
+                throw error
+            }
+            return connection
+        }
+        var lastError: (any Error)?
+        for compatibility in [nil, 3, 2, 1] as [Int?] {
+            let connection = try SQLiteConnection(path: path, readOnly: readOnly)
+            do {
+                try await connection.unlock(passphrase, compatibility: compatibility)
+                try await connection.checkReadable(encrypted: true)
+                return connection
+            } catch let e as DatabaseError where e.code.map({ $0 & 0xFF }) == Int(SQLITE_NOTADB) {
+                await connection.close()
+                lastError = e
+            } catch {
+                await connection.close()
+                throw error
+            }
+        }
+        throw lastError ?? DatabaseError("The passphrase doesn't open this database.")
+    }
+
+    private func unlock(_ passphrase: String, compatibility: Int?) throws {
+        let bytes = Array(passphrase.utf8)
+        let rc = bytes.withUnsafeBytes { sqlite3_key_v2(db.raw, "main", $0.baseAddress, Int32($0.count)) }
+        guard rc == SQLITE_OK else { throw error(rc, sql: nil) }
+        if let compatibility {
+            _ = try runUnlogged(SQLStatement("PRAGMA cipher_compatibility = \(compatibility)"))
+            cipherCompatibility = compatibility
+        }
+    }
+
+    /// Reading the schema is what rejects a wrong key, or a file that isn't a database.
+    private func checkReadable(encrypted: Bool) throws {
+        do {
+            _ = try queryUnlogged(SQLStatement("SELECT count(*) FROM sqlite_master"))
+        } catch var e as DatabaseError where e.code.map({ $0 & 0xFF }) == Int(SQLITE_NOTADB) {
+            e.message = encrypted
+                ? "The passphrase doesn't open this database, or the file isn't a SQLite database."
+                : "This file is encrypted, or isn't a SQLite database. An encrypted database needs its passphrase."
+            throw e
+        }
+    }
 
     public init(path: String, readOnly: Bool = false) throws {
         var raw: OpaquePointer?
@@ -51,6 +120,7 @@ public actor SQLiteConnection: DatabaseConnection {
         cursors.removeAll()
         sqlite3_close_v2(db.raw)
         isClosed = true
+        if let removeOnClose { try? FileManager.default.removeItem(at: removeOnClose) }
     }
 
     /// Reports every statement as it starts running, with bound values written inline (SQLite's

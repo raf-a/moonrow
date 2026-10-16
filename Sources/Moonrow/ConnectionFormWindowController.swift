@@ -177,7 +177,7 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
             ("Database file", row(pathField, button("Choose…", #selector(chooseFile(_:)))), .file),
             ("Host", hostRow, .server),
             ("User", userField, .server),
-            ("Password", passwordRow, .server),
+            ("Password", passwordRow, .both),
             ("Database", databaseField, .server),
             ("TLS", tlsPopup, .server),
             ("TLS negotiation", negotiationPopup, .postgres),
@@ -300,6 +300,11 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         updateNegotiation()
         passwordField.isEnabled = passwordModePopup.indexOfSelectedItem != 2
         sshPasswordField.isEnabled = sshPasswordModePopup.indexOfSelectedItem == 0
+        // SQLite's is SQLCipher's passphrase, for encrypted databases.
+        if let row = grid.cell(for: passwordField)?.row, let label = row.cell(at: 0).contentView as? NSTextField {
+            label.stringValue = d.isServer ? "Password" : "Passphrase"
+        }
+        passwordField.placeholderString = d.isServer ? nil : "Encrypted files only"
         window?.title = (isNew ? "New \(d.displayName) Connection" : "Edit \(config.displayName)")
         if let window, let content = window.contentView { window.fit(to: content) }
     }
@@ -449,7 +454,7 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
                         then done: () -> Void) {
         do {
             // Only a Keychain-mode password is kept; switching modes forgets it.
-            let keep = c.driver.isServer && c.passwordMode == .keychain && !passwordField.stringValue.isEmpty
+            let keep = c.passwordMode == .keychain && !passwordField.stringValue.isEmpty
             try secrets.setPassword(keep ? passwordField.stringValue : nil, for: c.id)
             try secrets.setSecret(c.usesSSH ? typedSSHPassword : nil, .sshPassword, for: c.id)
             try secrets.setSecret(c.usesSSH ? typedPassphrase : nil, .sshKeyPassphrase, for: c.id)

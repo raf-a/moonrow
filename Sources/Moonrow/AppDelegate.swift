@@ -410,7 +410,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
                     login = password
                 } else {
                     switch config.passwordMode {
-                    case .keychain: login = config.driver.isServer ? try secrets.password(for: config.id) : nil
+                    // SQLite's is a SQLCipher passphrase, when the database is encrypted.
+                    case .keychain: login = try secrets.password(for: config.id)
                     case .none: login = nil
                     case .ask:
                         guard let typed = await askPassword(for: config, in: window) else {
@@ -488,7 +489,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     /// Nil when cancelled.
     func askPassword(for config: ConnectionConfig, in window: NSWindow?) async -> String? {
         let alert = NSAlert()
-        alert.messageText = "Password for \(config.displayName)"
+        alert.messageText = "\(config.driver.isServer ? "Password" : "Passphrase") for \(config.displayName)"
         alert.informativeText = config.summary
         alert.addButton(withTitle: "Connect")
         alert.addButton(withTitle: "Cancel")
