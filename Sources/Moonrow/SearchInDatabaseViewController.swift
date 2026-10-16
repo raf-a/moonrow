@@ -22,7 +22,7 @@ final class SearchInDatabaseViewController: NSViewController, NSTableViewDataSou
     private let operatorPopup = NSPopUpButton()
     private let scopeButton = NSPopUpButton(frame: .zero, pullsDown: true)
     private let startButton = NSButton(title: "Search", target: nil, action: nil)
-    private let statusLabel = NSTextField(wrappingLabelWithString: "")
+    private let statusLabel = NSTextField(labelWithString: "")
     let list = NSTableView()
     /// Tables chosen in the scope menu; empty means every table.
     private(set) var chosen: [DatabaseObject] = []
@@ -57,6 +57,10 @@ final class SearchInDatabaseViewController: NSViewController, NSTableViewDataSou
         startButton.action = #selector(startOrStop(_:))
         statusLabel.font = .systemFont(ofSize: 11)
         statusLabel.textColor = .secondaryLabelColor
+        // One line, so the list below never moves as the status changes during a search.
+        statusLabel.lineBreakMode = .byTruncatingMiddle
+        statusLabel.maximumNumberOfLines = 1
+        statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         list.addTableColumn(NSTableColumn(identifier: .init("hit")))
         list.headerView = nil
@@ -174,9 +178,9 @@ final class SearchInDatabaseViewController: NSViewController, NSTableViewDataSou
         let byRef = Dictionary(scope.map { ($0.ref, $0) }, uniquingKeysWith: { a, _ in a })
         results = []
         list.reloadData()
-        guard let openSession else { return statusLabel.stringValue = "Search needs a session of its own, which this connection can't open." }
+        guard let openSession else { return showStatus("Search needs a session of its own, which this connection can't open.") }
         setSearching(true)
-        statusLabel.stringValue = "Connecting…"
+        showStatus("Connecting…")
         var failures: [String] = []
         task = Task {
             var session: (any DatabaseConnection)?
@@ -187,13 +191,13 @@ final class SearchInDatabaseViewController: NSViewController, NSTableViewDataSou
                 session = try await openSession()
             } catch {
                 setSearching(false)
-                statusLabel.stringValue = "Couldn't open a session: \(error)"
+                showStatus("Couldn't open a session: \(error)")
                 return
             }
             for await event in DatabaseSearch.run(request, on: session!) {
                 switch event {
                 case .searching(let table, let i, let n):
-                    statusLabel.stringValue = "Searching \(table.name) (\(i + 1) of \(n))…"
+                    showStatus("Searching \(table.name) (\(i + 1) of \(n))…")
                 case .found(let hit):
                     results.append(Result(object: byRef[hit.table] ?? DatabaseObject(hit.table, kind: .table), count: hit.count))
                     list.reloadData()
@@ -204,10 +208,10 @@ final class SearchInDatabaseViewController: NSViewController, NSTableViewDataSou
             guard !Task.isCancelled else { return }
             setSearching(false)
             let rows = results.reduce(0) { $0 + $1.count }
-            var text = rows == 0 ? "No rows match “\(term)”." :
-                "\(rows.formatted()) \(rows == 1 ? "row" : "rows") in \(results.count) \(results.count == 1 ? "table" : "tables")."
-            if !failures.isEmpty { text += "\nSkipped: " + failures.joined(separator: "; ") }
-            statusLabel.stringValue = text
+            var text = rows == 0 ? "No rows match “\(term)”" :
+                "\(rows.formatted()) \(rows == 1 ? "row" : "rows") in \(results.count) \(results.count == 1 ? "table" : "tables")"
+            if !failures.isEmpty { text += ", \(failures.count) skipped" }
+            showStatus(text + ".", detail: failures.isEmpty ? nil : "Skipped: " + failures.joined(separator: "; "))
         }
     }
 
@@ -217,7 +221,13 @@ final class SearchInDatabaseViewController: NSViewController, NSTableViewDataSou
         task.cancel()
         self.task = nil
         setSearching(false)
-        statusLabel.stringValue = "Stopped."
+        showStatus("Stopped.")
+    }
+
+    /// Sets the one-line status; its tooltip has the whole text and the detail.
+    private func showStatus(_ text: String, detail: String? = nil) {
+        statusLabel.stringValue = text
+        statusLabel.toolTip = [text, detail].compactMap { $0 }.joined(separator: "\n")
     }
 
     private func setSearching(_ on: Bool) {
