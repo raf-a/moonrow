@@ -740,17 +740,38 @@ final class SavedQueriesViewController: SidebarListController, NSOutlineViewData
     var renamingField: NSTextField? { renaming?.field }
 }
 
-/// Statements run from query tabs, newest first. Double-click puts one in the editor.
+/// Statements run from query tabs, newest first, under date headings that collapse as the Items
+/// pane's do. Double-click puts one in the editor.
 @MainActor
-final class HistoryViewController: SidebarListController {
+final class HistoryViewController: SidebarListController, NSOutlineViewDataSource, NSOutlineViewDelegate {
     let history: QueryHistory
     /// For colouring the SQL as the query editor does.
     let dialect: LexerDialect
     var onInsert: ((String) -> Void)?
     var onOpenInNewTab: ((String) -> Void)?
-    /// Date headings, each followed by its entries.
-    private enum Row { case heading(String), entry(QueryHistory.Entry) }
-    private var rows: [Row] = []
+    var outline: NSOutlineView { table as! NSOutlineView }
+
+    /// A date heading and its entries.
+    private final class Section {
+        let title: String
+        let entries: [Node]
+        init(title: String, entries: [Node]) {
+            self.title = title
+            self.entries = entries
+        }
+    }
+
+    /// An entry as the outline holds it: items are told apart by identity.
+    private final class Node {
+        let entry: QueryHistory.Entry
+        init(_ entry: QueryHistory.Entry) { self.entry = entry }
+    }
+
+    private var sections: [Section] = []
+    /// Headings collapsed by the user, by title; kept as history is added to or searched.
+    private var collapsed: Set<String> = []
+    /// True while the list is rebuilt, when expanding sections isn't the user's doing.
+    private var reloading = false
     /// Measures entries' SQL for their rows' heights.
     private lazy var measure = HistoryCell.makeSQLLabel()
     /// The width rows were last measured at.
@@ -765,13 +786,15 @@ final class HistoryViewController: SidebarListController {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
+    override func makeTable() -> NSTableView { NSOutlineView() }
+
     override func loadView() {
         super.loadView()
         search.placeholderString = "Search history"
-        table.style = .plain
-        table.usesAlternatingRowBackgroundColors = false
-        // A plain table paints its own background; the sidebar's shows through the other panes.
-        table.backgroundColor = .clear
+        outline.dataSource = self
+        outline.delegate = self
+        outline.floatsGroupRows = false
+        outline.autosaveExpandedItems = false
         let menu = NSMenu()
         for (title, action) in [("Insert into Editor", #selector(insert(_:))), ("Open in New Tab", #selector(openInNewTab(_:))),
                                 ("Copy", #selector(copy(_:))), ("Delete", #selector(delete(_:)))] {
@@ -779,7 +802,7 @@ final class HistoryViewController: SidebarListController {
         }
         menu.addItem(.separator())
         menu.addItem(withTitle: "Clear History…", action: #selector(clear(_:)), keyEquivalent: "").target = self
-        table.menu = menu
+        outline.menu = menu
         NotificationCenter.default.addObserver(self, selector: #selector(historyChanged), name: QueryHistory.didChange, object: history)
         NotificationCenter.default.addObserver(self, selector: #selector(historyChanged), name: AppStyle.didChange, object: nil)
         reloadList()
@@ -788,76 +811,93 @@ final class HistoryViewController: SidebarListController {
     @objc private func historyChanged() { reloadList() }
 
     /// Entries wrap, so a new width means new heights. The column follows the sidebar's width.
-    func tableViewColumnDidResize(_ notification: Notification) {
+    func outlineViewColumnDidResize(_ notification: Notification) {
         let width = sqlWidth
-        guard width != measuredWidth, !rows.isEmpty else { return }
+        guard width != measuredWidth, outline.numberOfRows > 0 else { return }
         measuredWidth = width
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0
-            table.noteHeightOfRows(withIndexesChanged: IndexSet(integersIn: 0..<rows.count))
+            outline.noteHeightOfRows(withIndexesChanged: IndexSet(integersIn: 0..<outline.numberOfRows))
         }
     }
 
-    /// The SQL's width in a row: the cell's less its margins.
+    /// The SQL's width in an entry's row: its cell's less the cell's margins. Entries are a level
+    /// in from the headings.
     private var sqlWidth: CGFloat {
-        let cell = rows.isEmpty ? table.rect(ofColumn: 0) : table.frameOfCell(atColumn: 0, row: 0)
-        return max(0, cell.width - 2 * HistoryCell.margin)
+        let cell = outline.rect(ofColumn: 0)
+        return max(0, cell.width - outline.indentationPerLevel - 2 * HistoryCell.margin)
     }
 
     override func reloadList() {
         let found = history.search(search.stringValue)
-        rows = QueryHistory.grouped(found).flatMap { [Row.heading($0.title)] + $0.entries.map(Row.entry) }
-        table.reloadData()
+        sections = QueryHistory.grouped(found).map { Section(title: $0.title, entries: $0.entries.map(Node.init)) }
+        reloading = true
+        outline.reloadData()
+        for section in sections where !collapsed.contains(section.title) { outline.expandItem(section) }
+        reloading = false
         empty.stringValue = history.entries.isEmpty ? "No History" : "No Results"
         empty.isHidden = !found.isEmpty
     }
 
     private func entry(_ row: Int?) -> QueryHistory.Entry? {
-        guard let row, rows.indices.contains(row), case .entry(let e) = rows[row] else { return nil }
-        return e
+        guard let row, row >= 0 else { return nil }
+        return (outline.item(atRow: row) as? Node)?.entry
     }
 
-    override func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
+    // MARK: - Outline
 
-    override func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        switch rows[row] {
-        case .heading(let title):
-            let label = SolidLabel(labelWithString: title)
-            label.font = .systemFont(ofSize: 11, weight: .semibold)
-            label.textColor = .secondaryLabelColor
-            let cell = NSTableCellView()
-            label.translatesAutoresizingMaskIntoConstraints = false
-            cell.addSubview(label)
-            NSLayoutConstraint.activate([
-                label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 8),
-                label.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-            ])
-            return cell
-        case .entry(let e):
-            let id = NSUserInterfaceItemIdentifier("History")
-            let cell = tableView.makeView(withIdentifier: id, owner: nil) as? HistoryCell ?? HistoryCell()
-            cell.show(e, dialect: dialect)
+    func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
+        if item == nil { return sections.count }
+        return (item as? Section)?.entries.count ?? 0
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
+        if item == nil { return sections[index] }
+        return (item as! Section).entries[index]
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool { item is Section }
+
+    func outlineView(_ outlineView: NSOutlineView, isGroupItem item: Any) -> Bool { item is Section }
+
+    func outlineView(_ outlineView: NSOutlineView, shouldSelectItem item: Any) -> Bool { item is Node }
+
+    func outlineView(_ outlineView: NSOutlineView, rowViewForItem item: Any) -> NSTableRowView? { GreySelectionRowView() }
+
+    func outlineViewItemDidCollapse(_ notification: Notification) {
+        guard !reloading, let section = notification.userInfo?["NSObject"] as? Section else { return }
+        collapsed.insert(section.title)
+    }
+
+    func outlineViewItemDidExpand(_ notification: Notification) {
+        guard !reloading, let section = notification.userInfo?["NSObject"] as? Section else { return }
+        collapsed.remove(section.title)
+    }
+
+    func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
+        if let section = item as? Section {
+            let id = NSUserInterfaceItemIdentifier("Heading")
+            let cell = outlineView.makeView(withIdentifier: id, owner: nil) as? HeadingCell ?? HeadingCell(identifier: id)
+            cell.label.stringValue = section.title
             return cell
         }
+        guard let node = item as? Node else { return nil }
+        let id = NSUserInterfaceItemIdentifier("History")
+        let cell = outlineView.makeView(withIdentifier: id, owner: nil) as? HistoryCell ?? HistoryCell()
+        cell.show(node.entry, dialect: dialect)
+        return cell
     }
 
-    func tableView(_ tableView: NSTableView, isGroupRow row: Int) -> Bool {
-        if case .heading = rows[row] { return true }
-        return false
-    }
-
-    func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-        guard case .entry(let e) = rows[row] else { return 22 }
+    func outlineView(_ outlineView: NSOutlineView, heightOfRowByItem item: Any) -> CGFloat {
+        guard let node = item as? Node else { return HeadingCell.height }
         measuredWidth = sqlWidth
-        measure.attributedStringValue = HistoryCell.styled(e.sql, dialect: dialect)
+        measure.attributedStringValue = HistoryCell.styled(node.entry.sql, dialect: dialect)
         measure.preferredMaxLayoutWidth = measuredWidth
         return HistoryCell.height(sql: ceil(measure.intrinsicContentSize.height))
     }
 
-    func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool { entry(row) != nil }
-
     override func doubleClicked(_ sender: Any?) {
-        if let e = entry(table.clickedRow) { onInsert?(e.sql) }
+        if let e = entry(outline.clickedRow) { onInsert?(e.sql) }
     }
 
     @objc private func insert(_ sender: Any?) {
@@ -879,14 +919,10 @@ final class HistoryViewController: SidebarListController {
         try? history.remove(e)
     }
 
-    /// For the dev harness: headings in brackets, entries as their SQL.
+    /// For the dev harness: headings in brackets, each followed by its entries' SQL, collapsed
+    /// or not.
     var shownRows: [String] {
-        rows.map { row in
-            switch row {
-            case .heading(let t): "[\(t)]"
-            case .entry(let e): e.sql
-            }
-        }
+        sections.flatMap { ["[\($0.title)]"] + $0.entries.map(\.entry.sql) }
     }
 
     @objc private func clear(_ sender: Any?) {
@@ -906,6 +942,28 @@ final class HistoryViewController: SidebarListController {
     /// sidebar, its grey washes out to barely legible.
     private final class SolidLabel: NSTextField {
         override var allowsVibrancy: Bool { false }
+    }
+
+    /// A date heading, with room above it to set it apart from the entries before.
+    private final class HeadingCell: NSTableCellView {
+        static let height: CGFloat = 28
+        let label = SolidLabel(labelWithString: "")
+
+        init(identifier: NSUserInterfaceItemIdentifier) {
+            super.init(frame: .zero)
+            self.identifier = identifier
+            label.font = .systemFont(ofSize: 11, weight: .semibold)
+            label.textColor = .secondaryLabelColor
+            label.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(label)
+            NSLayoutConstraint.activate([
+                label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
+                label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -5),
+            ])
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { fatalError() }
     }
 
     /// An entry's success or failure mark, drawn without vibrancy as its time is.
