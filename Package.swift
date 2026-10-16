@@ -23,11 +23,36 @@ let package = Package(
     targets: [
         .target(name: "SQLScript"),
         .target(name: "DBKit", dependencies: ["SQLScript"]),
+        // SQLite with SQLCipher's encryption, built from its amalgamation in place of the system's
+        // libsqlite3 (which can't open encrypted databases). See Sources/CSQLCipher/README.md.
         .target(
-            name: "DriverSQLite",
-            dependencies: ["DBKit", "SQLScript"],
-            linkerSettings: [.linkedLibrary("sqlite3")]
+            name: "CSQLCipher",
+            exclude: ["README.md", "LICENSE.md"],
+            cSettings: [
+                .define("SQLITE_HAS_CODEC"),
+                .define("SQLCIPHER_CRYPTO_CC"),
+                .define("SQLITE_TEMP_STORE", to: "2"),
+                .define("SQLITE_EXTRA_INIT", to: "sqlcipher_extra_init"),
+                .define("SQLITE_EXTRA_SHUTDOWN", to: "sqlcipher_extra_shutdown"),
+                .define("SQLITE_THREADSAFE", to: "1"),
+                .define("SQLITE_ENABLE_FTS4"),
+                .define("SQLITE_ENABLE_FTS5"),
+                .define("SQLITE_ENABLE_RTREE"),
+                .define("SQLITE_ENABLE_GEOPOLY"),
+                .define("SQLITE_ENABLE_MATH_FUNCTIONS"),
+                .define("SQLITE_ENABLE_DBSTAT_VTAB"),
+                .define("SQLITE_ENABLE_STAT4"),
+                .define("SQLITE_ENABLE_COLUMN_METADATA"),
+                .define("SQLITE_ENABLE_SNAPSHOT"),
+                .define("HAVE_USLEEP", to: "1"),
+                .define("NDEBUG"),
+                // Optimized in debug builds too, so the grid stays as fast as with the system's
+                // library; and the amalgamation's warnings aren't ours to fix.
+                .unsafeFlags(["-O2", "-w"]),
+            ],
+            linkerSettings: [.linkedFramework("Security")]
         ),
+        .target(name: "DriverSQLite", dependencies: ["DBKit", "SQLScript", "CSQLCipher"]),
         // Socket, TLS upgrade and framing shared by the network drivers.
         .target(
             name: "WireSupport",

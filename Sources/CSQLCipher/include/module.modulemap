@@ -1,0 +1,5 @@
+module CSQLCipher {
+    header "csqlcipher.h"
+    link framework "Security"
+    export *
+}
