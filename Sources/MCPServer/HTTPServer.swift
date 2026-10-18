@@ -92,11 +92,21 @@ private final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler 
             let router = self.router
             let large = tooLarge
             let version = head.version
-            Task {
-                let response = large ? MCPHTTPResponse(status: 413) : await router.handle(request)
-                await Self.write(response, version: version, keepAlive: keepAlive, on: channel)
-            }
+            // Everything the task needs is passed in as values; Swift 6.3's isolation checker
+            // rejects the same work written inline (a conditional `await` in the closure).
+            Task { await Self.respond(to: request, large: large, router: router, version: version, keepAlive: keepAlive, on: channel) }
         }
+    }
+
+    private static func respond(to request: MCPHTTPRequest, large: Bool, router: MCPRouter, version: HTTPVersion,
+                                keepAlive: Bool, on channel: any Channel) async {
+        let response: MCPHTTPResponse
+        if large {
+            response = MCPHTTPResponse(status: 413)
+        } else {
+            response = await router.handle(request)
+        }
+        await write(response, version: version, keepAlive: keepAlive, on: channel)
     }
 
     private static func write(_ response: MCPHTTPResponse, version: HTTPVersion, keepAlive: Bool, on channel: any Channel) async {
