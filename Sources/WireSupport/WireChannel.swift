@@ -50,9 +50,13 @@ public struct RawFramer: Framer {
     }
 }
 
-public enum WireError: Error, Sendable, CustomStringConvertible {
+public enum WireError: Error, Sendable, Equatable, CustomStringConvertible {
     case closed
     case protocolViolation(String)
+
+    /// Bytes the server sent before a TLS upgrade and the channel hadn't read yet. Anyone on the
+    /// path could have sent them, and they would otherwise be read as if they came over TLS.
+    public static let plaintextBeforeTLS = WireError.protocolViolation("unencrypted data arrived before the TLS handshake")
 
     public var description: String {
         switch self {
@@ -164,25 +168,68 @@ public final class WireChannel: @unchecked Sendable {
     }
 
     /// Switches how incoming bytes are split, once the bytes for the old framing are consumed.
+    /// Fails if part of a message in the old framing is still waiting for the rest of it; those
+    /// bytes are dropped rather than read with the new framing.
     public func setFramer(_ framer: any Framer) async throws {
         let inbox = inbox
-        try await channel.eventLoop.submit { inbox.framer = framer }.get()
+        let leftover = try await channel.eventLoop.submit { inbox.replaceFramer(framer) }.get()
+        if leftover {
+            throw DatabaseError(WireError.protocolViolation("part of a message was left when the framing changed").description)
+        }
+    }
+
+    /// Fails if the server sent anything the channel hasn't read yet. A TLS upgrade has to start
+    /// on a stream with nothing left over from the unencrypted part.
+    public func expectNothingUnread() async throws {
+        let inbox = inbox
+        let drained = try await channel.eventLoop.submit { inbox.isDrained }.get()
+        guard pendingIndex >= pending.count, drained else { throw plaintextError }
+    }
+
+    private var plaintextError: DatabaseError {
+        DatabaseError(
+            "Unencrypted data arrived from \(endpoint) before the TLS handshake, so the connection was closed. "
+                + "It may have been sent by someone else on the network.")
     }
 
     /// Wraps the socket in TLS from here on (after the protocol's own "upgrade" exchange).
+    ///
+    /// Everything read from here on is what the TLS server sent. Messages already received in the
+    /// clear and not read yet would come out of `next` first, as if they had been encrypted, so
+    /// their presence fails the upgrade and closes the connection.
     public func startTLS(_ settings: TLSSettings, alpn: [String] = []) async throws {
-        let configuration = try settings.configuration(alpn: alpn)
-        let hostName = settings.serverName ?? endpoint.hostName
+        guard pendingIndex >= pending.count else {
+            close()
+            throw plaintextError
+        }
+        let configuration: TLSConfiguration
         let context: NIOSSLContext
+        do {
+            configuration = try settings.configuration(alpn: alpn)
+        } catch {
+            close()
+            throw error
+        }
+        let hostName = settings.serverName ?? endpoint.hostName
         do {
             context = try NIOSSLContext(configuration: configuration)
         } catch {
+            close()
             throw DatabaseError("Can't set up TLS: \(Self.describe(error))")
         }
         let inbox = inbox
         let channel = channel
         do {
             try await channel.eventLoop.flatSubmit {
+                // Checked in the same event loop turn that adds the handler, so no read can land
+                // between the check and the handler: bytes that arrive later go through TLS.
+                guard inbox.isDrained else {
+                    return channel.eventLoop.makeFailedFuture(WireError.plaintextBeforeTLS) as EventLoopFuture<Void>
+                }
+                // Closed already: the handler would never see the handshake finish.
+                guard channel.isActive else {
+                    return channel.eventLoop.makeFailedFuture(WireError.closed) as EventLoopFuture<Void>
+                }
                 let done = channel.eventLoop.makePromise(of: Void.self)
                 do {
                     let handler = try NIOSSLClientHandler(context: context, serverHostname: hostName)
@@ -194,6 +241,9 @@ public final class WireChannel: @unchecked Sendable {
                 return done.futureResult
             }.get()
             isTLS = true
+        } catch let error as WireError where error == .plaintextBeforeTLS {
+            close()
+            throw plaintextError
         } catch {
             close()
             throw DatabaseError("TLS handshake with \(endpoint) failed: \(Self.describe(error))")
@@ -248,6 +298,23 @@ final class FrameInbox: ChannelInboundHandler, @unchecked Sendable {
 
     init(framer: any Framer) {
         self.framer = framer
+    }
+
+    /// Nothing received and not yet taken: no decoded messages, no partial one. Event loop only.
+    var isDrained: Bool {
+        guard cumulation == nil else { return false }
+        lock.lock()
+        defer { lock.unlock() }
+        return frames.isEmpty
+    }
+
+    /// Swaps the framer and drops any partial message left by the old one, so its bytes are never
+    /// joined to what comes next. True when there was one. Event loop only.
+    func replaceFramer(_ framer: any Framer) -> Bool {
+        let leftover = cumulation != nil
+        cumulation = nil
+        self.framer = framer
+        return leftover
     }
 
     func take() async throws -> [ByteBuffer] {

@@ -118,6 +118,17 @@ let package = Package(
         .testTarget(name: "DriverSQLiteTests", dependencies: ["DriverSQLite"]),
         .testTarget(name: "DriverPostgresTests", dependencies: ["DriverPostgres", "WireSupport"]),
         .testTarget(name: "DriverMySQLTests", dependencies: ["DriverMySQL", "WireSupport"]),
+        // The TLS upgrade against a scripted server on loopback, through WireChannel and both drivers.
+        .testTarget(
+            name: "WireSupportTests",
+            dependencies: [
+                "WireSupport", "DBKit", "DriverMySQL", "DriverPostgres",
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "NIOTLS", package: "swift-nio"),
+                .product(name: "NIOSSL", package: "swift-nio-ssl"),
+            ]
+        ),
         .testTarget(name: "AppCoreTests", dependencies: ["AppCore", "WireSupport", "DriverSQLite", "DriverPostgres", "DriverMySQL", "DriverRemoteSQLite"]),
         // Depends on the bridge so `swift test` builds it next to the test bundle.
         .testTarget(name: "MCPServerTests", dependencies: ["MCPServer", "AppCore", "DBKit", "DriverSQLite", "DriverPostgres", "DriverMySQL", "moonrow-mcp"]),

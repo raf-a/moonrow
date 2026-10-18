@@ -209,6 +209,9 @@ final class MySQLSession: WireSession, @unchecked Sendable {
         let wantsTLS = required || ([.prefer, .allow].contains(c.tls.mode) && !isSocket)
         if wantsTLS {
             if server.contains(.ssl) {
+                // The greeting has to be the only packet so far: anything after it came in the
+                // clear and would otherwise be read as the first replies over TLS.
+                try await io.wire.expectNothingUnread()
                 caps.insert(.ssl)
                 var request = io.wire.makeBuffer(capacity: 32)
                 writeLoginHeader(caps, into: &request)
