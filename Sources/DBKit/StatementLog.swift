@@ -12,14 +12,18 @@ public struct StatementLogEntry: Sendable, Hashable {
     public var rows: Int?
     /// The database's error, or "Cancelled".
     public var error: String?
+    /// Who sent it, when not the workspace itself (`MCP`).
+    public var origin: String?
 
-    public init(sql: String, bindings: [DBValue] = [], started: Date, duration: Duration, rows: Int? = nil, error: String? = nil) {
+    public init(sql: String, bindings: [DBValue] = [], started: Date, duration: Duration, rows: Int? = nil, error: String? = nil,
+                origin: String? = nil) {
         self.sql = sql
         self.bindings = bindings
         self.started = started
         self.duration = duration
         self.rows = rows
         self.error = error
+        self.origin = origin
     }
 }
 

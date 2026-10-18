@@ -1,6 +1,7 @@
 import AppCore
 import AppKit
 import DBKit
+import MCPServer
 
 /// One window per open connection: sidebar (items, saved queries, history) on the left, panes
 /// of tabs (tables and query editors) on the right.
@@ -80,6 +81,9 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
     var onOpenDatabaseInNewTab: ((String) -> Void)?
     /// Show Diagram's window, while it's open.
     private(set) var diagram: DiagramWindowController?
+    /// MCP's session on the connection, opened when a client first runs a statement here and
+    /// closed with the window.
+    var mcpSession: Task<MCPQuerySession, any Error>?
 
     /// `password` is the database password the workspace logged in with; safe mode's password
     /// levels ask for it.
@@ -659,7 +663,12 @@ final class WorkspaceWindowController: NSWindowController, NSWindowDelegate, NST
         diagram?.close()
         leftSidebar.search.stop()
         let connection = connection
-        Task { await connection.close() }
+        let mcp = mcpSession
+        mcpSession = nil
+        Task {
+            await connection.close()
+            await (try? mcp?.value)?.connection.close()
+        }
         onClose?()
     }
 

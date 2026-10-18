@@ -34,10 +34,12 @@ public final class QueryLog {
         NotificationCenter.default.post(name: Self.didChange, object: self)
     }
 
-    /// Follows a connection's statements from now on.
-    public func follow(_ connection: any DatabaseConnection) {
+    /// Follows a connection's statements from now on, marked with `origin` when given.
+    public func follow(_ connection: any DatabaseConnection, origin: String? = nil) {
         // The main queue keeps the drivers' order.
         connection.statementLog?.observe { [weak self] entry in
+            var entry = entry
+            if let origin { entry.origin = origin }
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.append(entry) } }
         }
     }
@@ -47,10 +49,13 @@ public final class QueryLog {
 
     /// One line per entry: time, duration, rows or error, then the statement on one line with
     /// bound values after it (`-- $1 = 'a', $2 = 3`). A statement its reader stopped (a row
-    /// limit, a closed tab, the Stop button) reads "Stopped".
+    /// limit, a closed tab, the Stop button) reads "Stopped". Statements from elsewhere start
+    /// with their origin as a comment (`/* MCP */`).
     public nonisolated static func line(_ e: StatementLogEntry, dialect: any Dialect, locale: Locale = .autoupdatingCurrent) -> String {
         var s = time.string(from: e.started) + "  "
             + DurationText.string(e.duration, locale: locale).padding(toLength: 8, withPad: " ", startingAt: 0) + "  "
+        // Marked as a comment, so a copied line still runs.
+        if let origin = e.origin { s += "/* \(origin) */ " }
         s += oneLine(e.sql)
         if !e.bindings.isEmpty {
             let values = e.bindings.enumerated().map { "\(dialect.placeholder($0.offset + 1)) = \(dialect.literal($0.element))" }

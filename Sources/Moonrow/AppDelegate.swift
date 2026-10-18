@@ -3,6 +3,7 @@ import AppKit
 import DBKit
 import DriverRemoteSQLite
 import DriverSQLite
+import MCPServer
 import UniformTypeIdentifiers
 
 @MainActor
@@ -14,7 +15,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     /// History and saved queries live next to the connections file, so `MOONROW_STORE` moves them too.
     var dataRoot: URL { store.fileURL.deletingLastPathComponent() }
     lazy var settings = SettingsStore(fileURL: SettingsStore.fileURL(root: dataRoot))
-    private var preferences: PreferencesWindowController?
+    private(set) var preferences: PreferencesWindowController?
     /// Passwords: the login Keychain, or with `MOONROW_STORE` a plain file next to it, so
     /// development runs never touch real credentials.
     lazy var secrets: any SecretStore = ProcessInfo.processInfo.environment["MOONROW_STORE"] == nil
@@ -38,6 +39,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     private(set) var picker: ConnectionPicker?
     private(set) var forms: [ConnectionFormWindowController] = []
     private(set) var workspaces: [WorkspaceWindowController] = []
+    /// Settings ▸ MCP's server and the app's side of it, once needed (`mcp`).
+    var mcpService: MCPService?
+    var mcpHost: AppMCPHost?
+    private(set) var mcpActivity: MCPActivityWindowController?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         if ProcessInfo.processInfo.environment["MOONROW_STORE"] == nil { adoptTabulaData() }
@@ -74,6 +79,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         if old.keepAlive != settings.settings.keepAlive {
             for w in workspaces { w.connection.setKeepAlive(keepAliveInterval) }
         }
+        applyMCPSettings(old: old)
     }
 
     /// How often idle workspace sessions are pinged; nil when Keep connection alive is off.
@@ -105,6 +111,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             reopening = reopenWorkspaces()
         }
         if workspaces.isEmpty, reopening == 0 { showWelcome(nil) }
+        applyMCPSettings(old: nil)
         // `MOONROW_BACKGROUND` keeps a harness run behind the apps in use.
         if ProcessInfo.processInfo.environment["MOONROW_BACKGROUND"] == nil { NSApp.activate() }
         DevHarness.runIfRequested(self)
@@ -115,6 +122,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         // Saved queries write what was typed in the last second too.
         for workspace in workspaces { workspace.saveSavedQueries() }
         saveSession()
+        // moonrow-mcp mustn't find a server that's gone.
+        mcpService?.removeDiscoveryFile()
     }
 
     // MARK: - Session
@@ -163,7 +172,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     /// SQL files dropped on the Dock icon or opened from Finder open in query tabs. Databases
     /// open through connections only.
     func application(_ application: NSApplication, open urls: [URL]) {
-        for url in urls where url.pathExtension.lowercased() == "sql" {
+        for url in urls where url.scheme == "moonrow" { handleIntegrationURL(url) }
+        for url in urls where url.isFileURL && url.pathExtension.lowercased() == "sql" {
             guard let workspace = frontmostWorkspace else { return needWorkspace(for: url) }
             workspace.openSQLFile(url)
         }
@@ -262,8 +272,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     }
 
     @objc func showPreferences(_ sender: Any?) {
-        if preferences == nil { preferences = PreferencesWindowController(settings: settings, updater: updates.updater) }
+        if preferences == nil {
+            preferences = PreferencesWindowController(settings: settings, updater: updates.updater, store: store) { [unowned self] in mcp }
+            preferences?.mcp.onShowActivity = { [weak self] in self?.showMCPActivity(nil) }
+        }
         preferences?.showWindow(nil)
+    }
+
+    /// Settings ▸ MCP.
+    func showMCPPreferences() {
+        showPreferences(nil)
+        preferences?.show(pane: PreferencesWindowController.mcpPane)
+    }
+
+    /// Window ▸ MCP Activity, and Settings ▸ MCP ▸ Activity….
+    @objc func showMCPActivity(_ sender: Any?) {
+        if mcpActivity == nil { mcpActivity = MCPActivityWindowController(service: mcp) }
+        mcpActivity?.showWindow(nil)
     }
 
     /// Settings ▸ Locations.
@@ -544,6 +569,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     func deleteConnection(_ id: UUID) throws {
         try store.delete(id: id)
         secrets.removeAll(for: id)
+        try? mcpService?.tokens.forget(connection: id)
+    }
+
+    /// The connection's query history, shared with its workspaces.
+    func queryHistory(for id: UUID) -> QueryHistory {
+        if let history = histories[id] { return history }
+        let history = QueryHistory(fileURL: QueryHistory.fileURL(root: dataRoot, connection: id))
+        histories[id] = history
+        return history
+    }
+
+    /// The connection's saved queries, shared with its workspaces.
+    func savedQueryStore(for config: ConnectionConfig) -> SavedQueries {
+        savedQueries(at: SavedQueries.directory(root: dataRoot, for: config))
     }
 
     func duplicateConnection(_ id: UUID) throws {

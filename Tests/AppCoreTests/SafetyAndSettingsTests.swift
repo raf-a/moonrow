@@ -124,6 +124,12 @@ private func tempDir() -> URL {
         #expect(store.settings.editorFontSize == AppSettings.editorFontSizes.upperBound)
         #expect(store.settings.gridFontSize == 14)
 
+        // MCP is off until turned on; a port out of range keeps the default.
+        #expect(!AppSettings().mcpEnabled && AppSettings().mcpApproval && AppSettings().mcpAutoToken && !AppSettings().mcpRemote)
+        try Data(#"{"mcpEnabled":true,"mcpPort":80,"mcpRemote":"yes"}"#.utf8).write(to: url)
+        #expect(store.load() == nil)
+        #expect(store.settings.mcpEnabled && store.settings.mcpPort == 51003 && !store.settings.mcpRemote)
+
         try Data("{".utf8).write(to: url)
         #expect(store.load() != nil)
         #expect(store.settings == AppSettings())
