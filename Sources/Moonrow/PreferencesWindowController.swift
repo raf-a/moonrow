@@ -1,9 +1,10 @@
 import AppCore
 import AppKit
+import MCPServer
 import Sparkle
 import SQLScript
 
-/// Settings (⌘,): General, Fonts & Colors, Keymap, Locations. Every change is saved and applied at once.
+/// Settings (⌘,): General, Fonts & Colors, Keymap, Locations, MCP. Every change is saved and applied at once.
 @MainActor
 final class PreferencesWindowController: NSWindowController {
     let tabs = PreferencesTabs()
@@ -11,19 +12,23 @@ final class PreferencesWindowController: NSWindowController {
     let fonts: FontsPreferences
     let keymap: KeymapPreferences
     let locations: LocationsPreferences
+    let mcp: MCPPreferences
     static let locationsPane = 3
+    static let mcpPane = 4
 
-    init(settings: SettingsStore, updater: SPUUpdater) {
+    init(settings: SettingsStore, updater: SPUUpdater, store: ConnectionStore, mcp: @escaping () -> MCPService) {
         general = GeneralPreferences(settings: settings, updater: updater)
         fonts = FontsPreferences(settings: settings)
         keymap = KeymapPreferences(settings: settings)
         locations = LocationsPreferences(settings: settings)
+        self.mcp = MCPPreferences(settings: settings, store: store, service: mcp)
         tabs.tabStyle = .toolbar
         for (controller, title, symbol) in [
             (general as NSViewController, "General", "gearshape"),
             (fonts, "Fonts & Colors", "textformat"),
             (keymap, "Keymap", "keyboard"),
             (locations, "Locations", "folder"),
+            (self.mcp, "MCP", "point.3.connected.trianglepath.dotted"),
         ] {
             // The window is titled after the pane showing.
             controller.title = title

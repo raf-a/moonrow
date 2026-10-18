@@ -293,6 +293,7 @@ enum MainMenu {
             m.add("Zoom", #selector(NSWindow.performZoom(_:)))
             m.addItem(.separator())
             m.add("Connections", #selector(AppDelegate.showWelcome(_:)))
+            m.add("MCP Activity", #selector(AppDelegate.showMCPActivity(_:)))
             m.addItem(.separator())
             m.add("Bring All to Front", #selector(NSApplication.arrangeInFront(_:)))
         }

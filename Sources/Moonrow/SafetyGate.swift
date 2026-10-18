@@ -62,8 +62,8 @@ final class SafetyGate {
     }
 
     /// True when the statements may be sent: safe mode doesn't ask, or the user confirmed (and
-    /// gave the password, where the level wants it).
-    func approve(_ statements: [String]) async -> Bool {
+    /// gave the password, where the level wants it). `client` names an MCP client sending them.
+    func approve(_ statements: [String], from client: String? = nil) async -> Bool {
         let requirement = requirement(for: statements)
         guard requirement != .none else { return true }
         guard let window else { return false }
@@ -74,7 +74,7 @@ final class SafetyGate {
         }
         let sql = statements.map { $0.hasSuffix(";") ? $0 : $0 + ";" }.joined(separator: "\n\n")
         let prompt = SafetyPrompt(
-            title: "Run these statements?",
+            title: client.map { "Run these statements from \($0)?" } ?? "Run these statements?",
             message: message, sql: sql,
             credential: requirement == .password ? credential : nil, connectionName: connectionName, confirm: "Run")
         return await show(prompt, in: window)

@@ -43,8 +43,22 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var keepAlive: Bool = false
     /// Where safe mode asks for the password, Touch ID can answer instead.
     public var safeModeTouchID: Bool = false
+    /// Settings ▸ MCP: the MCP server runs while the app does.
+    public var mcpEnabled: Bool = false
+    /// The port it tries first; a busy one falls back to the next free.
+    public var mcpPort: Int = Self.defaultMCPPort
+    /// Listen on every interface, over TLS, not just this Mac's loopback.
+    public var mcpRemote: Bool = false
+    /// Statements from MCP that may change data wait for Allow in the workspace.
+    public var mcpApproval: Bool = true
+    /// A token for moonrow-mcp, made at each start and written where the bridge finds it.
+    public var mcpAutoToken: Bool = true
 
     public init() {}
+
+    public static let mcpPorts: ClosedRange<Int> = 1024...65_535
+    /// The MCP server's port when none is chosen (the server's own fallbacks follow it).
+    public static let defaultMCPPort = 51003
 
     public static let queryTimeouts: ClosedRange<Int> = 0...86_400
 
@@ -60,6 +74,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
         case appearance, editorTheme, editorFontName, editorFontSize, gridFontSize, alternatingRows
         case defaultSafeMode, keyBindings, reopenWorkspaces, queryParameters, runButtonRunsAll
         case postgresToolsFolder, mysqlToolsFolder, queryTimeout, keepAlive, safeModeTouchID
+        case mcpEnabled, mcpPort, mcpRemote, mcpApproval, mcpAutoToken
     }
 
     // Each value is read on its own: one that's missing or not understood keeps its default
@@ -86,6 +101,12 @@ public struct AppSettings: Codable, Equatable, Sendable {
         queryTimeout = min(max(value(.queryTimeout, d.queryTimeout), Self.queryTimeouts.lowerBound), Self.queryTimeouts.upperBound)
         keepAlive = value(.keepAlive, d.keepAlive)
         safeModeTouchID = value(.safeModeTouchID, d.safeModeTouchID)
+        mcpEnabled = value(.mcpEnabled, d.mcpEnabled)
+        let port = value(.mcpPort, d.mcpPort)
+        mcpPort = Self.mcpPorts.contains(port) ? port : d.mcpPort
+        mcpRemote = value(.mcpRemote, d.mcpRemote)
+        mcpApproval = value(.mcpApproval, d.mcpApproval)
+        mcpAutoToken = value(.mcpAutoToken, d.mcpAutoToken)
     }
 
     /// Finds the backup tools with the folders chosen here.

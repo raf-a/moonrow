@@ -21,6 +21,7 @@ if [ "${MOONROW_UNIVERSAL:-0}" = 1 ]; then
 fi
 swift build "$@" --product Moonrow
 swift build "$@" --product moonrow-ssh-helper
+swift build "$@" --product moonrow-mcp
 bindir="$(swift build "$@" --show-bin-path)"
 
 app="build/Moonrow.app"
@@ -33,6 +34,8 @@ ditto "$bindir/Sparkle.framework" "$sparkle"
 rm -rf "$sparkle/Versions/B/XPCServices" "$sparkle/XPCServices"
 # Runs ssh for the tunnels and answers its prompts; the app looks for it next to its executable.
 cp "$bindir/moonrow-ssh-helper" "$app/Contents/MacOS/moonrow-ssh-helper"
+# The stdio bridge MCP clients run (Settings ▸ MCP shows its path).
+cp "$bindir/moonrow-mcp" "$app/Contents/MacOS/moonrow-mcp"
 iconutil -c icns -o "$app/Contents/Resources/AppIcon.icns" Assets/AppIcon.iconset
 # Liquid Glass icon (macOS 26+): compile Assets/AppIcon.icon (Icon Composer) into Assets.car.
 # Needs Xcode 26+'s actool. macOS 14-15 keep using AppIcon.icns (actool may regenerate it from
@@ -82,6 +85,14 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>NSSupportsAutomaticTermination</key><false/>
   <key>SUFeedURL</key><string>https://github.com/raf-a/moonrow/releases/latest/download/appcast.xml</string>
   <key>SUPublicEDKey</key><string>$sparkle_key</string>
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key><string>app.moonrow.Moonrow.integrations</string>
+      <key>CFBundleURLSchemes</key>
+      <array><string>moonrow</string></array>
+    </dict>
+  </array>
   <key>CFBundleDocumentTypes</key>
   <array>
     <dict>
@@ -97,7 +108,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
 PLIST
 
 # Nested code is signed inside out, before the bundle that seals it: Sparkle's helpers, then its
-# framework, then the ssh helper and the app. A real identity gets the hardened runtime and a
+# framework, then the ssh helper, the MCP bridge and the app. A real identity gets the hardened runtime and a
 # secure timestamp, which notarization requires.
 identity="${MOONROW_SIGN_IDENTITY:--}"
 if [ "$identity" = "-" ]; then
@@ -109,5 +120,6 @@ sign "$sparkle/Versions/B/Autoupdate"
 sign "$sparkle/Versions/B/Updater.app"
 sign "$sparkle"
 sign "$app/Contents/MacOS/moonrow-ssh-helper"
+sign "$app/Contents/MacOS/moonrow-mcp"
 sign "$app"
 echo "Built $root/$app"

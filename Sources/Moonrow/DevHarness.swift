@@ -14,6 +14,7 @@ import Darwin
 ///     MOONROW_STRUCTURE=users MOONROW_STORE=… MOONROW_SNAPSHOTS=… Moonrow /tmp/copy-of-sample.sqlite
 ///     MOONROW_SAFETY=users MOONROW_STORE=… MOONROW_SNAPSHOTS=… Moonrow build/sample.sqlite
 ///     MOONROW_PREFS=users MOONROW_STORE=… MOONROW_SNAPSHOTS=… Moonrow build/sample.sqlite
+///     MOONROW_MCP=users MOONROW_STORE=… MOONROW_SNAPSHOTS=… Moonrow build/sample.sqlite
 ///     MOONROW_EXPORT=events MOONROW_STORE=… MOONROW_SNAPSHOTS=build/snapshots Moonrow build/sample.sqlite
 ///     MOONROW_IMPORT=empty_table=/tmp/rows.csv MOONROW_STORE=… MOONROW_SNAPSHOTS=… Moonrow /tmp/copy-of-sample.sqlite
 ///     MOONROW_STAGED=users MOONROW_STORE=… MOONROW_SNAPSHOTS=… Moonrow build/sample.sqlite
@@ -121,7 +122,7 @@ enum DevHarness {
             }
             return
         }
-        for (key, demo) in [("MOONROW_SAFETY", safetyDemo), ("MOONROW_PREFS", preferencesDemo)] as [(String, (AppDelegate, String, URL?) async throws -> Void)] {
+        for (key, demo) in [("MOONROW_SAFETY", safetyDemo), ("MOONROW_PREFS", preferencesDemo), ("MOONROW_MCP", mcpDemo)] as [(String, (AppDelegate, String, URL?) async throws -> Void)] {
             guard let table = env[key] else { continue }
             Task {
                 do {

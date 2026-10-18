@@ -59,6 +59,11 @@ import Testing
         #expect(QueryLog.line(e, dialect: PostgresDialect()).hasSuffix("-- Stopped"))
         e.rows = 300
         #expect(QueryLog.line(e, dialect: PostgresDialect()).hasSuffix("-- stopped after 300 rows"))
+        // Statements from elsewhere carry their origin as a comment.
+        let mcp = StatementLogEntry(sql: "SELECT 1", started: started, duration: .milliseconds(1), rows: 1, origin: "MCP")
+        let marked = QueryLog.line(mcp, dialect: PostgresDialect(), locale: Locale(identifier: "en_US"))
+        #expect(marked.hasSuffix("/* MCP */ SELECT 1  -- 1 row"))
+        #expect(marked.distance(from: marked.startIndex, to: marked.range(of: "/* MCP */")!.lowerBound) == QueryLog.prefixWidth)
     }
 
     @MainActor @Test func keepsTheNewestEntries() {
