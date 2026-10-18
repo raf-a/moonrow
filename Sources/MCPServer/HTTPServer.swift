@@ -92,10 +92,15 @@ private final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler 
             let router = self.router
             let large = tooLarge
             let version = head.version
-            // Everything the task needs is passed in as values; Swift 6.3's isolation checker
-            // rejects the same work written inline (a conditional `await` in the closure).
-            Task { await Self.respond(to: request, large: large, router: router, version: version, keepAlive: keepAlive, on: channel) }
+            Self.answer(request, large: large, router: router, version: version, keepAlive: keepAlive, on: channel)
         }
+    }
+
+    /// Starts the task that answers a request. It's made here, from plain values, rather than
+    /// inside `channelRead`: Swift 6.3's isolation checker can't follow a task made there.
+    private static func answer(_ request: MCPHTTPRequest, large: Bool, router: MCPRouter, version: HTTPVersion,
+                               keepAlive: Bool, on channel: any Channel) {
+        Task { await respond(to: request, large: large, router: router, version: version, keepAlive: keepAlive, on: channel) }
     }
 
     private static func respond(to request: MCPHTTPRequest, large: Bool, router: MCPRouter, version: HTTPVersion,
