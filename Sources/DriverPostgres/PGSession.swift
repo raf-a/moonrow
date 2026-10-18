@@ -112,6 +112,7 @@ final class PGSession: WireSession, @unchecked Sendable {
         let timeout = TimeAmount.seconds(c.connectTimeout)
         if tls, c.directTLS, c.tls.mode != .prefer, c.tls.mode != .allow {
             let wire = try await WireChannel.connect(to: c.endpoint, framer: PGFramer(), timeout: timeout)
+            // Fails, and closes the socket, if the server spoke before the handshake.
             try await wire.startTLS(c.tls, alpn: ["postgresql"])
             return wire
         }
@@ -131,6 +132,8 @@ final class PGSession: WireSession, @unchecked Sendable {
             try await wire.setFramer(PGFramer())
             switch answer {
             case UInt8(ascii: "S"):
+                // Bytes that arrive after the answer but before the TLS handler is in place fail
+                // the upgrade there.
                 try await wire.startTLS(c.tls)
             case UInt8(ascii: "N"):
                 guard c.tls.mode == .prefer || c.tls.mode == .allow else {
