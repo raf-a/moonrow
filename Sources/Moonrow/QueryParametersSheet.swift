@@ -35,7 +35,9 @@ final class QueryParametersSheet: NSWindowController {
         for key in keys {
             let label = NSTextField(labelWithString: key)
             label.font = .monospacedSystemFont(ofSize: 12, weight: .medium)
-            let field = NSTextField().singleLine()
+            // Scrolls sideways rather than wrapping, but keeps line breaks (Option-Return or
+            // pasted), since a Text or SQL value can span lines.
+            let field = NSTextField(string: "")
             field.placeholderString = "Value"
             field.stringValue = remembered[key]?.text ?? ""
             field.widthAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
