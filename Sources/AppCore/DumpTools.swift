@@ -128,9 +128,9 @@ public struct BundledTools: Sendable {
             let server = mariaDBServer ? "MariaDB" : "MySQL"
             return "These are \(kit.product)'s tools; \(server)'s own suit a \(server) server better."
         }
+        // Shown after the tool and its version.
         if role.isBackup, let serverMajor, kit.major < serverMajor {
-            return "\(role.tool(in: kit).rawValue) \(kit.versionString) is older than the server (\(serverMajor))"
-                + (kit.family == .postgres ? " and refuses to back it up." : ".")
+            return "older than the server (\(serverMajor))" + (kit.family == .postgres ? ", which it refuses to back up." : ".")
         }
         return nil
     }

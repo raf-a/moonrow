@@ -17,6 +17,8 @@ extension DevHarness {
     static func transferDemo(_ app: AppDelegate, table: String, snapshots: URL?) async throws {
         let dir = try require(snapshots, "MOONROW_SNAPSHOTS (the files are written there)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let backupOnly = table.hasSuffix(":backup")
+        let table = backupOnly ? String(table.dropLast(":backup".count)) : table
         func snap(_ name: String, _ window: NSWindow?) {
             window?.layoutIfNeeded()
             window?.displayIfNeeded()
@@ -31,6 +33,11 @@ extension DevHarness {
         }
         let workspace = try await waitFor("workspace") { app.workspaces.first }
         let window = try require(workspace.window, "workspace window")
+        if backupOnly {
+            _ = try await waitFor("sidebar item \(table)") { workspace.sidebar.select(named: table) ? true : nil }
+            try await backupDemo(app, workspace: workspace, dir: dir, snap: snap, check: check)
+            return
+        }
         try await makeKey(window)
         let connection = workspace.connection
         let dialect = connection.dialect
@@ -194,6 +201,15 @@ extension DevHarness {
         try check(try await count("m11_script") == 500, "m11_script has the rows")
 
         // MARK: Backup and Restore (servers)
+        try await backupDemo(app, workspace: workspace, dir: dir, snap: snap, check: check)
+    }
+
+    /// Backup of the workspace's database with the bundled tools and Restore into a new database,
+    /// through the windows (`MOONROW_TRANSFER=<table>:backup` runs only this; it needs no key window).
+    static func backupDemo(_ app: AppDelegate, workspace: WorkspaceWindowController, dir: URL,
+                           snap: (String, NSWindow?) -> Void, check: (Bool, String) throws -> Void) async throws {
+        let connection = workspace.connection
+        let dialect = connection.dialect
         guard workspace.config.driver.isServer else {
             print("backup and restore: skipped (SQLite)")
             return
@@ -214,9 +230,14 @@ extension DevHarness {
         let serverKit = tools.defaultKit(for: family, serverMajor: backup.serverMajor, mariaDBServer: backup.serverIsMariaDB)
         try check(backup.kit != nil && backup.kit == serverKit && backup.versionPopup.titleOfSelectedItem == serverKit?.title,
                   "the server's kit is picked: \(serverKit?.title ?? "none")")
-        if let other = tools.kits(for: family).first(where: { $0 != serverKit }), let serverKit {
+        // The oldest other kit: older than the server (or of the other kind), which its tooltip says.
+        if let other = tools.kits(for: family).last(where: { $0 != serverKit }), let serverKit {
             backup.choose(kit: other.id)
-            try check(backup.kit == other && backup.toolLabel.stringValue.contains(other.versionString), "another version can be chosen")
+            let tip = backup.versionPopup.toolTip ?? ""
+            try check(backup.kit == other && backup.versionPopup.titleOfSelectedItem == other.title && tip.contains(other.versionString)
+                      && tip.contains("\n"), "another version can be chosen: \(tip.replacingOccurrences(of: "\n", with: " / "))")
+            try await Task.sleep(for: .milliseconds(200))
+            snap("transfer-11a-other-version.png", backup.window)
             backup.choose(kit: serverKit.id)
         }
         try await Task.sleep(for: .milliseconds(200))
