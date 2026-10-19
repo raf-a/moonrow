@@ -878,7 +878,7 @@ final class QueryEditorViewController: NSViewController, NSTextViewDelegate,
         let alert = NSAlert()
         alert.messageText = "Go to Line"
         alert.informativeText = lines == 1 ? "The query has 1 line." : "The query has \(lines) lines."
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 22))
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 22)).singleLine()
         field.placeholderString = "Line number"
         field.stringValue = String(ruler.line(at: editor.selectedRange().location))
         alert.accessoryView = field

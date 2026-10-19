@@ -78,7 +78,7 @@ final class ExportOptionsView: NSStackView, NSTextFieldDelegate {
     private let sqlPane = NSGridView()
     private let xlsxPane = NSGridView()
     private let delimiterPopup = NSPopUpButton()
-    private let customDelimiter = NSTextField()
+    private let customDelimiter = NSTextField().singleLine()
     private let quotingPopup = NSPopUpButton()
     private let lineBreakPopup = NSPopUpButton()
     private let decimalPopup = NSPopUpButton()
@@ -90,8 +90,8 @@ final class ExportOptionsView: NSStackView, NSTextFieldDelegate {
     private let createBox = NSButton(checkboxWithTitle: "CREATE TABLE", target: nil, action: nil)
     private let dataBox = NSButton(checkboxWithTitle: "Rows as INSERT statements", target: nil, action: nil)
     private let gzipBox = NSButton(checkboxWithTitle: "Compress with gzip (.sql.gz)", target: nil, action: nil)
-    private let perInsertField = NSTextField()
-    let tableNameField = NSTextField()
+    private let perInsertField = NSTextField().singleLine()
+    let tableNameField = NSTextField().singleLine()
     private let xlsxHeaderBox = NSButton(checkboxWithTitle: "Column names in a bold first row", target: nil, action: nil)
     /// The file name the pattern gives, and Customize… to edit the pattern.
     let fileName: FileNamePatternRow

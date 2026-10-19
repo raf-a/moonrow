@@ -304,7 +304,7 @@ final class WelcomeWindowController: NSWindowController, NSWindowDelegate, NSSea
         alert.messageText = title
         alert.addButton(withTitle: button)
         alert.addButton(withTitle: "Cancel")
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 22))
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 22)).singleLine()
         field.stringValue = current
         field.placeholderString = "Group name"
         alert.accessoryView = field

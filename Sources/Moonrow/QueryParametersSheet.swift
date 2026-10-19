@@ -35,7 +35,7 @@ final class QueryParametersSheet: NSWindowController {
         for key in keys {
             let label = NSTextField(labelWithString: key)
             label.font = .monospacedSystemFont(ofSize: 12, weight: .medium)
-            let field = NSTextField()
+            let field = NSTextField().singleLine()
             field.placeholderString = "Value"
             field.stringValue = remembered[key]?.text ?? ""
             field.widthAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true

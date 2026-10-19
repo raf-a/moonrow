@@ -114,7 +114,7 @@ final class SafetyGate {
 @MainActor
 final class SafetyPrompt: NSObject, NSTextFieldDelegate {
     let sheet: NSWindow
-    let passwordField = NSSecureTextField()
+    let passwordField = NSSecureTextField().singleLine()
     private let errorLabel = NSTextField(labelWithString: "")
     private let credential: SafetyCredential?
     private var continuation: CheckedContinuation<Bool, Never>?

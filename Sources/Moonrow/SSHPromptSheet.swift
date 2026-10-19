@@ -45,7 +45,7 @@ enum SSHPromptSheet {
         if request.prompt.isSecret {
             alert.addButton(withTitle: "Connect")
             alert.addButton(withTitle: "Cancel")
-            let input = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 22))
+            let input = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 22)).singleLine()
             field = input
             if request.offersSave {
                 let box = NSButton(checkboxWithTitle: "Save in Keychain", target: nil, action: nil)

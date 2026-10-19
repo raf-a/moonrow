@@ -51,7 +51,7 @@ final class ImportSheetController: NSWindowController, NSTableViewDataSource, NS
     private let existingRadio = NSButton(radioButtonWithTitle: "Existing table", target: nil, action: nil)
     private let newRadio = NSButton(radioButtonWithTitle: "New table", target: nil, action: nil)
     private let tablePopup = NSPopUpButton()
-    private let newNameField = NSTextField()
+    private let newNameField = NSTextField().singleLine()
     private let delimiterPopup = NSPopUpButton()
     private let quotePopup = NSPopUpButton()
     private let encodingPopup = NSPopUpButton()
