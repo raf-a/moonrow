@@ -32,10 +32,6 @@ public struct AppSettings: Codable, Equatable, Sendable {
     public var queryParameters: Bool = true
     /// What the query editor's Run button runs; the other is in its menu.
     public var runButtonRunsAll: Bool = false
-    /// Settings ▸ Locations: the folder holding pg_dump, pg_restore and psql; empty finds them.
-    public var postgresToolsFolder: String = ""
-    /// The folder holding mysqldump and mysql (or MariaDB's); empty finds them.
-    public var mysqlToolsFolder: String = ""
     /// Seconds a query tab's statement may run before it's stopped as ⌘. stops it; 0 = no limit.
     public var queryTimeout: Int = 300
     /// Workspaces send `SELECT 1` on sessions idle for 30 seconds, so firewalls and servers
@@ -73,7 +69,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case appearance, editorTheme, editorFontName, editorFontSize, gridFontSize, alternatingRows
         case defaultSafeMode, keyBindings, reopenWorkspaces, queryParameters, runButtonRunsAll
-        case postgresToolsFolder, mysqlToolsFolder, queryTimeout, keepAlive, safeModeTouchID
+        case queryTimeout, keepAlive, safeModeTouchID
         case mcpEnabled, mcpPort, mcpRemote, mcpApproval, mcpAutoToken
     }
 
@@ -96,8 +92,6 @@ public struct AppSettings: Codable, Equatable, Sendable {
         reopenWorkspaces = value(.reopenWorkspaces, d.reopenWorkspaces)
         queryParameters = value(.queryParameters, d.queryParameters)
         runButtonRunsAll = value(.runButtonRunsAll, d.runButtonRunsAll)
-        postgresToolsFolder = value(.postgresToolsFolder, d.postgresToolsFolder)
-        mysqlToolsFolder = value(.mysqlToolsFolder, d.mysqlToolsFolder)
         queryTimeout = min(max(value(.queryTimeout, d.queryTimeout), Self.queryTimeouts.lowerBound), Self.queryTimeouts.upperBound)
         keepAlive = value(.keepAlive, d.keepAlive)
         safeModeTouchID = value(.safeModeTouchID, d.safeModeTouchID)
@@ -107,11 +101,6 @@ public struct AppSettings: Codable, Equatable, Sendable {
         mcpRemote = value(.mcpRemote, d.mcpRemote)
         mcpApproval = value(.mcpApproval, d.mcpApproval)
         mcpAutoToken = value(.mcpAutoToken, d.mcpAutoToken)
-    }
-
-    /// Finds the backup tools with the folders chosen here.
-    public var toolLocator: ToolLocator {
-        ToolLocator(folders: [.postgres: postgresToolsFolder, .mysql: mysqlToolsFolder])
     }
 }
 

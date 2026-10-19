@@ -1059,7 +1059,7 @@ public struct RestoreJob: Sendable {
     }
 
     /// Which tool a file needs on a connection; nil when it can't be restored there.
-    public static func role(for kind: BackupFileKind, driver: DriverKind) -> ToolLocator.Role? {
+    public static func role(for kind: BackupFileKind, driver: DriverKind) -> BundledTools.Role? {
         switch (driver, kind) {
         case (.postgres, let k) where k.isPostgresArchive: .restorePostgresArchive
         case (.postgres, .sql), (.postgres, .sqlGzip): .restorePostgresScript

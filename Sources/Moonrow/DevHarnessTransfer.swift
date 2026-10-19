@@ -10,9 +10,10 @@ extension DevHarness {
     ///
     /// Steps: Export Tables… as Excel, CSV (a folder) and gzipped SQL; ⌘E as Excel; a CSV with a
     /// decimal comma into a new table (types guessed); JSON into that table; a large CSV stopped
-    /// halfway (nothing imported); a SQL file run with progress; Settings ▸ Locations; and with
-    /// `MOONROW_CONNECT` (Postgres, MySQL, MariaDB) Backup of the database and Restore into a new
-    /// database.
+    /// halfway (nothing imported); a SQL file run with progress; and with `MOONROW_CONNECT`
+    /// (Postgres, MySQL, MariaDB) Backup of the database with the bundled tools (the version menu
+    /// picking the server's) and Restore into a new database. Set `MOONROW_TOOLS` to a tools
+    /// folder when running outside the app bundle.
     static func transferDemo(_ app: AppDelegate, table: String, snapshots: URL?) async throws {
         let dir = try require(snapshots, "MOONROW_SNAPSHOTS (the files are written there)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -192,13 +193,6 @@ extension DevHarness {
         try await sheetGone()
         try check(try await count("m11_script") == 500, "m11_script has the rows")
 
-        // MARK: Settings ▸ Locations
-        app.showLocations()
-        let prefs = try await waitFor("settings window") { NSApp.windows.first { $0.title == "Locations" && $0.isVisible } }
-        try await Task.sleep(for: .seconds(1))
-        snap("transfer-10-locations.png", prefs)
-        prefs.close()
-
         // MARK: Backup and Restore (servers)
         guard workspace.config.driver.isServer else {
             print("backup and restore: skipped (SQLite)")
@@ -212,6 +206,19 @@ extension DevHarness {
         _ = try await waitFor("databases listed") { backup.databases.contains(database) ? true : nil }
         backup.select(database: database)
         try check(backup.selectedDatabase == database, "the workspace's database is selected")
+        // The version menu: the bundled kits, the server's picked.
+        let tools = backup.environment.tools
+        let family = try require(backup.family, "a family")
+        try check(!backup.versionPopup.isHidden && backup.versionPopup.itemTitles == tools.kits(for: family).map(\.title),
+                  "the version menu lists the bundled tools: \(backup.versionPopup.itemTitles.joined(separator: ", "))")
+        let serverKit = tools.defaultKit(for: family, serverMajor: backup.serverMajor, mariaDBServer: backup.serverIsMariaDB)
+        try check(backup.kit != nil && backup.kit == serverKit && backup.versionPopup.titleOfSelectedItem == serverKit?.title,
+                  "the server's kit is picked: \(serverKit?.title ?? "none")")
+        if let other = tools.kits(for: family).first(where: { $0 != serverKit }), let serverKit {
+            backup.choose(kit: other.id)
+            try check(backup.kit == other && backup.toolLabel.stringValue.contains(other.versionString), "another version can be chosen")
+            backup.choose(kit: serverKit.id)
+        }
         try await Task.sleep(for: .milliseconds(200))
         snap("transfer-11-backup.png", backup.window)
         // The file name editor: the pattern as tokens, a separator and a placeholder added.

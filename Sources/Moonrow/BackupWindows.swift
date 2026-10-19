@@ -10,16 +10,15 @@ struct ToolWindowEnvironment {
     /// The database password and SSH login for a connection, asking if its mode says so; nil
     /// when the user cancels.
     var login: (ConnectionConfig, NSWindow?) async -> (password: String?, ssh: SSHLogin)?
-    var locator: () -> ToolLocator
+    /// The tools inside the app, a kit per server version.
+    var tools: BundledTools
     /// After a restore or a new database: workspaces of that connection reload their lists.
     var onRestored: (UUID) -> Void = { _ in }
-    /// Settings ▸ Locations.
-    var showLocations: () -> Void = {}
 }
 
 /// The parts Backup and Restore share: the saved connections and the selected one's databases
-/// side by side, each under a search field; a column of options on the right; the tool in use
-/// and the buttons along the bottom. A run shows its log in a sheet.
+/// side by side, each under a search field; a column of options on the right; the tools' version,
+/// the tool in use and the buttons along the bottom. A run shows its log in a sheet.
 @MainActor
 class ToolWindowController: NSWindowController, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate,
     NSTokenFieldDelegate {
@@ -48,7 +47,10 @@ class ToolWindowController: NSWindowController, NSWindowDelegate, NSTableViewDat
     let databaseTable = NSTableView()
     private let databaseNote = NSTextField(wrappingLabelWithString: "")
     let toolLabel = NSTextField(wrappingLabelWithString: "")
-    private let locationsButton = NSButton(title: "Locations…", target: nil, action: nil)
+    /// The bundled kits of the selected connection's family; the server's is picked when it connects.
+    let versionPopup = NSPopUpButton()
+    private var kitChoices: [ToolKit] = []
+    private(set) var kit: ToolKit?
 
     // The options column: popups above, then the tool's flags as tokens.
     let addOptionMenu = NSPopUpButton(frame: .zero, pullsDown: true)
@@ -163,11 +165,12 @@ class ToolWindowController: NSWindowController, NSWindowDelegate, NSTableViewDat
         toolLabel.lineBreakMode = .byTruncatingTail
         toolLabel.cell?.truncatesLastVisibleLine = true
         toolLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        locationsButton.target = self
-        locationsButton.action = #selector(showLocations(_:))
-        locationsButton.controlSize = .small
-        locationsButton.isHidden = true
-        let bottom = NSStackView(views: [toolLabel, locationsButton, NSView()] + buttons)
+        versionPopup.target = self
+        versionPopup.action = #selector(kitChosen(_:))
+        versionPopup.controlSize = .small
+        versionPopup.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        versionPopup.isHidden = true
+        let bottom = NSStackView(views: [versionPopup, toolLabel, NSView()] + buttons)
         bottom.alignment = .centerY
         bottom.spacing = 8
 
@@ -203,6 +206,7 @@ class ToolWindowController: NSWindowController, NSWindowDelegate, NSTableViewDat
         serverMajor = nil
         serverIsMariaDB = false
         selected = config
+        chooseKit()
         reloadDatabases()
         selectionDidChange()
         guard let config else { return }
@@ -232,6 +236,7 @@ class ToolWindowController: NSWindowController, NSWindowDelegate, NSTableViewDat
                 serverIsMariaDB = maria
                 let wanted = preferredDatabase ?? (config.database.isEmpty ? nil : config.database)
                 preferredDatabase = nil
+                chooseKit()
                 reloadDatabases(select: wanted)
                 databasesDidLoad()
             } catch {
@@ -367,6 +372,45 @@ class ToolWindowController: NSWindowController, NSWindowDelegate, NSTableViewDat
 
     // MARK: - Tool
 
+    /// Lists the family's kits in the version menu and picks the one for the server.
+    private func chooseKit() {
+        kitChoices = family.map(environment.tools.kits(for:)) ?? []
+        kit = family.flatMap { environment.tools.defaultKit(for: $0, serverMajor: serverMajor, mariaDBServer: serverIsMariaDB) }
+        versionPopup.removeAllItems()
+        versionPopup.addItems(withTitles: kitChoices.map(\.title))
+        if let kit, let i = kitChoices.firstIndex(of: kit) { versionPopup.selectItem(at: i) }
+    }
+
+    @objc private func kitChosen(_ sender: NSPopUpButton) {
+        kit = kitChoices[safe: sender.indexOfSelectedItem]
+        refresh()
+    }
+
+    /// Picks a kit by its `id`, as the version menu does. For the dev harness.
+    func choose(kit id: String) {
+        guard let i = kitChoices.firstIndex(where: { $0.id == id }) else { return }
+        versionPopup.selectItem(at: i)
+        kitChosen(versionPopup)
+    }
+
+    /// The tool `role` runs from the chosen kit, and why it may not suit the server.
+    func tool(for role: BundledTools.Role) -> (ToolInfo?, warning: String?) {
+        guard let kit else { return (nil, nil) }
+        return (environment.tools.tool(for: role, in: kit),
+                environment.tools.warning(kit, role: role, serverMajor: serverMajor, mariaDBServer: serverIsMariaDB))
+    }
+
+    /// Why `name` can't run: the app has no kit for the family, or the kit lacks it.
+    func missing(_ name: String) -> String {
+        kit == nil ? "This copy of Moonrow has no \(family?.title ?? "") tools." : "\(name) is missing from this copy of Moonrow."
+    }
+
+    /// The version menu, while the selected connection can use it.
+    func showVersions(_ shown: Bool) {
+        versionPopup.isHidden = !shown || kitChoices.isEmpty
+        versionPopup.isEnabled = !isRunning
+    }
+
     /// Shows which tool runs, or why none can.
     func show(tool: ToolInfo?, warning: String?, missing: String) {
         if let tool {
@@ -378,16 +422,12 @@ class ToolWindowController: NSWindowController, NSWindowDelegate, NSTableViewDat
             toolLabel.toolTip = missing
             toolLabel.textColor = .systemRed
         }
-        offerLocations(tool == nil || warning != nil)
     }
-
-    /// Settings ▸ Locations is offered when a tool is missing or not the right one.
-    func offerLocations(_ shown: Bool) { locationsButton.isHidden = !shown }
 
     func clearTool() {
         toolLabel.stringValue = ""
         toolLabel.toolTip = nil
-        locationsButton.isHidden = true
+        versionPopup.isHidden = true
     }
 
     // MARK: - Running
@@ -424,8 +464,6 @@ class ToolWindowController: NSWindowController, NSWindowDelegate, NSTableViewDat
             onFinish?(result)
         }
     }
-
-    @objc private func showLocations(_ sender: Any?) { environment.showLocations() }
 
     @objc func startClicked(_ sender: Any?) { start() }
 
@@ -710,12 +748,10 @@ final class BackupWindowController: ToolWindowController {
         // pg_dump compresses its archives itself; gzip is for scripts.
         gzipBox.isEnabled = !isPostgres || options.postgresFormat == .plain
         if login != nil {
-            let (found, warning) = environment.locator().choose(isPostgres ? .backupPostgres : .backupMySQL, serverMajor: serverMajor,
-                                                                mariaDBServer: serverIsMariaDB)
+            let (found, warning) = tool(for: isPostgres ? .backupPostgres : .backupMySQL)
             tool = found
-            show(tool: found, warning: warning, missing: isPostgres
-                ? "pg_dump wasn't found on PATH, in the usual install folders or in the folder set in Settings ▸ Locations."
-                : "mysqldump wasn't found on PATH, in the usual install folders or in the folder set in Settings ▸ Locations.")
+            showVersions(true)
+            show(tool: found, warning: warning, missing: missing(isPostgres ? "pg_dump" : kit?.isMariaDB == true ? "mariadb-dump" : "mysqldump"))
         } else {
             tool = nil
             clearTool()
@@ -831,19 +867,23 @@ final class RestoreWindowController: ToolWindowController {
         contentPopup.isHidden = family != .postgres
         contentNote.isHidden = family != .postgres
         if selected.readOnly {
+            showVersions(false)
             show(tool: nil, warning: nil, missing: "\(selected.displayName) is read-only; nothing can be restored into it.")
         } else if login != nil {
-            // pg_restore takes archives, psql scripts; either may be missing.
-            let roles: [(ToolLocator.Role, String)] = family == .postgres
-                ? [(.restorePostgresArchive, "pg_restore"), (.restorePostgresScript, "psql")] : [(.restoreMySQL, "mysql")]
-            let found = roles.map { role, name in (name, environment.locator().choose(role, serverMajor: serverMajor, mariaDBServer: serverIsMariaDB)) }
+            // pg_restore takes archives, psql scripts; both come from the chosen kit.
+            let roles: [(BundledTools.Role, String)] = family == .postgres
+                ? [(.restorePostgresArchive, "pg_restore"), (.restorePostgresScript, "psql")]
+                : [(.restoreMySQL, kit?.isMariaDB == true ? "mariadb" : "mysql")]
+            let found = roles.map { role, name in (name, tool(for: role)) }
             let tools = found.compactMap(\.1.0)
-            let missing = found.filter { $0.1.0 == nil }.map(\.0)
-            let warnings = found.compactMap(\.1.1) + missing.map { "\($0) wasn't found on PATH, in the usual install folders or in the folder set in Settings ▸ Locations." }
+            let absent = found.filter { $0.1.0 == nil }.map(\.0)
+            // The kit's warning is the same for both tools.
+            let warnings = Array(Set(found.compactMap(\.1.1))).sorted()
+                + (kit == nil && !absent.isEmpty ? [missing("")] : absent.map(missing))
+            showVersions(true)
             toolLabel.stringValue = (tools.map { "\($0.tool.rawValue) \($0.versionString)" } + warnings).joined(separator: " — ")
             toolLabel.toolTip = (tools.map(\.path) + warnings).joined(separator: "\n")
             toolLabel.textColor = tools.isEmpty ? .systemRed : warnings.isEmpty ? .secondaryLabelColor : .systemOrange
-            offerLocations(!warnings.isEmpty)
         } else {
             clearTool()
         }
@@ -918,10 +958,9 @@ final class RestoreWindowController: ToolWindowController {
         guard let role = RestoreJob.role(for: kind, driver: selected.driver) else {
             return .failure(DatabaseError("A \(kind.title) can't be restored into \(selected.driver.displayName)."))
         }
-        let name = role == .restorePostgresArchive ? "pg_restore" : role == .restorePostgresScript ? "psql" : "mysql"
-        guard let tool = environment.locator().choose(role, serverMajor: serverMajor, mariaDBServer: serverIsMariaDB).0 else {
-            return .failure(DatabaseError("\(name) wasn't found on PATH, in the usual install folders or in the folder set in Settings ▸ Locations."))
-        }
+        let name = role == .restorePostgresArchive ? "pg_restore" : role == .restorePostgresScript ? "psql"
+            : kit?.isMariaDB == true ? "mariadb" : "mysql"
+        guard let tool = tool(for: role).0 else { return .failure(DatabaseError(missing(name))) }
         return .success(RestoreJob(config: selected, password: login.password, ssh: login.ssh, database: database, file: file, kind: kind,
                                    options: options, tool: tool))
     }

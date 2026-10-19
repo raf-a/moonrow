@@ -78,6 +78,17 @@ check "the zip's EdDSA signature matches the app's key" \
   swift scripts/verify-ed25519.swift "$zip" "$signature" "$(plist SUPublicEDKey)"
 archs="$(lipo -archs "$app/Contents/MacOS/Moonrow" 2>/dev/null)"
 check "the app is universal ($archs)" sh -c 'case " $1 " in *" arm64 "*) ;; *) exit 1 ;; esac; case " $1 " in *" x86_64 "*) ;; *) exit 1 ;; esac' - "$archs"
+check "the app carries the backup tools" test -f "$app/Contents/Resources/tools.json"
+check "the backup tools are universal" sh -c '
+  for f in "$1"/Contents/Helpers/tools/*/*; do
+    a="$(lipo -archs "$f")"
+    case " $a " in *" arm64 "*) ;; *) echo "$f: $a"; exit 1 ;; esac
+    case " $a " in *" x86_64 "*) ;; *) echo "$f: $a"; exit 1 ;; esac
+  done' - "$app"
+check "the backup tools are signed with the app's identity" sh -c '
+  for f in "$1"/Contents/Helpers/tools/*/*; do
+    codesign -dvv "$f" 2>&1 | grep -q "Authority=Developer ID Application" || { echo "$f"; exit 1; }
+  done' - "$app"
 check "the app's code signature is valid" codesign --verify --deep --strict "$app"
 check "the app is signed with a Developer ID" sh -c 'codesign -dvv "$1" 2>&1 | grep -q "Authority=Developer ID Application"' - "$app"
 check "the app is notarized" sh -c 'spctl -a -t exec -vv "$1" 2>&1 | grep -q "source=Notarized Developer ID"' - "$app"

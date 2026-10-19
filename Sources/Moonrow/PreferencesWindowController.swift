@@ -4,30 +4,26 @@ import MCPServer
 import Sparkle
 import SQLScript
 
-/// Settings (⌘,): General, Fonts & Colors, Keymap, Locations, MCP. Every change is saved and applied at once.
+/// Settings (⌘,): General, Fonts & Colors, Keymap, MCP. Every change is saved and applied at once.
 @MainActor
 final class PreferencesWindowController: NSWindowController {
     let tabs = PreferencesTabs()
     let general: GeneralPreferences
     let fonts: FontsPreferences
     let keymap: KeymapPreferences
-    let locations: LocationsPreferences
     let mcp: MCPPreferences
-    static let locationsPane = 3
-    static let mcpPane = 4
+    static let mcpPane = 3
 
     init(settings: SettingsStore, updater: SPUUpdater, store: ConnectionStore, mcp: @escaping () -> MCPService) {
         general = GeneralPreferences(settings: settings, updater: updater)
         fonts = FontsPreferences(settings: settings)
         keymap = KeymapPreferences(settings: settings)
-        locations = LocationsPreferences(settings: settings)
         self.mcp = MCPPreferences(settings: settings, store: store, service: mcp)
         tabs.tabStyle = .toolbar
         for (controller, title, symbol) in [
             (general as NSViewController, "General", "gearshape"),
             (fonts, "Fonts & Colors", "textformat"),
             (keymap, "Keymap", "keyboard"),
-            (locations, "Locations", "folder"),
             (self.mcp, "MCP", "point.3.connected.trianglepath.dotted"),
         ] {
             // The window is titled after the pane showing.
@@ -630,120 +626,5 @@ final class ShortcutRecorder: NSButton {
         }
         guard let plain = event.characters(byApplyingModifiers: []), plain.count == 1 else { return nil }
         return plain.lowercased()
-    }
-}
-
-// MARK: - Locations
-
-/// Where Backup and Restore find pg_dump, pg_restore, psql, mysqldump and mysql: a folder per
-/// family, or (empty) PATH and the usual install folders. Lists what's found.
-@MainActor
-final class LocationsPreferences: NSViewController {
-    private let settings: SettingsStore
-    let postgresField = NSTextField()
-    let mysqlField = NSTextField()
-    let postgresFound = NSTextField(wrappingLabelWithString: "")
-    let mysqlFound = NSTextField(wrappingLabelWithString: "")
-    private var scan: Task<Void, Never>?
-
-    init(settings: SettingsStore) {
-        self.settings = settings
-        super.init(nibName: nil, bundle: nil)
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError() }
-
-    override func loadView() {
-        func pathRow(_ field: NSTextField, tag: Int) -> NSStackView {
-            field.placeholderString = "Found automatically"
-            field.widthAnchor.constraint(equalToConstant: 300).isActive = true
-            field.target = self
-            field.action = #selector(typed(_:))
-            field.tag = tag
-            field.lineBreakMode = .byTruncatingMiddle
-            let choose = NSButton(title: "Choose…", target: self, action: #selector(choose(_:)))
-            choose.tag = tag
-            let clear = NSButton(title: "Automatic", target: self, action: #selector(clear(_:)))
-            clear.tag = tag
-            let row = NSStackView(views: [field, choose, clear])
-            row.spacing = 6
-            return row
-        }
-        for label in [postgresFound, mysqlFound] {
-            label.font = .monospacedSystemFont(ofSize: 10.5, weight: .regular)
-            label.textColor = .secondaryLabelColor
-            label.preferredMaxLayoutWidth = 470
-            label.isSelectable = true
-        }
-        let grid = formGrid([
-            ("PostgreSQL tools", pathRow(postgresField, tag: 0)),
-            ("", postgresFound),
-            ("MySQL / MariaDB tools", pathRow(mysqlField, tag: 1)),
-            ("", mysqlFound),
-            ("", hint("Backup and Restore run these tools. With a folder set, only that folder is searched; otherwise PATH and the usual install folders (Homebrew, Postgres.app, the PostgreSQL and MySQL installers, MacPorts).")),
-        ])
-        let root = NSView()
-        root.addSubview(grid)
-        pinTop(grid, in: root)
-        root.widthAnchor.constraint(equalToConstant: 700).isActive = true
-        view = root
-        refresh()
-    }
-
-    private func refresh() {
-        let s = settings.settings
-        postgresField.stringValue = s.postgresToolsFolder
-        mysqlField.stringValue = s.mysqlToolsFolder
-        postgresFound.stringValue = "Looking…"
-        mysqlFound.stringValue = "Looking…"
-        scan?.cancel()
-        let locator = s.toolLocator
-        scan = Task {
-            let (pg, my) = await Task.detached {
-                (Self.describe([.pgDump, .pgRestore, .psql], locator), Self.describe([.mysqldump, .mysql, .mariadbDump, .mariadb], locator))
-            }.value
-            guard !Task.isCancelled else { return }
-            postgresFound.stringValue = pg
-            mysqlFound.stringValue = my
-            view.window?.fit(to: view)
-        }
-    }
-
-    /// One line per tool: the copy Backup would pick, and how many others were found.
-    nonisolated static func describe(_ tools: [DumpTool], _ locator: ToolLocator) -> String {
-        let lines = tools.compactMap { tool -> String? in
-            let found = locator.find(tool)
-            guard let best = found.first else { return nil }
-            let others = found.count > 1 ? " (+\(found.count - 1) more)" : ""
-            return "\(tool.rawValue) \(best.versionString)\(best.isMariaDB ? " MariaDB" : "") — \(best.path)\(others)"
-        }
-        return lines.isEmpty ? "None found." : lines.joined(separator: "\n")
-    }
-
-    private func set(_ tag: Int, _ path: String) {
-        save(settings, in: view) {
-            if tag == 0 { $0.postgresToolsFolder = path } else { $0.mysqlToolsFolder = path }
-        }
-        refresh()
-    }
-
-    @objc private func typed(_ sender: NSTextField) {
-        set(sender.tag, sender.stringValue.trimmingCharacters(in: .whitespaces))
-    }
-
-    @objc private func clear(_ sender: NSButton) { set(sender.tag, "") }
-
-    @objc private func choose(_ sender: NSButton) {
-        guard let window = view.window else { return }
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.message = sender.tag == 0 ? "Choose the folder holding pg_dump" : "Choose the folder holding mysqldump"
-        let tag = sender.tag
-        panel.beginSheetModal(for: window) { [weak self] response in
-            guard response == .OK, let url = panel.url else { return }
-            self?.set(tag, url.path)
-        }
     }
 }
