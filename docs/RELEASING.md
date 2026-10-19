@@ -78,9 +78,14 @@ The key never changes: apps already installed only accept updates signed with th
 
 The workflows run on GitHub's `macos-26` image and pick the newest Xcode on it. To pin one, set the repository variable `XCODE_APP`, e.g. `/Applications/Xcode_27.0.app`.
 
+## Backup tools
+
+The app carries its own pg_dump, pg_restore, psql, mysqldump, mysql, mariadb-dump and mariadb, built from the vendors' source by `scripts/build-tools.sh` into `build/tools` (versions and checksums are at the top of the script). The release workflow caches them until the script or `scripts/tools-patches/` changes; a clean build takes a while. A universal or signed `build-app.sh` fails without them.
+
 ## Locally
 
 ```bash
+scripts/build-tools.sh                # once; build/tools
 MOONROW_UNIVERSAL=1 MOONROW_VERSION=1.2.0 scripts/build-app.sh release
 scripts/package-release.sh 1.2.0      # build/release/
 ```

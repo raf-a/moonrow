@@ -8,6 +8,7 @@ Run `swift build` and `swift test` from the repo root, with the Bash sandbox dis
 - Swift 6 language mode with strict concurrency. Targets macOS 14.
 - Tests use Swift Testing (`import Testing`).
 - Server tests (Postgres, MySQL, MariaDB) skip unless their env vars are set: `scripts/test-servers.sh up`, then `eval "$(scripts/test-servers.sh env)" && swift test`. Only touch the `moonrow-test-*` containers; others on this machine are the user's.
+- Backup and Restore run only the client tools bundled in the app (PostgreSQL 10–18, MySQL 5.7 and 8.0, MariaDB): `scripts/build-tools.sh` builds them from source into `build/tools` (slow, run it in the background), and `scripts/build-app.sh` copies them into `Contents/Helpers/tools`. Tests and the harness use `MOONROW_TOOLS`, else `build/tools`; without them the round trips skip.
 
 Layout:
 - `Sources/SQLScript`: lexer, statement splitter, current statement.

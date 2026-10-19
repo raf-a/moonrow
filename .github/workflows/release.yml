@@ -130,6 +130,16 @@ jobs:
           printf '%s' "$NOTARY_KEY" | base64 --decode > "$RUNNER_TEMP/notary.p8"
           echo "NOTARY_KEY_PATH=$RUNNER_TEMP/notary.p8" >> "$GITHUB_ENV"
 
+      # The client tools Backup and Restore run, built from source (long); kept until the
+      # script or its patches change.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: build/tools
+          key: backup-tools-${{ hashFiles('scripts/build-tools.sh', 'scripts/tools-patches/**') }}
+
+      - name: Build the backup tools
+        run: scripts/build-tools.sh
+
       - name: Build
         env:
           MOONROW_UNIVERSAL: '1'

@@ -9,6 +9,9 @@
 #   MOONROW_SIGN_IDENTITY  codesign identity, e.g. "Developer ID Application: …" (default: ad hoc)
 #   MOONROW_SPARKLE_KEY    SUPublicEDKey, the EdDSA public key updates are checked against
 #                          (default: the release key; tests set their own)
+#
+# Backup and Restore's client tools come from build/tools (scripts/build-tools.sh). A debug build
+# goes without them when they haven't been built; a universal or signed one needs them.
 set -eu
 config="${1:-release}"
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -36,6 +39,21 @@ rm -rf "$sparkle/Versions/B/XPCServices" "$sparkle/XPCServices"
 cp "$bindir/moonrow-ssh-helper" "$app/Contents/MacOS/moonrow-ssh-helper"
 # The stdio bridge MCP clients run (Settings ▸ MCP shows its path).
 cp "$bindir/moonrow-mcp" "$app/Contents/MacOS/moonrow-mcp"
+# The client tools Backup and Restore run, listed by Resources/tools.json, with their licences.
+tools="build/tools"
+if [ -f "$tools/tools.json" ]; then
+  mkdir -p "$app/Contents/Helpers/tools"
+  for part in "$tools"/*/; do
+    case "$(basename "$part")" in Licenses) ;; *) ditto "$part" "$app/Contents/Helpers/tools/$(basename "$part")" ;; esac
+  done
+  cp "$tools/tools.json" "$app/Contents/Resources/tools.json"
+  ditto "$tools/Licenses" "$app/Contents/Resources/Licenses"
+elif [ "${MOONROW_UNIVERSAL:-0}" = 1 ] || [ "${MOONROW_SIGN_IDENTITY:--}" != "-" ]; then
+  echo "error: no backup tools; run scripts/build-tools.sh first" >&2
+  exit 1
+else
+  echo "warning: no backup tools (scripts/build-tools.sh); Backup and Restore won't run" >&2
+fi
 iconutil -c icns -o "$app/Contents/Resources/AppIcon.icns" Assets/AppIcon.iconset
 # Liquid Glass icon (macOS 26+): compile Assets/AppIcon.icon (Icon Composer) into Assets.car.
 # Needs Xcode 26+'s actool. macOS 14-15 keep using AppIcon.icns (actool may regenerate it from
@@ -108,8 +126,9 @@ cat > "$app/Contents/Info.plist" <<PLIST
 PLIST
 
 # Nested code is signed inside out, before the bundle that seals it: Sparkle's helpers, then its
-# framework, then the ssh helper, the MCP bridge and the app. A real identity gets the hardened runtime and a
-# secure timestamp, which notarization requires.
+# framework, then the backup tools' libraries and the tools, the ssh helper, the MCP bridge and
+# the app. A real identity gets the hardened runtime and a secure timestamp, which notarization
+# requires.
 identity="${MOONROW_SIGN_IDENTITY:--}"
 if [ "$identity" = "-" ]; then
   sign() { codesign --force --sign - "$@"; }
@@ -119,6 +138,12 @@ fi
 sign "$sparkle/Versions/B/Autoupdate"
 sign "$sparkle/Versions/B/Updater.app"
 sign "$sparkle"
+if [ -d "$app/Contents/Helpers/tools" ]; then
+  sign "$app"/Contents/Helpers/tools/lib/*
+  for kit in "$app"/Contents/Helpers/tools/*/; do
+    [ "$(basename "$kit")" = lib ] || sign "$kit"*
+  done
+fi
 sign "$app/Contents/MacOS/moonrow-ssh-helper"
 sign "$app/Contents/MacOS/moonrow-mcp"
 sign "$app"

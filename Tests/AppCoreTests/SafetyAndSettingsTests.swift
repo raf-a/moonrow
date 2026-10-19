@@ -130,6 +130,11 @@ private func tempDir() -> URL {
         #expect(store.load() == nil)
         #expect(store.settings.mcpEnabled && store.settings.mcpPort == 51003 && !store.settings.mcpRemote)
 
+        // Tool folders saved by older versions are ignored; the rest still reads.
+        try Data(#"{"postgresToolsFolder":"/opt/pg/bin","mysqlToolsFolder":"","keepAlive":true}"#.utf8).write(to: url)
+        #expect(store.load() == nil)
+        #expect(store.settings.keepAlive)
+
         try Data("{".utf8).write(to: url)
         #expect(store.load() != nil)
         #expect(store.settings == AppSettings())

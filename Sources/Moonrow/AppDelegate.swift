@@ -291,12 +291,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         mcpActivity?.showWindow(nil)
     }
 
-    /// Settings ▸ Locations.
-    func showLocations() {
-        showPreferences(nil)
-        preferences?.show(pane: PreferencesWindowController.locationsPane)
-    }
-
     // MARK: - Updates
 
     let updates = Updates()
@@ -319,11 +313,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         ToolWindowEnvironment(
             store: store,
             login: { [weak self] config, window in await self?.toolLogin(config, in: window) },
-            locator: { [weak self] in self?.settings.settings.toolLocator ?? ToolLocator() },
+            tools: .app,
             onRestored: { [weak self] id in
                 for workspace in self?.workspaces ?? [] where workspace.config.id == id { workspace.sidebar.reload() }
-            },
-            showLocations: { [weak self] in self?.showLocations() })
+            })
     }
 
     /// The password a workspace on this connection logged in with, else what its password mode

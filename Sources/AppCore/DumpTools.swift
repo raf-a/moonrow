@@ -20,160 +20,152 @@ public enum DumpTool: String, Sendable, CaseIterable, Codable {
     }
 }
 
-/// One copy of a tool found on this Mac.
+/// One tool a backup or restore runs.
 public struct ToolInfo: Sendable, Hashable {
     public var tool: DumpTool
     public var path: String
-    /// As the tool prints it (`pg_dump (PostgreSQL) 18.1`).
+    /// `pg_dump 17.6`.
     public var versionText: String
-    /// Major and minor, e.g. [18, 1] or [9, 5, 0].
+    /// The release, e.g. [17, 6] or [8, 0, 43].
     public var version: [Int]
     /// MariaDB's client (whatever its file is called).
     public var isMariaDB: Bool
 
+    public init(tool: DumpTool, path: String, versionText: String, version: [Int], isMariaDB: Bool) {
+        self.tool = tool
+        self.path = path
+        self.versionText = versionText
+        self.version = version
+        self.isMariaDB = isMariaDB
+    }
+
     public var major: Int { version.first ?? 0 }
     public var versionString: String { version.map(String.init).joined(separator: ".") }
-
-    /// The version in `--version` output: after "Distrib " (old MariaDB tools), "from "
-    /// (new MariaDB tools), else the first number with a dot.
-    public static func parse(_ output: String) -> (version: [Int], mariaDB: Bool) {
-        let mariaDB = output.contains("MariaDB")
-        let text = output.firstMatch(of: /(?:Distrib|from)\s+(\d+(?:\.\d+)+)/).map { String($0.1) }
-            ?? output.firstMatch(of: /\d+\.\d+(?:\.\d+)?/).map { String($0.0) } ?? ""
-        return (text.split(separator: ".").compactMap { Int($0) }, mariaDB)
-    }
 }
 
-/// Finds the tools: in the folder chosen in Settings ▸ Locations when there is one (and only
-/// there), else on PATH and in the usual install places (Homebrew, Postgres.app, the EDB and
-/// MySQL installers, MacPorts). A GUI app's PATH is short, hence the list.
-public struct ToolLocator: Sendable {
-    /// Settings ▸ Locations, per family; empty means look everywhere.
-    public var folders: [DumpTool.Family: String]
-    public var path: String
-    /// Runs `<tool> --version`; replaceable for tests.
-    public var versionOf: @Sendable (String) -> String?
+/// The client tools of one release that ship with the app, in a folder named after its `id`:
+/// `postgresql-17` holds pg_dump, pg_restore and psql.
+public struct ToolKit: Codable, Sendable, Hashable, Identifiable {
+    public var id: String
+    /// PostgreSQL, MySQL or MariaDB.
+    public var product: String
+    /// The release, e.g. [17, 6].
+    public var version: [Int]
+    public var family: DumpTool.Family
+    public var tools: [DumpTool]
 
-    public init(folders: [DumpTool.Family: String] = [:], path: String = ProcessInfo.processInfo.environment["PATH"] ?? "",
-                versionOf: @escaping @Sendable (String) -> String? = ToolLocator.runVersion) {
-        self.folders = folders
-        self.path = path
-        self.versionOf = versionOf
+    public init(id: String, product: String, version: [Int], family: DumpTool.Family, tools: [DumpTool]) {
+        self.id = id
+        self.product = product
+        self.version = version
+        self.family = family
+        self.tools = tools
     }
 
-    public static let usualFolders: [DumpTool.Family: [String]] = [
-        .postgres: [
-            "/opt/homebrew/bin", "/usr/local/bin",
-            "/opt/homebrew/opt/libpq/bin", "/usr/local/opt/libpq/bin",
-            "/opt/homebrew/opt/postgresql@*/bin", "/usr/local/opt/postgresql@*/bin", "/opt/homebrew/opt/libpq@*/bin",
-            "/Applications/Postgres.app/Contents/Versions/*/bin", "/Library/PostgreSQL/*/bin", "/opt/local/lib/postgresql*/bin",
-        ],
-        .mysql: [
-            "/opt/homebrew/bin", "/usr/local/bin",
-            "/opt/homebrew/opt/mysql-client/bin", "/usr/local/opt/mysql-client/bin", "/opt/homebrew/opt/mysql-client@*/bin",
-            "/opt/homebrew/opt/mysql/bin", "/opt/homebrew/opt/mysql@*/bin", "/opt/homebrew/opt/mariadb/bin", "/opt/homebrew/opt/mariadb@*/bin",
-            "/usr/local/mysql/bin", "/opt/local/lib/mysql*/bin", "/opt/local/lib/mariadb*/bin",
-        ],
-    ]
+    public var isMariaDB: Bool { product == "MariaDB" }
+    public var major: Int { version.first ?? 0 }
+    public var versionString: String { version.map(String.init).joined(separator: ".") }
+    /// `PostgreSQL 17.6`.
+    public var title: String { "\(product) \(versionString)" }
+}
 
-    /// Where to look for a family, in order.
-    public func searchFolders(_ family: DumpTool.Family) -> [String] {
-        if let chosen = folders[family]?.trimmingCharacters(in: .whitespaces), !chosen.isEmpty {
-            return [(chosen as NSString).expandingTildeInPath]
+/// The backup and restore tools inside the app, one kit per server version: tools installed on
+/// the Mac are never used. The kits are listed in `tools.json`.
+public struct BundledTools: Sendable {
+    public var kits: [ToolKit]
+    /// The folder holding a folder per kit.
+    public var root: URL
+
+    public init(kits: [ToolKit], root: URL) {
+        self.kits = kits
+        self.root = root
+    }
+
+    /// The kits `manifest` lists, in `root`; none when it can't be read.
+    public init(manifest: URL, root: URL) {
+        let kits = (try? Data(contentsOf: manifest)).flatMap { try? JSONDecoder().decode([ToolKit].self, from: $0) } ?? []
+        self.init(kits: kits, root: root)
+    }
+
+    /// A folder laid out as the tools build leaves them: `tools.json` beside the kits.
+    public init(folder: URL) {
+        self.init(manifest: folder.appending(path: "tools.json"), root: folder)
+    }
+
+    /// The app's: `Contents/Helpers/tools`, listed in `Contents/Resources/tools.json`.
+    /// `MOONROW_TOOLS` names a tools folder instead (tests, and running outside the app).
+    public static let app: BundledTools = {
+        if let folder = ProcessInfo.processInfo.environment["MOONROW_TOOLS"], !folder.isEmpty {
+            return BundledTools(folder: URL(filePath: (folder as NSString).expandingTildeInPath))
         }
-        let fromPath = path.split(separator: ":").map(String.init)
-        return Self.unique(fromPath + (Self.usualFolders[family] ?? []).flatMap(Self.expand))
-    }
+        let contents = Bundle.main.bundleURL.appending(path: "Contents")
+        return BundledTools(manifest: contents.appending(path: "Resources/tools.json"), root: contents.appending(path: "Helpers/tools"))
+    }()
 
-    /// Every copy of `tool` found, newest version first; the same file reached twice counts once.
-    public func find(_ tool: DumpTool) -> [ToolInfo] {
-        var seen = Set<String>()
-        var out: [ToolInfo] = []
-        for folder in searchFolders(tool.family) {
-            let candidate = (folder as NSString).appendingPathComponent(tool.rawValue)
-            guard FileManager.default.isExecutableFile(atPath: candidate) else { continue }
-            let real = (candidate as NSString).resolvingSymlinksInPath
-            guard seen.insert(real).inserted, let output = versionOf(candidate) else { continue }
-            let (version, mariaDB) = ToolInfo.parse(output)
-            out.append(ToolInfo(tool: tool, path: candidate, versionText: output.trimmingCharacters(in: .whitespacesAndNewlines),
-                                version: version, isMariaDB: mariaDB || tool == .mariadb || tool == .mariadbDump))
+    /// A family's kits as the version menu lists them: newest first, MariaDB's before MySQL's.
+    public func kits(for family: DumpTool.Family) -> [ToolKit] {
+        kits.filter { $0.family == family }.sorted { a, b in
+            a.isMariaDB != b.isMariaDB ? a.isMariaDB : b.version.lexicographicallyPrecedes(a.version)
         }
-        // Newest first; equal versions keep the search order.
-        return out.enumerated().sorted { a, b in
-            a.element.version != b.element.version ? a.element.version.lexicographicallyPrecedes(b.element.version) == false
-                : a.offset < b.offset
-        }.map(\.element)
     }
 
-    /// The tool a backup or restore uses, and a warning when it may not suit the server.
-    ///
-    /// - Postgres: the newest copy (pg_dump refuses servers newer than itself; pg_restore and
-    ///   psql come from the same folder as each other when they can).
-    /// - MySQL family: a MariaDB server gets MariaDB's tools (`mariadb-dump`, `mariadb`, or a
-    ///   `mysqldump` that is MariaDB's) when there are any; a MySQL server gets MySQL's.
+    /// The kit for a server: the oldest whose major version isn't older than the server's, else
+    /// the newest (and the newest when the version isn't known). A MariaDB server gets MariaDB's
+    /// kit, a MySQL server MySQL's, when there is one.
+    public func defaultKit(for family: DumpTool.Family, serverMajor: Int?, mariaDBServer: Bool) -> ToolKit? {
+        var candidates = kits(for: family)
+        if family == .mysql {
+            let sameKind = candidates.filter { $0.isMariaDB == mariaDBServer }
+            if !sameKind.isEmpty { candidates = sameKind }
+        }
+        guard let serverMajor else { return candidates.first }
+        return candidates.last { $0.major >= serverMajor } ?? candidates.first
+    }
+
+    /// Why `kit` may not suit the server, if it may not.
+    public func warning(_ kit: ToolKit, role: Role, serverMajor: Int?, mariaDBServer: Bool) -> String? {
+        if kit.family == .mysql, kit.isMariaDB != mariaDBServer {
+            let server = mariaDBServer ? "MariaDB" : "MySQL"
+            return "These are \(kit.product)'s tools; \(server)'s own suit a \(server) server better."
+        }
+        if role.isBackup, let serverMajor, kit.major < serverMajor {
+            return "\(role.tool(in: kit).rawValue) \(kit.versionString) is older than the server (\(serverMajor))"
+                + (kit.family == .postgres ? " and refuses to back it up." : ".")
+        }
+        return nil
+    }
+
+    /// The tool `role` runs from `kit`; nil when the kit has no such file.
+    public func tool(for role: Role, in kit: ToolKit) -> ToolInfo? {
+        let tool = role.tool(in: kit)
+        guard kit.family == tool.family, kit.tools.contains(tool) else { return nil }
+        let path = root.appending(path: kit.id).appending(path: tool.rawValue).path
+        guard FileManager.default.isExecutableFile(atPath: path) else { return nil }
+        return ToolInfo(tool: tool, path: path, versionText: "\(tool.rawValue) \(kit.versionString)", version: kit.version,
+                        isMariaDB: kit.isMariaDB)
+    }
+
+    /// The tool `role` runs from the server's default kit, and why it may not suit the server.
     public func choose(_ role: Role, serverMajor: Int?, mariaDBServer: Bool) -> (ToolInfo?, warning: String?) {
-        switch role {
-        case .backupPostgres, .restorePostgresArchive, .restorePostgresScript:
-            let tool: DumpTool = role == .backupPostgres ? .pgDump : role == .restorePostgresArchive ? .pgRestore : .psql
-            let found = find(tool)
-            guard let best = found.first else { return (nil, nil) }
-            if let serverMajor, best.major < serverMajor, role == .backupPostgres {
-                return (best, "\(tool.rawValue) \(best.versionString) is older than the server (\(serverMajor)); it refuses newer servers. Install PostgreSQL \(serverMajor)'s client tools.")
-            }
-            return (best, nil)
-        case .backupMySQL, .restoreMySQL:
-            let names: [DumpTool] = role == .backupMySQL ? [.mariadbDump, .mysqldump] : [.mariadb, .mysql]
-            let found = names.flatMap(find)
-            let preferred = found.filter { $0.isMariaDB == mariaDBServer }
-            guard let best = preferred.first ?? found.first else { return (nil, nil) }
-            if best.isMariaDB != mariaDBServer {
-                let mine = mariaDBServer ? "MariaDB" : "MySQL"
-                return (best, "Only \(best.isMariaDB ? "MariaDB" : "MySQL")'s \(best.tool.rawValue) was found; \(mine)'s own client tools suit a \(mine) server better.")
-            }
-            return (best, nil)
-        }
+        guard let kit = defaultKit(for: role.family, serverMajor: serverMajor, mariaDBServer: mariaDBServer) else { return (nil, nil) }
+        return (tool(for: role, in: kit), warning(kit, role: role, serverMajor: serverMajor, mariaDBServer: mariaDBServer))
     }
 
     public enum Role: Sendable {
         case backupPostgres, restorePostgresArchive, restorePostgresScript, backupMySQL, restoreMySQL
-    }
 
-    /// A folder pattern with one `*` in one of its parts (`/opt/homebrew/opt/postgresql@*/bin`),
-    /// matched against what's there, newest-looking names first.
-    static func expand(_ pattern: String) -> [String] {
-        let parts = pattern.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
-        guard let i = parts.firstIndex(where: { $0.contains("*") }) else { return [pattern] }
-        let parent = parts[..<i].joined(separator: "/")
-        let wildcard = parts[i].split(separator: "*", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
-        let below = parts[(i + 1)...].joined(separator: "/")
-        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: parent) else { return [] }
-        return entries.filter { $0.hasPrefix(wildcard[0]) && $0.hasSuffix(wildcard.count > 1 ? wildcard[1] : "") }
-            .sorted { $0.localizedStandardCompare($1) == .orderedDescending }
-            .map { parent + "/" + $0 + (below.isEmpty ? "" : "/" + below) }
-    }
+        public var family: DumpTool.Family { [.backupMySQL, .restoreMySQL].contains(self) ? .mysql : .postgres }
+        public var isBackup: Bool { self == .backupPostgres || self == .backupMySQL }
 
-    static func unique(_ folders: [String]) -> [String] {
-        var seen = Set<String>()
-        return folders.filter { !$0.isEmpty && seen.insert($0).inserted }
-    }
-
-    /// `<tool> --version`, or nil if it doesn't run within a few seconds.
-    public static func runVersion(_ path: String) -> String? {
-        let p = Process()
-        p.executableURL = URL(filePath: path)
-        p.arguments = ["--version"]
-        let out = Pipe()
-        p.standardOutput = out
-        p.standardError = out
-        p.standardInput = FileHandle.nullDevice
-        do { try p.run() } catch { return nil }
-        let deadline = Date().addingTimeInterval(5)
-        while p.isRunning, Date() < deadline { usleep(20_000) }
-        if p.isRunning {
-            p.terminate()
-            return nil
+        /// The tool this role runs from `kit`.
+        public func tool(in kit: ToolKit) -> DumpTool {
+            switch self {
+            case .backupPostgres: .pgDump
+            case .restorePostgresArchive: .pgRestore
+            case .restorePostgresScript: .psql
+            case .backupMySQL: kit.isMariaDB ? .mariadbDump : .mysqldump
+            case .restoreMySQL: kit.isMariaDB ? .mariadb : .mysql
+            }
         }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        return p.terminationStatus == 0 ? String(decoding: data, as: UTF8.self) : nil
     }
 }

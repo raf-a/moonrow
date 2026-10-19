@@ -1,0 +1,15 @@
+--- a/src/port/snprintf.c
++++ b/src/port/snprintf.c
+@@ -356,8 +356,11 @@
+  */
+ #ifndef HAVE_STRCHRNUL
+ 
++/* Newer SDKs declare strchrnul even where it isn't available; use our own name. */
++#define strchrnul pg_strchrnul
++
+ static inline const char *
+-strchrnul(const char *s, int c)
++pg_strchrnul(const char *s, int c)
+ {
+ 	while (*s != '\0' && *s != c)
+ 		s++;

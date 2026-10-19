@@ -471,8 +471,11 @@ struct SSHTunnelServerTests {
             password: ssh.password, responder: PromptLog.trustingHostKeys().responder,
             knownHostsFiles: [directory.appending(path: "known_hosts").path], configFile: "none", useAgent: false,
             helperPath: SSHTestServer.helperPath)
-        let locator = ToolLocator()
-        var targets: [(ConnectionConfig, String?, ToolLocator.Role)] = []
+        // The bundled tools: MOONROW_TOOLS, else this checkout's build/tools.
+        let checkout = URL(filePath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let tools = BundledTools(folder: ProcessInfo.processInfo.environment["MOONROW_TOOLS"].map { URL(filePath: $0) }
+            ?? checkout.appending(path: "build/tools"))
+        var targets: [(ConnectionConfig, String?, BundledTools.Role)] = []
         if let pg = SSHTestServer.pg {
             var c = ConnectionConfig(driver: .postgres, host: "moonrow-test-pg", port: 5432, user: pg.user!, database: String(pg.path.dropFirst()),
                                      tlsMode: .require, overSSH: true, sshHost: ssh.host!, sshPort: ssh.port, sshUser: ssh.user!)
@@ -486,7 +489,7 @@ struct SSHTunnelServerTests {
             targets.append((c, my.password, .backupMySQL))
         }
         for (config, password, role) in targets {
-            guard let tool = locator.choose(role, serverMajor: nil, mariaDBServer: false).0 else { continue }
+            guard let tool = tools.choose(role, serverMajor: nil, mariaDBServer: false).0 else { continue }
             var options = BackupOptions()
             options.content = .schemaOnly
             let job = BackupJob(config: config, password: password, ssh: login, database: config.database, options: options,
