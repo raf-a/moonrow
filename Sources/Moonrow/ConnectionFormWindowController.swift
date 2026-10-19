@@ -27,20 +27,20 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
     var onQueriesFolderChange: ((ConnectionConfig, SavedQueries.FolderChange, SavedQueries.Transfer?) throws -> Void)?
 
     private let driverPopup = NSPopUpButton()
-    private let nameField = NSTextField()
-    private let pathField = NSTextField()
-    private let hostField = NSTextField()
-    private let portField = NSTextField()
-    private let userField = NSTextField()
-    private let passwordField = NSSecureTextField()
+    private let nameField = NSTextField().singleLine()
+    private let pathField = NSTextField().singleLine()
+    private let hostField = NSTextField().singleLine()
+    private let portField = NSTextField().singleLine()
+    private let userField = NSTextField().singleLine()
+    private let passwordField = NSSecureTextField().singleLine()
     private let passwordModePopup = NSPopUpButton()
-    private let databaseField = NSTextField()
+    private let databaseField = NSTextField().singleLine()
     private let tlsPopup = NSPopUpButton()
     private let negotiationPopup = NSPopUpButton()
-    private let serverNameField = NSTextField()
-    private let caField = NSTextField()
-    private let certField = NSTextField()
-    private let keyField = NSTextField()
+    private let serverNameField = NSTextField().singleLine()
+    private let caField = NSTextField().singleLine()
+    private let certField = NSTextField().singleLine()
+    private let keyField = NSTextField().singleLine()
     let tagPopup = NSPopUpButton()
     /// The tag picked in `tagPopup`; kept apart so Edit Tags… doesn't change it.
     private var tagID: UUID?
@@ -49,24 +49,24 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
     private let safeModePopup = NSPopUpButton()
     private let safeModeHint = NSTextField(wrappingLabelWithString: "")
     private let readOnlyBox = NSButton(checkboxWithTitle: "Read-only", target: nil, action: nil)
-    let queriesField = NSTextField()
+    let queriesField = NSTextField().singleLine()
     /// The bootstrap SQL as last typed in its popover.
     private var bootstrapSQL = ""
     private let bootstrapLabel = NSTextField(labelWithString: "")
     private(set) var bootstrapPopover: NSPopover?
     private let sshBox = NSButton(checkboxWithTitle: "Connect through an SSH server", target: nil, action: nil)
     /// SQLite over SSH: the server's sqlite3.
-    private let sqliteCommandField = NSTextField()
+    private let sqliteCommandField = NSTextField().singleLine()
     private var chooseFileButton: NSButton!
     private let sshHint = NSTextField(wrappingLabelWithString: "")
-    private let sshHostField = NSTextField()
-    private let sshPortField = NSTextField()
-    private let sshUserField = NSTextField()
-    private let sshPasswordField = NSSecureTextField()
+    private let sshHostField = NSTextField().singleLine()
+    private let sshPortField = NSTextField().singleLine()
+    private let sshUserField = NSTextField().singleLine()
+    private let sshPasswordField = NSSecureTextField().singleLine()
     private let sshPasswordModePopup = NSPopUpButton()
     private let sshKeyBox = NSButton(checkboxWithTitle: "Use a private key", target: nil, action: nil)
-    private let sshKeyField = NSTextField()
-    private let sshPassphraseField = NSSecureTextField()
+    private let sshKeyField = NSTextField().singleLine()
+    private let sshPassphraseField = NSSecureTextField().singleLine()
     private let status = NSTextField(wrappingLabelWithString: "")
     /// Shown after Test when the server is the other kind of the MySQL family.
     let changeTypeButton = NSButton(title: "", target: nil, action: nil)
@@ -118,14 +118,6 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         driverPopup.addItems(withTitles: DriverKind.allCases.map(\.displayName))
         driverPopup.target = self
         driverPopup.action = #selector(driverChanged(_:))
-        // A plain NSTextField() wraps: a long host or path grew the field onto a second line.
-        for f in [nameField, pathField, hostField, portField, userField, passwordField, databaseField,
-                  serverNameField, caField, certField, keyField, queriesField, sqliteCommandField,
-                  sshHostField, sshPortField, sshUserField, sshPasswordField, sshKeyField, sshPassphraseField] {
-            f.usesSingleLineMode = true
-            f.cell?.wraps = false
-            f.cell?.isScrollable = true
-        }
         nameField.placeholderString = "Optional"
         pathField.placeholderString = "/path/to/database.sqlite"
         pathField.lineBreakMode = .byTruncatingMiddle

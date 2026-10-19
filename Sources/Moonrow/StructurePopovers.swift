@@ -15,10 +15,10 @@ final class ForeignKeyEditorController: NSViewController, NSComboBoxDelegate {
     private let tables: [TableRef]
     /// The referenced table's primary key, to fill in referenced columns.
     private let primaryKey: @MainActor (TableRef) async -> [String]
-    private let nameField = NSTextField()
-    private let columnsField = NSTextField()
+    private let nameField = NSTextField().singleLine()
+    private let columnsField = NSTextField().singleLine()
     private let tableBox = NSComboBox()
-    private let referencedField = NSTextField()
+    private let referencedField = NSTextField().singleLine()
     private let onUpdate = NSPopUpButton()
     private let onDelete_ = NSPopUpButton()
     private static let actions = ["NO ACTION", "RESTRICT", "CASCADE", "SET NULL", "SET DEFAULT"]

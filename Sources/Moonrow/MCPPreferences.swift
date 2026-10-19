@@ -13,7 +13,7 @@ final class MCPPreferences: NSViewController, NSTableViewDataSource, NSTableView
 
     let enableCheckbox = NSButton(checkboxWithTitle: "Enable MCP server", target: nil, action: nil)
     let statusLabel = NSTextField(labelWithString: "")
-    let portField = NSTextField()
+    let portField = NSTextField().singleLine()
     let remoteCheckbox = NSButton(checkboxWithTitle: "Allow connections from other computers, over TLS", target: nil, action: nil)
     private let remoteHint = NSTextField(wrappingLabelWithString: "")
     let exportButton = NSButton(title: "Export Certificate…", target: nil, action: nil)
@@ -385,7 +385,7 @@ final class MCPTokenSheet: NSWindowController, NSTableViewDataSource, NSTableVie
     private let create: (String, MCPPermission, MCPConnectionAccess) async throws -> String
     var onClose: (() -> Void)?
 
-    let nameField = NSTextField()
+    let nameField = NSTextField().singleLine()
     let permissionPopup = NSPopUpButton()
     let allButton = NSButton(radioButtonWithTitle: "All connections", target: nil, action: nil)
     let someButton = NSButton(radioButtonWithTitle: "These connections:", target: nil, action: nil)

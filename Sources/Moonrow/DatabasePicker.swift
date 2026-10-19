@@ -303,7 +303,7 @@ final class OpenDatabaseCell: NSTableCellView {
 @MainActor
 final class NewDatabaseSheet: NSObject, NSTextFieldDelegate {
     let sheet: NSWindow
-    let nameField = NSTextField()
+    let nameField = NSTextField().singleLine()
     let encodingPopup = NSPopUpButton()
     let collationPopup = NSPopUpButton()
     private let errorLabel = NSTextField(wrappingLabelWithString: "")

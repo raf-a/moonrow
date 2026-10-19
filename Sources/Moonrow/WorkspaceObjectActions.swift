@@ -70,7 +70,7 @@ extension WorkspaceWindowController {
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = "New name:"
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24)).singleLine()
         field.stringValue = current
         alert.accessoryView = field
         alert.addButton(withTitle: "Rename")
@@ -234,7 +234,7 @@ extension WorkspaceWindowController {
         let alert = NSAlert()
         alert.messageText = "Clone \(object.ref.name)"
         alert.informativeText = "A new table with the same columns, keys and indexes. " + Self.stagedMessage
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24)).singleLine()
         field.stringValue = cloneName(for: object.ref.name)
         field.placeholderString = "Table name"
         let rows = NSButton(checkboxWithTitle: "Copy the rows too", target: nil, action: nil)

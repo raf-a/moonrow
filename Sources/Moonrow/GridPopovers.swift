@@ -6,8 +6,8 @@ import SQLScript
 @MainActor
 final class PagingController: NSViewController {
     var onGo: ((Paging) -> Void)?
-    private let sizeField = NSTextField()
-    private let offsetField = NSTextField()
+    private let sizeField = NSTextField().singleLine()
+    private let offsetField = NSTextField().singleLine()
     private let paging: Paging
 
     init(_ paging: Paging) {

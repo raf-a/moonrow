@@ -554,3 +554,15 @@ enum StagedState {
         label.textColor = state.color
     }
 }
+
+extension NSTextField {
+    /// Keeps an editable field on one line, scrolling sideways: a plain `NSTextField()` or
+    /// `NSTextField(frame:)` wraps, so a long value grew the field onto a second line.
+    @discardableResult
+    func singleLine() -> Self {
+        usesSingleLineMode = true
+        cell?.wraps = false
+        cell?.isScrollable = true
+        return self
+    }
+}

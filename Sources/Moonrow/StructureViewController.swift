@@ -82,7 +82,7 @@ final class StructureViewController: NSViewController, NSTableViewDataSource, NS
     private var loadTask: Task<Void, Never>?
     let columnsGrid = DataGrid()
     let indexGrid = DataGrid()
-    let nameField = NSTextField()
+    let nameField = NSTextField().singleLine()
     private let searchField = NSSearchField()
     private let statusLabel = NSTextField(labelWithString: "")
     private let addColumnButton = NSButton(title: "Column", target: nil, action: nil)

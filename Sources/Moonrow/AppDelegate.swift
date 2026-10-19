@@ -547,7 +547,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         alert.informativeText = config.summary
         alert.addButton(withTitle: "Connect")
         alert.addButton(withTitle: "Cancel")
-        let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 22))
+        let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 22)).singleLine()
         alert.accessoryView = field
         alert.window.initialFirstResponder = field
         let response: NSApplication.ModalResponse
