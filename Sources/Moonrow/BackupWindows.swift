@@ -17,8 +17,8 @@ struct ToolWindowEnvironment {
 }
 
 /// The parts Backup and Restore share: the saved connections and the selected one's databases
-/// side by side, each under a search field; a column of options on the right; the tools' version,
-/// the tool in use and the buttons along the bottom. A run shows its log in a sheet.
+/// side by side, each under a search field; a column on the right with the tools' version above
+/// the options; the buttons along the bottom. A run shows its log in a sheet.
 @MainActor
 class ToolWindowController: NSWindowController, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate,
     NSTokenFieldDelegate {
@@ -46,7 +46,6 @@ class ToolWindowController: NSWindowController, NSWindowDelegate, NSTableViewDat
     let databaseSearch = NSSearchField()
     let databaseTable = NSTableView()
     private let databaseNote = NSTextField(wrappingLabelWithString: "")
-    let toolLabel = NSTextField(wrappingLabelWithString: "")
     /// The bundled kits of the selected connection's family; the server's is picked when it connects.
     let versionPopup = NSPopUpButton()
     private var kitChoices: [ToolKit] = []
@@ -141,7 +140,10 @@ class ToolWindowController: NSWindowController, NSWindowDelegate, NSTableViewDat
         optionsNote.font = .systemFont(ofSize: 11)
         optionsNote.textColor = .systemRed
         optionsNote.isHidden = true
-        let side = NSStackView(views: options + [addOptionMenu, tokenField, optionsNote])
+        versionPopup.target = self
+        versionPopup.action = #selector(kitChosen(_:))
+        versionPopup.isHidden = true
+        let side = NSStackView(views: [versionPopup] + options + [addOptionMenu, tokenField, optionsNote])
         side.orientation = .vertical
         side.alignment = .leading
         side.spacing = 8
@@ -159,18 +161,7 @@ class ToolWindowController: NSWindowController, NSWindowDelegate, NSTableViewDat
         side.heightAnchor.constraint(equalTo: middle.heightAnchor).isActive = true
         middle.setHuggingPriority(.init(1), for: .vertical)
 
-        toolLabel.font = .systemFont(ofSize: 11)
-        toolLabel.textColor = .secondaryLabelColor
-        toolLabel.maximumNumberOfLines = 2
-        toolLabel.lineBreakMode = .byTruncatingTail
-        toolLabel.cell?.truncatesLastVisibleLine = true
-        toolLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        versionPopup.target = self
-        versionPopup.action = #selector(kitChosen(_:))
-        versionPopup.controlSize = .small
-        versionPopup.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        versionPopup.isHidden = true
-        let bottom = NSStackView(views: [versionPopup, toolLabel, NSView()] + buttons)
+        let bottom = NSStackView(views: [NSView()] + buttons)
         bottom.alignment = .centerY
         bottom.spacing = 8
 
@@ -411,22 +402,14 @@ class ToolWindowController: NSWindowController, NSWindowDelegate, NSTableViewDat
         versionPopup.isEnabled = !isRunning
     }
 
-    /// Shows which tool runs, or why none can.
+    /// The tool that runs and why it may not suit the server, or why none can: the version
+    /// menu's tooltip.
     func show(tool: ToolInfo?, warning: String?, missing: String) {
-        if let tool {
-            toolLabel.stringValue = "\(tool.tool.rawValue) \(tool.versionString)\(tool.isMariaDB ? " (MariaDB)" : "")" + (warning.map { " — " + $0 } ?? "")
-            toolLabel.toolTip = tool.path + (warning.map { "\n" + $0 } ?? "")
-            toolLabel.textColor = warning == nil ? .secondaryLabelColor : .systemOrange
-        } else {
-            toolLabel.stringValue = missing
-            toolLabel.toolTip = missing
-            toolLabel.textColor = .systemRed
-        }
+        versionPopup.toolTip = tool.map { "\($0.tool.rawValue) \($0.versionString): \($0.path)" + (warning.map { "\n" + $0 } ?? "") } ?? missing
     }
 
     func clearTool() {
-        toolLabel.stringValue = ""
-        toolLabel.toolTip = nil
+        versionPopup.toolTip = nil
         versionPopup.isHidden = true
     }
 
@@ -881,9 +864,7 @@ final class RestoreWindowController: ToolWindowController {
             let warnings = Array(Set(found.compactMap(\.1.1))).sorted()
                 + (kit == nil && !absent.isEmpty ? [missing("")] : absent.map(missing))
             showVersions(true)
-            toolLabel.stringValue = (tools.map { "\($0.tool.rawValue) \($0.versionString)" } + warnings).joined(separator: " — ")
-            toolLabel.toolTip = (tools.map(\.path) + warnings).joined(separator: "\n")
-            toolLabel.textColor = tools.isEmpty ? .systemRed : warnings.isEmpty ? .secondaryLabelColor : .systemOrange
+            versionPopup.toolTip = (tools.map { "\($0.tool.rawValue) \($0.versionString): \($0.path)" } + warnings).joined(separator: "\n")
         } else {
             clearTool()
         }
