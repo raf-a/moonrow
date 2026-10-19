@@ -119,26 +119,23 @@ final class PGSession: WireSession, @unchecked Sendable {
         guard tls, !isUnixSocket(c.endpoint) else {
             return try await WireChannel.connect(to: c.endpoint, framer: PGFramer(), timeout: timeout)
         }
-        let wire = try await WireChannel.connect(to: c.endpoint, framer: RawFramer(), timeout: timeout)
+        // The answer is one byte. Anything after it was sent in the clear and stays unread, so
+        // the TLS upgrade or the framer swap below refuses it.
+        let wire = try await WireChannel.connect(to: c.endpoint, framer: ByteFramer(), timeout: timeout)
         do {
             var request = wire.makeBuffer(capacity: 8)
             PGFrontend.sslRequest(into: &request)
             try await wire.send(request)
             var reply = try await wire.next()
-            // Anything after the one-byte answer would have been sent before encryption.
-            guard reply.readableBytes == 1, let answer: UInt8 = reply.readInteger() else {
-                throw DatabaseError("The server sent unexpected data in reply to the TLS request.")
-            }
-            try await wire.setFramer(PGFramer())
-            switch answer {
+            switch reply.readInteger(as: UInt8.self) {
             case UInt8(ascii: "S"):
-                // Bytes that arrive after the answer but before the TLS handler is in place fail
-                // the upgrade there.
                 try await wire.startTLS(c.tls)
+                try await wire.setFramer(PGFramer())
             case UInt8(ascii: "N"):
                 guard c.tls.mode == .prefer || c.tls.mode == .allow else {
                     throw DatabaseError("The server doesn't support TLS, and the connection requires it (\(c.tls.mode.rawValue)).")
                 }
+                try await wire.setFramer(PGFramer())
             default:
                 throw DatabaseError("The server rejected the TLS request.")
             }

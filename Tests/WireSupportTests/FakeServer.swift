@@ -1,12 +1,13 @@
 import Foundation
+import MCPServer
 import NIOCore
 import NIOPosix
 import NIOSSL
 import NIOTLS
 import WireSupport
 
-/// A self-signed certificate for localhost and 127.0.0.1, made once per run with the system's
-/// openssl, and the server side's TLS context for it.
+/// A self-signed certificate for localhost and 127.0.0.1, made once per run the way the MCP
+/// server makes its own, and the server side's TLS context for it.
 enum TestCertificate {
     struct Material: Sendable {
         let certificatePath: String
@@ -22,30 +23,18 @@ enum TestCertificate {
         TLSSettings(mode: .verifyFull, caCertificatePath: try get().certificatePath, serverName: "localhost")
     }
 
+    /// Where the certificate is written for the client to trust (the key stays in memory),
+    /// removed when the test process exits.
+    private static let directory = FileManager.default.temporaryDirectory
+        .appending(path: "moonrow-wire-tests-\(UUID().uuidString)", directoryHint: .isDirectory)
+
     private static func make() throws -> Material {
-        let dir = FileManager.default.temporaryDirectory
-            .appending(path: "moonrow-wire-tests-\(UUID().uuidString)", directoryHint: .isDirectory)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let key = dir.appending(path: "key.pem"), cert = dir.appending(path: "cert.pem")
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/openssl")
-        process.arguments = [
-            "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1",
-            "-pkeyopt", "ec_param_enc:named_curve", "-nodes", "-keyout", key.path, "-out", cert.path,
-            "-days", "2", "-subj", "/CN=localhost",
-            "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1", "-addext", "extendedKeyUsage=serverAuth",
-        ]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        try process.run()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            throw CocoaError(.fileWriteUnknown, userInfo: [NSLocalizedDescriptionKey: "openssl couldn't make a test certificate"])
-        }
-        let chain = try NIOSSLCertificate.fromPEMFile(cert.path).map { NIOSSLCertificateSource.certificate($0) }
-        let configuration = TLSConfiguration.makeServerConfiguration(
-            certificateChain: chain, privateKey: .privateKey(try NIOSSLPrivateKey(file: key.path, format: .pem)))
-        return Material(certificatePath: cert.path, server: try NIOSSLContext(configuration: configuration))
+        let certificate = try MCPTLS.generate(hosts: ["localhost", "127.0.0.1"])
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        atexit { try? FileManager.default.removeItem(at: TestCertificate.directory) }
+        let path = directory.appending(path: "cert.pem")
+        try Data(certificate.certificatePEM.utf8).write(to: path)
+        return Material(certificatePath: path.path, server: try MCPTLS.context(certificate))
     }
 }
 

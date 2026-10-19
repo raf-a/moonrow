@@ -122,7 +122,8 @@ let package = Package(
         .testTarget(
             name: "WireSupportTests",
             dependencies: [
-                "WireSupport", "DBKit", "DriverMySQL", "DriverPostgres",
+                // MCPServer for its certificate recipe (MCPTLS).
+                "WireSupport", "DBKit", "DriverMySQL", "DriverPostgres", "MCPServer",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOTLS", package: "swift-nio"),

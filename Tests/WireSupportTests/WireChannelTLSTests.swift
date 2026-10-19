@@ -2,7 +2,7 @@ import DBKit
 import Foundation
 import NIOCore
 import Testing
-import WireSupport
+@testable import WireSupport
 
 /// Newline-terminated messages, so a test can say where one ends.
 struct LineFramer: Framer {
@@ -23,6 +23,11 @@ extension WireChannel {
     func nextLine() async throws -> String {
         var frame = try await next()
         return frame.readString(length: frame.readableBytes) ?? ""
+    }
+
+    /// Waits until bytes from the server have arrived and not been read.
+    func waitForUnread() async throws {
+        while !(try await hasUnread()) { try await Task.sleep(for: .milliseconds(5)) }
     }
 }
 
@@ -46,8 +51,16 @@ extension FakePeer {
 @Suite(.timeLimit(.minutes(1))) struct WireChannelTLSTests {
     static let plaintext = "Unencrypted data arrived"
 
-    private func connect(_ server: FakeServer) async throws -> WireChannel {
-        try await WireChannel.connect(to: .tcp(host: "127.0.0.1", port: server.port), framer: LineFramer())
+    private func connect(_ server: FakeServer, timeout: TimeAmount = .seconds(15)) async throws -> WireChannel {
+        try await WireChannel.connect(to: .tcp(host: "127.0.0.1", port: server.port), framer: LineFramer(), timeout: timeout)
+    }
+
+    /// After a refused upgrade or framer swap: the socket closes and nothing received before is
+    /// handed out.
+    private func expectAbandoned(_ wire: WireChannel) async {
+        await wire.waitUntilClosed()
+        #expect(!wire.isActive)
+        await #expect(throws: DatabaseError.self) { try await wire.next() }
     }
 
     /// The server's "go ahead" and its first encrypted line, with `extra` sent in between.
@@ -91,7 +104,7 @@ extension FakePeer {
             let error = await #expect(throws: DatabaseError.self) { try await wire.startTLS(try TestCertificate.verifyFull()) }
             #expect(error?.message.hasPrefix(Self.plaintext) == true)
             #expect(!wire.isTLS)
-            #expect(await closes(wire))
+            await expectAbandoned(wire)
         }
     }
 
@@ -107,10 +120,11 @@ extension FakePeer {
             try await wire.sendLine("starttls")
             #expect(try await wire.nextLine() == "go\n")
             try await wire.sendLine("ready")
-            try await Task.sleep(for: .milliseconds(200))  // loopback delivers it well within this
+            try await wire.waitForUnread()
             let error = await #expect(throws: DatabaseError.self) { try await wire.startTLS(try TestCertificate.verifyFull()) }
             #expect(error?.message.hasPrefix(Self.plaintext) == true)
             #expect(!wire.isTLS)
+            await expectAbandoned(wire)
         }
     }
 
@@ -126,13 +140,65 @@ extension FakePeer {
             try await wire.sendLine("starttls")
             #expect(try await wire.nextLine() == "go\n")
             try await wire.sendLine("ready")
-            try await Task.sleep(for: .milliseconds(200))
+            try await wire.waitForUnread()
             let error = await #expect(throws: DatabaseError.self) { try await wire.startTLS(try TestCertificate.verifyFull()) }
             #expect(error?.message.hasPrefix(Self.plaintext) == true)
+            await expectAbandoned(wire)
         }
     }
 
-    @Test func expectNothingUnreadSeesUnreadMessages() async throws {
+    /// A server that takes the upgrade and then never answers the client's hello.
+    @Test func silentHandshakeTimesOut() async throws {
+        let script: @Sendable (FakePeer) async throws -> Void = { peer in
+            try await peer.readLine("starttls")
+            try await peer.writeLine("go")
+            await peer.waitUntilClosed()
+        }
+        try await FakeServer.run(script) { server in
+            let wire = try await connect(server, timeout: .milliseconds(300))
+            defer { wire.close() }
+            try await wire.sendLine("starttls")
+            #expect(try await wire.nextLine() == "go\n")
+            let error = await #expect(throws: DatabaseError.self) { try await wire.startTLS(try TestCertificate.verifyFull()) }
+            #expect(error?.message.hasSuffix("failed: timed out") == true, "\(error?.message ?? "")")
+            #expect(!wire.isTLS)
+            await expectAbandoned(wire)
+        }
+    }
+
+    /// The new framer never sees bytes the old one left half-read.
+    @Test func swappingTheFramerRefusesAPartialMessage() async throws {
+        let script: @Sendable (FakePeer) async throws -> Void = { peer in
+            try await peer.write(Array("one\ntw".utf8))
+            await peer.waitUntilClosed()
+        }
+        try await FakeServer.run(script) { server in
+            let wire = try await connect(server)
+            defer { wire.close() }
+            #expect(try await wire.nextLine() == "one\n")
+            try await wire.waitForUnread()
+            await #expect(throws: DatabaseError.self) { try await wire.setFramer(LineFramer()) }
+            await expectAbandoned(wire)
+        }
+    }
+
+    /// Nor whole messages the old one decoded and nobody read.
+    @Test func swappingTheFramerRefusesUnreadMessages() async throws {
+        let script: @Sendable (FakePeer) async throws -> Void = { peer in
+            try await peer.write(Array("one\ntwo\n".utf8))
+            await peer.waitUntilClosed()
+        }
+        try await FakeServer.run(script) { server in
+            let wire = try await connect(server)
+            defer { wire.close() }
+            #expect(try await wire.nextLine() == "one\n")
+            try await wire.waitForUnread()
+            await #expect(throws: DatabaseError.self) { try await wire.setFramer(LineFramer()) }
+            await expectAbandoned(wire)
+        }
+    }
+
+    @Test func swappingTheFramerAfterReadingEverything() async throws {
         let script: @Sendable (FakePeer) async throws -> Void = { peer in
             try await peer.write(Array("one\n".utf8))
             try await peer.readLine("ready")
@@ -143,33 +209,9 @@ extension FakePeer {
             let wire = try await connect(server)
             defer { wire.close() }
             #expect(try await wire.nextLine() == "one\n")
-            try await wire.expectNothingUnread()
+            try await wire.setFramer(LineFramer())
             try await wire.sendLine("ready")
-            try await Task.sleep(for: .milliseconds(200))
-            await #expect(throws: DatabaseError.self) { try await wire.expectNothingUnread() }
             #expect(try await wire.nextLine() == "two\n")
-            try await wire.expectNothingUnread()
         }
-    }
-
-    /// The new framer never sees bytes the old one left half-read.
-    @Test func swappingTheFramerDropsAPartialMessage() async throws {
-        let script: @Sendable (FakePeer) async throws -> Void = { peer in
-            try await peer.write(Array("one\ntw".utf8))
-            await peer.waitUntilClosed()
-        }
-        try await FakeServer.run(script) { server in
-            let wire = try await connect(server)
-            defer { wire.close() }
-            #expect(try await wire.nextLine() == "one\n")
-            try await Task.sleep(for: .milliseconds(200))
-            await #expect(throws: DatabaseError.self) { try await wire.setFramer(LineFramer()) }
-            try await wire.expectNothingUnread()
-        }
-    }
-
-    private func closes(_ wire: WireChannel) async -> Bool {
-        for _ in 0..<50 where wire.isActive { try? await Task.sleep(for: .milliseconds(20)) }
-        return !wire.isActive
     }
 }

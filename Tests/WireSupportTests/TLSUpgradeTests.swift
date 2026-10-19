@@ -122,9 +122,30 @@ import WireSupport
         }
     }
 
-    /// Login replies written right after the `S`, as a second segment, before the handshake.
-    /// Depending on when they land they are refused with the `S` (same read), or by the upgrade
-    /// itself (a later read): never read as the login's replies.
+    /// Login replies in the same segment as the `S`: read with it, one byte at a time, and
+    /// still unread when the upgrade starts.
+    @Test func postgresRefusesRepliesBehindTheAnswer() async throws {
+        let script: @Sendable (FakePeer) async throws -> Void = { peer in
+            try await Self.readSSLRequest(peer)
+            try await peer.write([UInt8(ascii: "S")] + Self.pgLoginReplies)
+            try await peer.startTLS(try TestCertificate.get().server)
+            try await Self.readStartup(peer)
+            peer.close()  // never answers the login itself
+        }
+        try await FakeServer.run(script) { server in
+            let error = await #expect(throws: DatabaseError.self) {
+                let session = try await PGSession.open(try postgres(server))
+                await session.close()
+            }
+            #expect(error?.message.hasPrefix("Unencrypted data arrived") == true, "\(error?.message ?? "")")
+        }
+    }
+
+    /// Login replies written right after the `S`, as a second segment, before the handshake:
+    /// never read as the login's replies. They are almost always received before the TLS handler
+    /// goes in, and refused as unencrypted data (WireChannelTLSTests covers that refusal
+    /// deterministically); if they arrive after it, they break the handshake instead. Either way
+    /// the connection fails, where without the check it logs in.
     @Test func postgresRefusesRepliesSentAfterTheAnswer() async throws {
         let script: @Sendable (FakePeer) async throws -> Void = { peer in
             try await Self.readSSLRequest(peer)
@@ -139,13 +160,13 @@ import WireSupport
                 let session = try await PGSession.open(try postgres(server))
                 await session.close()
             }
-            let message = error?.message ?? ""
-            #expect(message.hasPrefix("Unencrypted data arrived") || message.contains("in reply to the TLS request"), "\(message)")
+            #expect(Self.isRefusal(error), "\(error?.message ?? "")")
         }
     }
 
     /// Direct TLS: login replies the server sends before the handshake are refused. The socket
-    /// is handed over once they are readable, so they are received before TLS starts.
+    /// is handed over once they are readable, so they are usually received before TLS starts;
+    /// if the event loop hasn't read them yet, they break the handshake instead.
     @Test func postgresDirectTLSRefusesRepliesBeforeTheHandshake() async throws {
         let script: @Sendable (FakePeer) async throws -> Void = { peer in
             try await peer.write(Self.pgLoginReplies)
@@ -160,14 +181,21 @@ import WireSupport
                 let session = try await PGSession.open(c)
                 await session.close()
             }
-            #expect(error?.message.hasPrefix("Unencrypted data arrived") == true)
+            #expect(Self.isRefusal(error), "\(error?.message ?? "")")
         }
+    }
+
+    /// Unencrypted replies refused before the handshake, or a handshake they broke.
+    static func isRefusal(_ error: DatabaseError?) -> Bool {
+        guard let message = error?.message else { return false }
+        return message.hasPrefix("Unencrypted data arrived") || message.hasPrefix("TLS handshake with")
     }
 
     /// A socket to 127.0.0.1 that's returned once the server has sent something.
     static func openedOnceReadable(port: Int) -> StreamOpener {
         StreamOpener(description: "127.0.0.1:\(port)", hostName: "localhost") {
             let fd = socket(AF_INET, SOCK_STREAM, 0)
+            guard fd >= 0 else { throw ScriptError("socket: \(String(cString: strerror(errno)))") }
             var address = sockaddr_in()
             address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
             address.sin_family = sa_family_t(AF_INET)
