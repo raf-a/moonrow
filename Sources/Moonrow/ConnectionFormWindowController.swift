@@ -118,6 +118,14 @@ final class ConnectionFormWindowController: NSWindowController, NSWindowDelegate
         driverPopup.addItems(withTitles: DriverKind.allCases.map(\.displayName))
         driverPopup.target = self
         driverPopup.action = #selector(driverChanged(_:))
+        // A plain NSTextField() wraps: a long host or path grew the field onto a second line.
+        for f in [nameField, pathField, hostField, portField, userField, passwordField, databaseField,
+                  serverNameField, caField, certField, keyField, queriesField, sqliteCommandField,
+                  sshHostField, sshPortField, sshUserField, sshPasswordField, sshKeyField, sshPassphraseField] {
+            f.usesSingleLineMode = true
+            f.cell?.wraps = false
+            f.cell?.isScrollable = true
+        }
         nameField.placeholderString = "Optional"
         pathField.placeholderString = "/path/to/database.sqlite"
         pathField.lineBreakMode = .byTruncatingMiddle
