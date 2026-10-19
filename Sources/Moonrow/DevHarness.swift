@@ -424,12 +424,16 @@ enum DevHarness {
     }
 
     /// With only `MOONROW_SNAPSHOTS` set: renders every visible window once launched, then quits.
+    /// It also prints any editable field in them that wraps.
     private static func snapshotWindowsAndQuit(to dir: URL) {
         Task {
             try? await Task.sleep(for: .seconds(2))
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             for (i, window) in NSApp.windows.filter(\.isVisible).enumerated() {
                 let name = window.title.isEmpty ? "window" : window.title
+                for field in wrappingFields(in: window.contentView) {
+                    print("wrapping field in \(name): \(field.placeholderString ?? field.stringValue) (\(type(of: field)))")
+                }
                 snapshot(window, to: dir.appending(path: "\(i)-\(name).png"))
                 // On macOS 26 the glass toolbar isn't in the window's capture; its items' views are.
                 for item in window.toolbar?.items ?? [] {
@@ -439,6 +443,19 @@ enum DevHarness {
             }
             NSApp.terminate(nil)
         }
+    }
+
+    /// Editable fields that wrap, so a long value grows them onto a second line. Token fields,
+    /// and fields given a line limit, wrap on purpose.
+    static func wrappingFields(in view: NSView?) -> [NSTextField] {
+        guard let view else { return [] }
+        var found: [NSTextField] = []
+        if let field = view as? NSTextField, field.isEditable, field.cell?.wraps == true,
+           !(field is NSTokenField), field.maximumNumberOfLines == 0 {
+            found.append(field)
+        }
+        for sub in view.subviews { found += wrappingFields(in: sub) }
+        return found
     }
 
     private static func run(_ app: AppDelegate, table: String, snapshots: URL?) async throws {

@@ -557,11 +557,13 @@ enum StagedState {
 
 extension NSTextField {
     /// Keeps an editable field on one line, scrolling sideways: a plain `NSTextField()` or
-    /// `NSTextField(frame:)` wraps, so a long value grew the field onto a second line.
+    /// `NSTextField(frame:)` wraps, so a long value grew the field onto a second line. Line
+    /// breaks typed or pasted become spaces. A truncating `lineBreakMode` set afterwards still
+    /// truncates the value when the field isn't being edited.
     @discardableResult
     func singleLine() -> Self {
         usesSingleLineMode = true
-        cell?.wraps = false
+        // Scrolling also turns wrapping off.
         cell?.isScrollable = true
         return self
     }

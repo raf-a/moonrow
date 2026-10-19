@@ -173,9 +173,9 @@ private final class FilterRow: NSStackView, NSTextFieldDelegate {
     private let checkbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     private let columnPopup = NSPopUpButton()
     private let operatorPopup = NSPopUpButton()
-    private let valueField = NSTextField()
+    private let valueField = NSTextField().singleLine()
     private let andLabel = NSTextField(labelWithString: "and")
-    private let secondField = NSTextField()
+    private let secondField = NSTextField().singleLine()
     private var columns: [String] = []
 
     private static let anyColumnTag = -1
@@ -203,7 +203,6 @@ private final class FilterRow: NSStackView, NSTextFieldDelegate {
             field.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
             field.delegate = self
             field.lineBreakMode = .byTruncatingTail
-            field.cell?.usesSingleLineMode = true
         }
         andLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         andLabel.textColor = .secondaryLabelColor
