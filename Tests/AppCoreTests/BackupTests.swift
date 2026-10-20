@@ -39,6 +39,8 @@ struct BundledToolsTests {
     private static let mysql = [
         ToolKit(id: "mysql-57", product: "MySQL", version: [5, 7, 44], family: .mysql, tools: [.mysqldump, .mysql]),
         ToolKit(id: "mysql-80", product: "MySQL", version: [8, 0, 43], family: .mysql, tools: [.mysqldump, .mysql]),
+        ToolKit(id: "mysql-84", product: "MySQL", version: [8, 4, 13], family: .mysql, tools: [.mysqldump, .mysql]),
+        ToolKit(id: "mysql-97", product: "MySQL", version: [9, 7, 4], family: .mysql, tools: [.mysqldump, .mysql]),
     ]
     private static let mariadb = ToolKit(id: "mariadb-118", product: "MariaDB", version: [11, 8, 3], family: .mysql, tools: [.mariadbDump, .mariadb])
 
@@ -46,9 +48,9 @@ struct BundledToolsTests {
         let root = try folder(Self.postgres + Self.mysql + [Self.mariadb])
         defer { try? FileManager.default.removeItem(at: root) }
         let tools = BundledTools(folder: root)
-        #expect(tools.kits.count == 12)
+        #expect(tools.kits.count == 14)
         #expect(tools.kits(for: .postgres).first?.title == "PostgreSQL 18.3")
-        #expect(tools.kits(for: .mysql).map(\.id) == ["mariadb-118", "mysql-80", "mysql-57"])
+        #expect(tools.kits(for: .mysql).map(\.id) == ["mariadb-118", "mysql-97", "mysql-84", "mysql-80", "mysql-57"])
 
         let pg = try #require(tools.tool(for: .restorePostgresScript, in: Self.postgres[3]))
         #expect(pg.tool == .psql && pg.path == root.appending(path: "postgresql-13/psql").path && pg.versionString == "13.3")
@@ -66,30 +68,59 @@ struct BundledToolsTests {
 
     @Test func theServersKit() {
         let tools = BundledTools(kits: Self.postgres + Self.mysql + [Self.mariadb], root: URL(filePath: "/x"))
-        func kit(_ family: DumpTool.Family, _ major: Int?, maria: Bool = false) -> String? {
-            tools.defaultKit(for: family, serverMajor: major, mariaDBServer: maria)?.id
+        func kit(_ family: DumpTool.Family, _ version: [Int]?, maria: Bool = false) -> String? {
+            tools.defaultKit(for: family, serverVersion: version, mariaDBServer: maria)?.id
         }
-        #expect(kit(.postgres, 9) == "postgresql-10")
-        #expect(kit(.postgres, 13) == "postgresql-13")
-        #expect(kit(.postgres, 18) == "postgresql-18")
-        #expect(kit(.postgres, 19) == "postgresql-18")
+        #expect(kit(.postgres, [9, 6, 24]) == "postgresql-10")
+        #expect(kit(.postgres, [13, 2]) == "postgresql-13")
+        #expect(kit(.postgres, [18, 0]) == "postgresql-18")
+        #expect(kit(.postgres, [19, 1]) == "postgresql-18")
         #expect(kit(.postgres, nil) == "postgresql-18")
-        #expect(kit(.mysql, 5) == "mysql-57")
-        #expect(kit(.mysql, 8) == "mysql-80")
-        #expect(kit(.mysql, 9) == "mysql-80")
-        #expect(kit(.mysql, 10, maria: true) == "mariadb-118")
-        #expect(kit(.mysql, 11, maria: true) == "mariadb-118")
-        #expect(BundledTools(kits: Self.mysql, root: URL(filePath: "/x")).defaultKit(for: .mysql, serverMajor: 11, mariaDBServer: true)?.id
-            == "mysql-80")
-        #expect(BundledTools(kits: Self.mysql, root: URL(filePath: "/x")).defaultKit(for: .postgres, serverMajor: 16, mariaDBServer: false) == nil)
+        #expect(kit(.postgres, []) == "postgresql-18")
+        // MySQL by major and minor: 8.0, 8.4 and 9.7 are lines of their own; innovation
+        // releases get the next LTS line's tools, newer servers the newest.
+        #expect(kit(.mysql, [5, 6, 51]) == "mysql-57")
+        #expect(kit(.mysql, [5, 7, 44]) == "mysql-57")
+        #expect(kit(.mysql, [8, 0, 40]) == "mysql-80")
+        #expect(kit(.mysql, [8, 2, 0]) == "mysql-84")
+        #expect(kit(.mysql, [8, 4, 6]) == "mysql-84")
+        #expect(kit(.mysql, [9, 1, 0]) == "mysql-97")
+        #expect(kit(.mysql, [9, 7, 4]) == "mysql-97")
+        #expect(kit(.mysql, [26, 10, 0]) == "mysql-97")
+        #expect(kit(.mysql, [8]) == "mysql-80")
+        #expect(kit(.mysql, nil) == "mysql-97")
+        #expect(kit(.mysql, [10, 6, 18], maria: true) == "mariadb-118")
+        #expect(kit(.mysql, [11, 8, 2], maria: true) == "mariadb-118")
+        #expect(BundledTools(kits: Self.mysql, root: URL(filePath: "/x")).defaultKit(for: .mysql, serverVersion: [11, 4], mariaDBServer: true)?.id
+            == "mysql-97")
+        #expect(BundledTools(kits: Self.mysql, root: URL(filePath: "/x")).defaultKit(for: .postgres, serverVersion: [16], mariaDBServer: false) == nil)
 
-        // Warnings: pg_dump older than the server; the other kind of MySQL.
-        #expect(tools.warning(Self.postgres[8], role: .backupPostgres, serverMajor: 19, mariaDBServer: false)?.contains("older than the server") == true)
-        #expect(tools.warning(Self.postgres[8], role: .backupPostgres, serverMajor: 18, mariaDBServer: false) == nil)
-        #expect(tools.warning(Self.postgres[0], role: .restorePostgresArchive, serverMajor: 18, mariaDBServer: false) == nil)
-        #expect(tools.warning(Self.mysql[1], role: .backupMySQL, serverMajor: 11, mariaDBServer: true) != nil)
-        #expect(tools.warning(Self.mariadb, role: .restoreMySQL, serverMajor: 8, mariaDBServer: false) != nil)
-        #expect(tools.warning(Self.mariadb, role: .backupMySQL, serverMajor: 11, mariaDBServer: true) == nil)
+        // Warnings: a tool older than the server; the other kind of MySQL.
+        func warning(_ kit: ToolKit, _ role: BundledTools.Role, _ version: [Int]?, maria: Bool = false) -> String? {
+            tools.warning(kit, role: role, serverVersion: version, mariaDBServer: maria)
+        }
+        #expect(warning(Self.postgres[8], .backupPostgres, [19, 0])?.contains("older than the server (19)") == true)
+        #expect(warning(Self.postgres[8], .backupPostgres, [18, 3]) == nil)
+        #expect(warning(Self.postgres[0], .restorePostgresArchive, [18, 3]) == nil)
+        #expect(warning(Self.mysql[1], .backupMySQL, [8, 4, 6]) == "older than the server (8.4).")
+        #expect(warning(Self.mysql[1], .backupMySQL, [8, 0, 44]) == nil)
+        #expect(warning(Self.mysql[3], .backupMySQL, [26, 10]) == "older than the server (26.10).")
+        #expect(warning(Self.mysql[3], .restoreMySQL, [26, 10]) == nil)
+        #expect(warning(Self.mysql[1], .backupMySQL, [11, 4], maria: true) != nil)
+        #expect(warning(Self.mariadb, .restoreMySQL, [8, 4], maria: false) != nil)
+        #expect(warning(Self.mariadb, .backupMySQL, [11, 4, 5], maria: true) == nil)
+        #expect(warning(Self.mariadb, .backupMySQL, [12, 0], maria: true)?.contains("(12)") == true)
+    }
+
+    @Test func serverVersions() {
+        #expect(ServerInfo.parseVersion("16.4 (Debian 16.4-1.pgdg120+1)") == [16, 4])
+        #expect(ServerInfo.parseVersion("10.23") == [10, 23])
+        #expect(ServerInfo.parseVersion("18beta1") == [18])
+        #expect(ServerInfo.parseVersion("8.4.3") == [8, 4, 3])
+        #expect(ServerInfo.parseVersion("5.7.44-log") == [5, 7, 44])
+        #expect(ServerInfo.parseVersion("5.5.5-10.6.18-MariaDB-ubu2004", mariaDB: true) == [10, 6, 18])
+        #expect(ServerInfo.parseVersion("11.4.5-MariaDB-ubu2404", mariaDB: true) == [11, 4, 5])
+        #expect(ServerInfo.parseVersion("") == nil)
     }
 
     /// The built tools run, say the version the manifest gives, and need nothing outside their
@@ -190,11 +221,20 @@ struct DumpToolTests {
         #expect(permissions == 0o600)
         #expect(try FileManager.default.attributesOfItem(atPath: folder.path)[.posixPermissions] as? Int == 0o700)
         #expect(Array(dump.arguments[1...5]) == ["--protocol=tcp", "--host=h", "--port=3306", "--user=bob", "--ssl-mode=PREFERRED"])
+        #expect(dump.arguments[6] == "--default-character-set=utf8mb4")
         #expect(dump.arguments.contains("--column-statistics=0"))
         #expect(dump.arguments.contains("--set-gtid-purged=OFF"))
         #expect(dump.arguments.contains("--no-tablespaces"))
         #expect(dump.arguments.last == "shop")
+        #expect(dump.arguments.contains("--routines") && dump.arguments.contains("--triggers"))
         if case .gzip = dump.output {} else { Issue.record("not gzipped") }
+        // Data only: no triggers, routines or events, which come with the structure.
+        o.content = .dataOnly
+        o.events = true
+        let data = try BackupCommands.mysqldump(tool(.mysqldump, [8, 4, 3]), login, o, destination: URL(filePath: "/tmp/x.sql"),
+                                                folder: folder, serverIsMariaDB: false)
+        #expect(data.arguments.contains("--no-create-info") && data.arguments.contains("--skip-triggers"))
+        #expect(!data.arguments.contains("--routines") && !data.arguments.contains("--events") && !data.arguments.contains("--triggers"))
         #expect(!dump.display.contains("p\"w"))
 
         let maria = try BackupCommands.mysqlRestore(tool(.mariadb, [11, 4], mariaDB: true), login, RestoreOptions(), source: URL(filePath: "/tmp/x.sql"),
@@ -202,6 +242,7 @@ struct DumpToolTests {
         #expect(maria.arguments.contains("--ssl"))
         #expect(maria.arguments.contains("--skip-ssl-verify-server-cert"))
         #expect(!maria.arguments.contains("--force"))
+        #expect(maria.arguments.contains("--default-character-set=utf8mb4"))
     }
 
     @Test func fileKinds() throws {
@@ -380,10 +421,10 @@ final class Lines: @unchecked Sendable {
 
     private func roundTrip(_ variable: String, _ variants: [(BackupOptions, RestoreOptions)]) async throws {
         guard let s = try await server(variable) else { return }
-        let (major, maria) = ServerInfo.version(s.admin)
+        let (version, maria) = ServerInfo.version(s.admin)
         let family: DumpTool.Family = s.config.driver == .postgres ? .postgres : .mysql
         let backupRole: BundledTools.Role = family == .postgres ? .backupPostgres : .backupMySQL
-        guard let dumpTool = Self.tools.choose(backupRole, serverMajor: major, mariaDBServer: maria).0 else { return }
+        guard let dumpTool = Self.tools.choose(backupRole, serverVersion: version, mariaDBServer: maria).0 else { return }
         let source = "moonrow_bk_" + UUID().uuidString.prefix(6).lowercased()
         var created = [source]
         let dir = try temporaryFolder()
@@ -416,7 +457,7 @@ final class Lines: @unchecked Sendable {
                 created.append(target)
                 _ = try await s.admin.execute(SQLStatement(DatabaseCatalog.createSQL(NewDatabase(name: target), dialect: s.admin.dialect)))
                 let role = try #require(RestoreJob.role(for: kind, driver: s.config.driver))
-                let restoreTool = try #require(Self.tools.choose(role, serverMajor: major, mariaDBServer: maria).0)
+                let restoreTool = try #require(Self.tools.choose(role, serverVersion: version, mariaDBServer: maria).0)
                 try await RestoreJob(config: s.config, password: s.password, database: target, file: file, kind: kind,
                                      options: restore, tool: restoreTool).run { _ in }
                 let restored = try await open(s, database: target)
@@ -459,7 +500,7 @@ final class Lines: @unchecked Sendable {
 
     @Test func failedBackupLeavesNoFile() async throws {
         guard let s = try await server("MOONROW_TEST_PG"),
-              let tool = Self.tools.choose(.backupPostgres, serverMajor: 18, mariaDBServer: false).0 else { return }
+              let tool = Self.tools.choose(.backupPostgres, serverVersion: [18], mariaDBServer: false).0 else { return }
         await s.admin.close()
         let dir = try temporaryFolder()
         defer { try? FileManager.default.removeItem(at: dir) }

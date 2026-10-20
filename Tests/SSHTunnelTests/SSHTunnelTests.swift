@@ -489,7 +489,7 @@ struct SSHTunnelServerTests {
             targets.append((c, my.password, .backupMySQL))
         }
         for (config, password, role) in targets {
-            guard let tool = tools.choose(role, serverMajor: nil, mariaDBServer: false).0 else { continue }
+            guard let tool = tools.choose(role, serverVersion: nil, mariaDBServer: false).0 else { continue }
             var options = BackupOptions()
             options.content = .schemaOnly
             let job = BackupJob(config: config, password: password, ssh: login, database: config.database, options: options,
