@@ -1,0 +1,3 @@
+# SQLCipher's amalgamation is vendored C, larger than all of our own code. Leaving it out of
+# GitHub's language statistics lets the repository show as Swift.
+Sources/CSQLCipher/** linguist-vendored
