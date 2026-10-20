@@ -16,8 +16,10 @@
 # (Kit folders have no dots: codesign takes a dotted folder in Contents/Helpers for a bundle.)
 #   Licenses/                each project's licence, and SOURCES (where the code came from)
 #
-# Downloads and work folders are kept in build/tools-src; a part already built isn't built again
-# (--clean starts over). build/tools/.stamp holds this script's hash: when it matches, nothing runs.
+# Downloads and work folders are kept in build/tools-src. A part already built from the same
+# sources (its archive, the patches for it, the parts it links and CMake) isn't built again; a
+# change to a part's build options alone doesn't rebuild it, so use --clean then (it starts over).
+# build/tools/.stamp holds this script's hash: when it matches, nothing runs.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
@@ -121,7 +123,17 @@ relink() {
   esac
 }
 
-done_marker() { echo "$work/stage/.$1-done"; }
+# Each part built is recorded in stage/.<part>.done with what it was built from: its archives
+# and their SHA-256, a hash of its patches, and what was recorded for the parts it builds on. A
+# part is built again when that changes, so a new version or hash rebuilds only the parts that
+# use it. (Markers from before, stage/.<part>-done, said only the major version; they're dropped.)
+rm -f "$work"/stage/.*-done
+# patched <folder>: a hash of the patches for a release (tools-patches/<folder>), or "none".
+patched() {
+  if [ -d "$patches/$1" ]; then cat "$patches/$1"/*.patch | shasum -a 256 | cut -c1-16; else echo none; fi
+}
+is_built() { [ "$(cat "$work/stage/.$1.done" 2>/dev/null)" = "$2" ]; }
+mark_built() { printf '%s\n' "$2" > "$work/stage/.$1.done"; }
 
 # MARK: - Build tools
 
@@ -132,12 +144,14 @@ if [ ! -x "$work/cmake/CMake.app/Contents/bin/cmake" ]; then
   tar -xf "$work/dl/${cmake[0]}" -C "$work/cmake" --strip-components 1
 fi
 cmake_bin="$work/cmake/CMake.app/Contents/bin/cmake"
+cmake_from="${cmake[0]} ${cmake[2]}"
 
 # MARK: - OpenSSL, zstd, lz4 (universal, in deps/)
 
 deps="$work/deps"
 fetch "${openssl[@]}"
-if [ ! -f "$(done_marker openssl)" ]; then
+openssl_from="${openssl[0]} ${openssl[2]} patches $(patched openssl)"
+if ! is_built openssl "$openssl_from"; then
   for arch in $archs; do
     unpack "${openssl[0]}" "openssl-$arch"
     (
@@ -161,12 +175,13 @@ if [ ! -f "$(done_marker openssl)" ]; then
   install_name_tool -change "$work/build/openssl-x86_64-install/lib/libcrypto.3.dylib" @rpath/libcrypto.3.dylib "$deps/lib/libssl.3.dylib" 2>/dev/null || true
   ln -sf libssl.3.dylib "$deps/lib/libssl.dylib"
   ln -sf libcrypto.3.dylib "$deps/lib/libcrypto.dylib"
-  touch "$(done_marker openssl)"
+  mark_built openssl "$openssl_from"
 fi
 
 fetch "${zstd[@]}"
 fetch "${lz4[@]}"
-if [ ! -f "$(done_marker compression)" ]; then
+compression_from="${zstd[0]} ${zstd[2]} patches $(patched zstd); ${lz4[0]} ${lz4[2]} patches $(patched lz4)"
+if ! is_built compression "$compression_from"; then
   unpack "${zstd[0]}" zstd
   make -C "$work/build/zstd/lib" -j"$jobs" libzstd.a CFLAGS="-O2 -arch arm64 -arch x86_64" >/dev/null
   cp "$work/build/zstd/lib/libzstd.a" "$deps/lib/"
@@ -175,17 +190,18 @@ if [ ! -f "$(done_marker compression)" ]; then
   make -C "$work/build/lz4/lib" -j"$jobs" liblz4.a CFLAGS="-O2 -arch arm64 -arch x86_64" >/dev/null
   cp "$work/build/lz4/lib/liblz4.a" "$deps/lib/"
   cp "$work/build/lz4/lib/lz4.h" "$work/build/lz4/lib/lz4hc.h" "$work/build/lz4/lib/lz4frame.h" "$deps/include/"
-  touch "$(done_marker compression)"
+  mark_built compression "$compression_from"
 fi
 
 # MARK: - PostgreSQL
 
 # One configure and build per architecture (configure picks code per CPU, e.g. its CRC-32C),
 # cross-compiling the one this Mac doesn't run; nothing built is run during the build.
+# postgres <version> <what it's built from>
 postgres() {
-  local version="$1" major="${1%%.*}" id="postgresql-${1%%.*}"
+  local version="$1" major="${1%%.*}" id="postgresql-${1%%.*}" from="$2"
   local stage="$work/stage/$id"
-  [ -f "$(done_marker "$id")" ] && return
+  is_built "$id" "$from" && return
   rm -rf "$stage" && mkdir -p "$stage"
   for arch in $archs; do
     local dir="postgresql-$version-$arch"
@@ -227,14 +243,14 @@ postgres() {
   fi
   cp "$work/build/postgresql-$version-arm64/COPYRIGHT" "$stage/LICENSE"
   for arch in $archs; do rm -rf "$work/build/postgresql-$version-$arch"; done
-  touch "$(done_marker "$id")"
+  mark_built "$id" "$from"
 }
 
 while read -r version sha; do
   [ -n "$version" ] || continue
   fetch "postgresql-$version.tar.bz2" "https://ftp.postgresql.org/pub/source/v$version/postgresql-$version.tar.bz2" "$sha"
   echo "PostgreSQL $version"
-  postgres "$version"
+  postgres "$version" "postgresql-$version.tar.bz2 $sha patches $(patched "postgresql-$version"); $openssl_from; $compression_from"
 done <<< "$postgres_versions"
 
 # MARK: - MySQL and MariaDB
@@ -244,15 +260,16 @@ done <<< "$postgres_versions"
 # library. Sources CMake picks for the host's CPU only (zstd's x86_64 assembly) are turned off.
 # MariaDB picks code and defines per CPU throughout, so it builds once per architecture: natively
 # first, then cross-compiled with the native build's helpers (IMPORT_EXECUTABLES).
+# cmake_client <id> <what it's built from> <tarball> <folder> <universal|split> <targets…> -- <arguments…>
 cmake_client() {
-  local id="$1" tarball="$2" dir="$3" layout="$4"
-  shift 4
+  local id="$1" from="$2" tarball="$3" dir="$4" layout="$5"
+  shift 5
   local targets=() args=()
   while [ "$1" != -- ]; do targets+=("$1"); shift; done
   shift
   args=("$@")
   local stage="$work/stage/$id"
-  [ -f "$(done_marker "$id")" ] && return
+  is_built "$id" "$from" && return
   rm -rf "$stage" && mkdir -p "$stage"
   unpack "$tarball" "$dir"
   # cmake_build <folder> <architectures> [arguments]
@@ -293,43 +310,46 @@ cmake_client() {
 
 fetch "${mysql57[@]}"
 echo "MySQL 5.7"
+mysql57_from="${mysql57[0]} ${mysql57[2]} patches $(patched mysql-5.7); $openssl_from; $cmake_from"
 # (5.7's WITHOUT_SERVER wants storage/ndb, which the source archive lacks; only the two targets
 # are built anyway.)
-cmake_client mysql-5.7 "${mysql57[0]}" mysql-5.7 universal mysqldump mysql -- \
+cmake_client mysql-5.7 "$mysql57_from" "${mysql57[0]}" mysql-5.7 universal mysqldump mysql -- \
   -DWITH_EMBEDDED_SERVER=OFF -DWITH_BOOST=../boost -DWITH_EDITLINE=bundled -DWITH_LZ4=bundled \
   -DCMAKE_CXX_STANDARD=11 -DCMAKE_CXX_FLAGS="-Wno-register -Wno-deprecated-declarations -Wno-enum-constexpr-conversion" \
   -DCMAKE_C_FLAGS="-Wno-implicit-function-declaration -Wno-incompatible-function-pointer-types -Wno-int-conversion"
-if [ ! -f "$(done_marker mysql-5.7)" ]; then
+if ! is_built mysql-5.7 "$mysql57_from"; then
   cp "$work/build/mysql-5.7/LICENSE" "$work/stage/mysql-5.7/LICENSE"
   rm -rf "$work/build/mysql-5.7"
-  touch "$(done_marker mysql-5.7)"
+  mark_built mysql-5.7 "$mysql57_from"
 fi
 
 fetch "${mysql80[@]}" "$mysql80_archive"
 echo "MySQL 8.0"
-cmake_client mysql-8.0 "${mysql80[0]}" mysql-8.0 universal mysqldump mysql -- \
+mysql80_from="${mysql80[0]} ${mysql80[2]} patches $(patched mysql-8.0); $openssl_from; $cmake_from"
+cmake_client mysql-8.0 "$mysql80_from" "${mysql80[0]}" mysql-8.0 universal mysqldump mysql -- \
   -DWITHOUT_SERVER=ON -DWITH_BOOST=../boost -DWITH_EDITLINE=bundled -DWITH_ZSTD=bundled -DWITH_LZ4=bundled \
   -DWITH_FIDO=none -DWITH_AUTHENTICATION_LDAP=OFF -DWITH_AUTHENTICATION_KERBEROS=OFF -DWITH_ROUTER=OFF \
   -DWITH_ICU=bundled -DWITH_PROTOBUF=bundled -DWITH_RAPIDJSON=bundled \
   -DCMAKE_C_FLAGS=-DZSTD_DISABLE_ASM -DCMAKE_CXX_FLAGS=-DZSTD_DISABLE_ASM
-if [ ! -f "$(done_marker mysql-8.0)" ]; then
+if ! is_built mysql-8.0 "$mysql80_from"; then
   cp "$work/build/mysql-8.0/LICENSE" "$work/stage/mysql-8.0/LICENSE"
   rm -rf "$work/build/mysql-8.0"
-  touch "$(done_marker mysql-8.0)"
+  mark_built mysql-8.0 "$mysql80_from"
 fi
 
 fetch "${mariadb[@]}"
 echo "MariaDB 12.3"
+mariadb_from="${mariadb[0]} ${mariadb[2]} patches $(patched mariadb-12.3); $openssl_from; $cmake_from"
 # The client's authentication plugins are built in, so nothing is loaded from a plugin folder.
-cmake_client mariadb-12.3 "${mariadb[0]}" mariadb-12.3 split mariadb-dump mariadb -- \
+cmake_client mariadb-12.3 "$mariadb_from" "${mariadb[0]}" mariadb-12.3 split mariadb-dump mariadb -- \
   -DWITHOUT_SERVER=ON -DWITH_READLINE=OFF -DWITH_LIBEDIT=OFF -DCONC_WITH_UNIT_TESTS=OFF -DWITH_EMBEDDED_SERVER=OFF \
   -DCLIENT_PLUGIN_CACHING_SHA2_PASSWORD=STATIC -DCLIENT_PLUGIN_SHA256_PASSWORD=STATIC -DCLIENT_PLUGIN_CLIENT_ED25519=STATIC \
   -DCLIENT_PLUGIN_PARSEC=STATIC -DCLIENT_PLUGIN_DIALOG=STATIC -DCLIENT_PLUGIN_MYSQL_CLEAR_PASSWORD=STATIC \
   -DCLIENT_PLUGIN_AUTH_GSSAPI_CLIENT=OFF -DCLIENT_PLUGIN_REMOTE_IO=OFF -DPLUGIN_AUTH_GSSAPI=NO -DWITH_SAFEMALLOC=OFF
-if [ ! -f "$(done_marker mariadb-12.3)" ]; then
+if ! is_built mariadb-12.3 "$mariadb_from"; then
   cp "$work/build/mariadb-12.3/COPYING" "$work/stage/mariadb-12.3/LICENSE"
   rm -rf "$work/build/mariadb-12.3"
-  touch "$(done_marker mariadb-12.3)"
+  mark_built mariadb-12.3 "$mariadb_from"
 fi
 
 # MARK: - Output
