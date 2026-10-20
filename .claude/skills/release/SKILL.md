@@ -89,7 +89,7 @@ Give the user:
 
 - the draft's URL (`gh release view v<version> --json url --jq .url`)
 - the outcome of every check, and the two screenshots
-- a reminder that publishing the draft (Edit → Publish release) releases it: every copy of Moonrow with automatic checks on is offered the update at its next check. The notes and appcast are dated the day the workflow ran.
+- a reminder that publishing the draft (Edit → Publish release) releases it: every copy of Moonrow with automatic checks on is offered the update at its next check, and the Homebrew workflow updates the cask. The notes and appcast are dated the day the workflow ran.
 
 **Publishing is the user's step,** and it's their validation. Publish only if they explicitly ask you to (`gh release edit v<version> --draft=false`); otherwise, tell them where the button is.
 
@@ -100,6 +100,8 @@ curl -sL https://github.com/raf-a/moonrow/releases/latest/download/appcast.xml |
 ```
 
 It should show the new version. A prerelease never shows there, by design.
+
+Then check that the Homebrew workflow pushed the cask: `gh run list --workflow homebrew.yml --limit 1` should show a run for `v<version>` that succeeded. A warning that `HOMEBREW_TAP_KEY` isn't set means the tap isn't set up yet (`docs/RELEASING.md`, Homebrew); mention it, but it doesn't affect the release.
 
 ## Recovery
 
