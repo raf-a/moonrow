@@ -5,7 +5,7 @@
 <h1 align="center">Moonrow</h1>
 
 <p align="center">
-  A native Mac app for SQLite, PostgreSQL, MySQL and MariaDB.
+  A native Mac app for SQLite, PostgreSQL, MySQL and MariaDB. Free and open source.
   <br>
   <a href="https://github.com/raf-a/moonrow/releases/latest">Download</a>
   ·
@@ -20,6 +20,7 @@
 ## Features
 
 - **Staged edits:** changes to rows, structure, views and functions wait until you commit them. You can read the SQL first, and undo any change.
+- **MCP server:** MCP clients such as Claude Code and Codex can run queries on your connections, each with its own access token, and wait for your approval before they change data.
 - **Query editor:** completion for tables, columns and aliases, and a failed statement underlined where the server points.
 - **Data grid:** scroll through millions of rows, filter and sort, and paste ranges of cells from a spreadsheet.
 - **Saved queries as files:** each connection’s queries are `.sql` files in a folder, ready for any editor or version control.
@@ -27,7 +28,6 @@
 - **SSH tunnels** through your Mac’s own OpenSSH, so your `~/.ssh/config` and keys work as they do in Terminal.
 - **Safe mode:** a connection can ask for confirmation, its password or Touch ID before it sends changes. A Production tag shows in the window’s title.
 - **Import, export, backup and restore:** CSV, JSON, SQL and Excel, files of any size, and whole databases backed up and restored with tools built into the app.
-- **MCP server:** MCP clients such as Claude Code and Codex can run queries on your connections, each with its own access token, and wait for your approval before they change data.
 - **Search:** open any table, view or saved query by name, and search for a value across every table.
 - **Native Mac app:** Liquid Glass on macOS 26, editor themes, and custom keyboard shortcuts.
 
@@ -40,13 +40,15 @@ Download the [latest release](https://github.com/raf-a/moonrow/releases/latest).
 With Xcode 26 or later:
 
 ```bash
-swift build
+scripts/build-tools.sh
 scripts/build-app.sh
 ```
 
+The first script builds the tools Backup and Restore run, which is slow but only needed once. The app is in `build/Moonrow.app`.
+
 ## Contributing
 
-To report a bug or ask for a feature, [open an issue](https://github.com/raf-a/moonrow/issues). For a bug, say which database and version you use, the steps that cause it, and what you expected to happen.
+To ask a question or suggest a feature, [start a discussion](https://github.com/raf-a/moonrow/discussions). To report a bug, [open an issue](https://github.com/raf-a/moonrow/issues): say which database and version you use, the steps that cause it, and what you expected to happen.
 
 Pull requests are welcome. For a larger change, open an issue first so we can agree on the approach.
 
