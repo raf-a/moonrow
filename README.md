@@ -26,7 +26,8 @@
 - **SQLite, PostgreSQL, MySQL and MariaDB,** with no client libraries to install. SQLite databases can be encrypted with SQLCipher, or opened on a server over SSH.
 - **SSH tunnels** through your Mac’s own OpenSSH, so your `~/.ssh/config` and keys work as they do in Terminal.
 - **Safe mode:** a connection can ask for confirmation, its password or Touch ID before it sends changes. A Production tag shows in the window’s title.
-- **Import, export, backup and restore:** CSV, JSON, SQL and Excel, files of any size, and whole databases backed up and restored with the Postgres and MySQL tools.
+- **Import, export, backup and restore:** CSV, JSON, SQL and Excel, files of any size, and whole databases backed up and restored with tools built into the app.
+- **MCP server:** MCP clients such as Claude Code and Codex can run queries on your connections, each with its own access token, and wait for your approval before they change data.
 - **Search:** open any table, view or saved query by name, and search for a value across every table.
 - **Native Mac app:** Liquid Glass on macOS 26, editor themes, and custom keyboard shortcuts.
 
