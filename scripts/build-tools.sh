@@ -11,7 +11,7 @@
 #   tools.json               the kits: id, product, version, family, tools
 #   lib/                     libpq (PostgreSQL 18's, for every PostgreSQL kit), OpenSSL
 #   postgresql-10 … -18/     pg_dump, pg_restore, psql
-#   mysql-57/, mysql-80/     mysqldump, mysql
+#   mysql-57/ … mysql-97/    mysqldump, mysql (5.7, 8.0, 8.4, 9.7)
 #   mariadb-123/             mariadb-dump, mariadb
 # (Kit folders have no dots: codesign takes a dotted folder in Contents/Helpers for a bundle.)
 #   Licenses/                each project's licence, and SOURCES (where the code came from)
@@ -153,6 +153,13 @@ mysql80=(mysql-boost-8.0.46.tar.gz https://cdn.mysql.com/Downloads/MySQL-8.0/mys
   dff4332ee7f8f37fc0516c66763600a22a81c8192c743c477b6484206e314f2f)
 # Oracle moves a release to the archive once the next one is out.
 mysql80_archive=https://cdn.mysql.com/archives/mysql-8.0/mysql-boost-8.0.46.tar.gz
+# 8.4 and 9.7 (the LTS lines) carry the Boost they need in the plain source archive.
+mysql84=(mysql-8.4.13.tar.gz https://cdn.mysql.com/Downloads/MySQL-8.4/mysql-8.4.13.tar.gz
+  f6ddc7f7fb6462bab8b533b13c06af3fff57fa9ca12259b81ab13cd9930b9d58)
+mysql84_archive=https://cdn.mysql.com/archives/mysql-8.4/mysql-8.4.13.tar.gz
+mysql97=(mysql-9.7.4.tar.gz https://cdn.mysql.com/Downloads/MySQL-9.7/mysql-9.7.4.tar.gz
+  9188eb1abec42b8ab8bb69948492f06258dd27e6aabd13e2d4c6197dbcde75b2)
+mysql97_archive=https://cdn.mysql.com/archives/mysql-9.7/mysql-9.7.4.tar.gz
 mariadb=(mariadb-12.3.3.tar.gz https://archive.mariadb.org/mariadb-12.3.3/source/mariadb-12.3.3.tar.gz
   e99d739fd4a55f9a11dea7bd2287a262673e287550af3071c8469dd2bec0c163)
 # version, sha256 (ftp.postgresql.org/pub/source/v<version>/postgresql-<version>.tar.bz2)
@@ -433,6 +440,33 @@ if ! is_built mysql-8.0 "$mysql80_from"; then
   mark_built mysql-8.0 "$mysql80_from"
 fi
 
+# 8.4 and 9.7: as 8.0, with Boost from the source archive. (9.7's patch builds in the
+# mysql_native_password client plugin, which 9.x otherwise loads from its install folder.)
+mysql_lts_args=(-DWITHOUT_SERVER=ON -DWITH_EDITLINE=bundled -DWITH_ZSTD=bundled -DWITH_LZ4=bundled
+  -DWITH_FIDO=none -DWITH_AUTHENTICATION_WEBAUTHN=OFF -DWITH_AUTHENTICATION_LDAP=OFF -DWITH_AUTHENTICATION_KERBEROS=OFF
+  -DWITH_ROUTER=OFF -DWITH_ICU=bundled -DWITH_PROTOBUF=bundled -DWITH_RAPIDJSON=bundled
+  -DCMAKE_C_FLAGS=-DZSTD_DISABLE_ASM -DCMAKE_CXX_FLAGS=-DZSTD_DISABLE_ASM)
+
+fetch "${mysql84[@]}" "$mysql84_archive"
+echo "MySQL 8.4"
+mysql84_from="${mysql84[0]} ${mysql84[2]} patches $(patched mysql-8.4); $openssl_from; $cmake_from"
+cmake_client mysql-8.4 "$mysql84_from" "${mysql84[0]}" mysql-8.4 universal mysqldump mysql -- "${mysql_lts_args[@]}"
+if ! is_built mysql-8.4 "$mysql84_from"; then
+  cp "$work/build/mysql-8.4/LICENSE" "$work/stage/mysql-8.4/LICENSE"
+  rm -rf "$work/build/mysql-8.4"
+  mark_built mysql-8.4 "$mysql84_from"
+fi
+
+fetch "${mysql97[@]}" "$mysql97_archive"
+echo "MySQL 9.7"
+mysql97_from="${mysql97[0]} ${mysql97[2]} patches $(patched mysql-9.7); $openssl_from; $cmake_from"
+cmake_client mysql-9.7 "$mysql97_from" "${mysql97[0]}" mysql-9.7 universal mysqldump mysql -- "${mysql_lts_args[@]}"
+if ! is_built mysql-9.7 "$mysql97_from"; then
+  cp "$work/build/mysql-9.7/LICENSE" "$work/stage/mysql-9.7/LICENSE"
+  rm -rf "$work/build/mysql-9.7"
+  mark_built mysql-9.7 "$mysql97_from"
+fi
+
 fetch "${mariadb[@]}"
 echo "MariaDB 12.3"
 mariadb_from="${mariadb[0]} ${mariadb[2]} patches $(patched mariadb-12.3); $openssl_from; $cmake_from"
@@ -474,6 +508,8 @@ while read -r version sha; do
 done <<< "$postgres_versions"
 add_kit mysql-5.7 mysql-57 MySQL 5.7.44 mysql mysqldump mysql
 add_kit mysql-8.0 mysql-80 MySQL 8.0.46 mysql mysqldump mysql
+add_kit mysql-8.4 mysql-84 MySQL 8.4.13 mysql mysqldump mysql
+add_kit mysql-9.7 mysql-97 MySQL 9.7.4 mysql mysqldump mysql
 add_kit mariadb-12.3 mariadb-123 MariaDB 12.3.3 mysql mariadb-dump mariadb
 printf '%s\n]\n' "$manifest" > "$out/tools.json"
 # One PostgreSQL licence is enough; the kits share it.
@@ -481,6 +517,8 @@ for f in "$out"/Licenses/PostgreSQL-*.txt; do [ "$f" = "$out/Licenses/PostgreSQL
 mv "$out/Licenses/PostgreSQL-postgresql-18.txt" "$out/Licenses/PostgreSQL.txt"
 mv "$out/Licenses/MySQL-mysql-80.txt" "$out/Licenses/MySQL-8.0.txt"
 mv "$out/Licenses/MySQL-mysql-57.txt" "$out/Licenses/MySQL-5.7.txt"
+mv "$out/Licenses/MySQL-mysql-84.txt" "$out/Licenses/MySQL-8.4.txt"
+mv "$out/Licenses/MySQL-mysql-97.txt" "$out/Licenses/MySQL-9.7.txt"
 mv "$out/Licenses/MariaDB-mariadb-123.txt" "$out/Licenses/MariaDB.txt"
 tar -xOf "$work/dl/${openssl[0]}" openssl-3.5.9/LICENSE.txt > "$out/Licenses/OpenSSL.txt"
 tar -xOf "$work/dl/${zstd[0]}" zstd-1.5.7/LICENSE > "$out/Licenses/zstd.txt"

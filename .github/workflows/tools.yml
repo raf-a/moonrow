@@ -84,6 +84,6 @@ jobs:
         run: |
           if ! gh release view tools >/dev/null 2>&1; then
             gh release create tools --prerelease --latest=false --target "$GITHUB_SHA" --title "Backup tools" \
-              --notes "Not a Moonrow release. The client tools Moonrow's Backup and Restore run (pg_dump, pg_restore and psql for PostgreSQL 10 to 18; mysqldump and mysql for MySQL 5.7 and 8.0; mariadb-dump and mariadb), built from source by scripts/build-tools.sh. Each backup-tools-<stamp>.tar.gz is the build/tools folder for one version of that script, with a build provenance attestation (gh attestation verify). Licences and sources are in tools/Licenses."
+              --notes "Not a Moonrow release. The client tools Moonrow's Backup and Restore run (pg_dump, pg_restore and psql for PostgreSQL 10 to 18; mysqldump and mysql for MySQL 5.7, 8.0, 8.4 and 9.7; mariadb-dump and mariadb), built from source by scripts/build-tools.sh. Each backup-tools-<stamp>.tar.gz is the build/tools folder for one version of that script, with a build provenance attestation (gh attestation verify). Licences and sources are in tools/Licenses."
           fi
           gh release upload tools "build/$ARCHIVE"

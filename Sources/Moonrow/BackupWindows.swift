@@ -32,7 +32,7 @@ class ToolWindowController: NSWindowController, NSWindowDelegate, NSTableViewDat
     private(set) var databases: [String] = []
     /// Those the search leaves.
     private var shownDatabases: [String] = []
-    private(set) var serverMajor: Int?
+    private(set) var serverVersion: [Int]?
     private(set) var serverIsMariaDB = false
     private var loadTask: Task<Void, Never>?
     /// The database to select when the list loads (File ▸ Backup… from a workspace).
@@ -194,7 +194,7 @@ class ToolWindowController: NSWindowController, NSWindowDelegate, NSTableViewDat
         if let old { Task { await old.close() } }
         databases = []
         login = nil
-        serverMajor = nil
+        serverVersion = nil
         serverIsMariaDB = false
         selected = config
         chooseKit()
@@ -215,7 +215,7 @@ class ToolWindowController: NSWindowController, NSWindowDelegate, NSTableViewDat
                     return
                 }
                 let list = try await ServerInfo.databases(session)
-                let (major, maria) = ServerInfo.version(session)
+                let (version, maria) = ServerInfo.version(session)
                 guard !Task.isCancelled, selected?.id == config.id else {
                     await session.close()
                     return
@@ -223,7 +223,7 @@ class ToolWindowController: NSWindowController, NSWindowDelegate, NSTableViewDat
                 self.login = login
                 self.session = session
                 databases = list
-                serverMajor = major
+                serverVersion = version
                 serverIsMariaDB = maria
                 let wanted = preferredDatabase ?? (config.database.isEmpty ? nil : config.database)
                 preferredDatabase = nil
@@ -366,7 +366,7 @@ class ToolWindowController: NSWindowController, NSWindowDelegate, NSTableViewDat
     /// Lists the family's kits in the version menu and picks the one for the server.
     private func chooseKit() {
         kitChoices = family.map(environment.tools.kits(for:)) ?? []
-        kit = family.flatMap { environment.tools.defaultKit(for: $0, serverMajor: serverMajor, mariaDBServer: serverIsMariaDB) }
+        kit = family.flatMap { environment.tools.defaultKit(for: $0, serverVersion: serverVersion, mariaDBServer: serverIsMariaDB) }
         versionPopup.removeAllItems()
         versionPopup.addItems(withTitles: kitChoices.map(\.title))
         if let kit, let i = kitChoices.firstIndex(of: kit) { versionPopup.selectItem(at: i) }
@@ -388,7 +388,7 @@ class ToolWindowController: NSWindowController, NSWindowDelegate, NSTableViewDat
     func tool(for role: BundledTools.Role) -> (ToolInfo?, warning: String?) {
         guard let kit else { return (nil, nil) }
         return (environment.tools.tool(for: role, in: kit),
-                environment.tools.warning(kit, role: role, serverMajor: serverMajor, mariaDBServer: serverIsMariaDB))
+                environment.tools.warning(kit, role: role, serverVersion: serverVersion, mariaDBServer: serverIsMariaDB))
     }
 
     /// Why `name` can't run: the app has no kit for the family, or the kit lacks it.
