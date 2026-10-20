@@ -77,7 +77,7 @@ if [ -d Assets/AppIcon.icon ] && xcrun --find actool >/dev/null 2>&1; then
 else
   echo "warning: no Xcode 26+ actool; shipping AppIcon.icns only (no Liquid Glass icon)" >&2
 fi
-version="${MOONROW_VERSION:-0.1 ($(git describe --tags --always --dirty 2>/dev/null || echo dev))}"
+version="${MOONROW_VERSION:-0.1 ($(git describe --tags --match 'v[0-9]*' --always --dirty 2>/dev/null || echo dev))}"
 build_number="${MOONROW_BUILD:-1}"
 # The public half of the EdDSA key that signs updates (its private half is the release secret).
 sparkle_key="${MOONROW_SPARKLE_KEY:-93rVySo+PpnkHGVIqDMJOdXNPf2weeWPftiVB4c/SYI=}"
