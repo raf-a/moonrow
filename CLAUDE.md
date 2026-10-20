@@ -24,4 +24,4 @@ Layout:
 
 ## Releases
 
-Tagging `vX.Y.Z` runs `.github/workflows/release.yml`; see `docs/RELEASING.md`. Updates use Sparkle (feed `appcast.xml` on the latest release, signed by `scripts/make-appcast.sh`); a local update test is described there too. `scripts/build-app.sh` and `scripts/package-release.sh` do the same steps locally.
+Tagging `vX.Y.Z` runs `.github/workflows/release.yml`; see `docs/RELEASING.md`. Updates use Sparkle (feed `appcast.xml` on the latest release, signed by `scripts/make-appcast.sh`); a local update test is described there too. Publishing a release runs `.github/workflows/homebrew.yml`, which pushes the cask from `scripts/make-cask.sh` to `raf-a/homebrew-tap`. `scripts/build-app.sh` and `scripts/package-release.sh` do the same steps locally.

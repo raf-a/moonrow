@@ -12,7 +12,7 @@ The `/release` skill walks through all of this: it checks `main`, writes the not
    ```
 
    The `Release` workflow scans the tag with CodeQL (see [Code scanning](#code-scanning)), tests, builds a universal (arm64 + x86_64) `Moonrow.app` with version `1.2.0` and build number set to the run number, and drafts a GitHub release with `Moonrow-1.2.0.dmg`, `Moonrow-1.2.0.zip`, `SHA256SUMS` and `appcast.xml`. A tag with a hyphen, like `v1.2.0-rc.1`, drafts a prerelease.
-4. Check the draft with `scripts/check-release.sh 1.2.0`. It downloads the draft's files and checks the checksums, the appcast against the zip, the EdDSA signature, the version and build number, the architectures, the Developer ID signature and notarization, and the DMG. Then publish the draft on GitHub (Releases → the draft → Edit → Publish release). Until then nobody can download it, and the update feed still offers the previous release. The release notes and the appcast are dated the day the workflow ran, so publish soon after.
+4. Check the draft with `scripts/check-release.sh 1.2.0`. It downloads the draft's files and checks the checksums, the appcast against the zip, the EdDSA signature, the version and build number, the architectures, the Developer ID signature and notarization, and the DMG. Then publish the draft on GitHub (Releases → the draft → Edit → Publish release). Until then nobody can download it, and the update feed still offers the previous release. The release notes and the appcast are dated the day the workflow ran, so publish soon after. Publishing also updates the Homebrew cask (see [Homebrew](#homebrew)).
 
 Running the workflow by hand (Actions → Release → Run workflow) builds and packages without a release; the files are attached to the run as an artifact, with the newest release notes rendered as `release-notes.html`.
 
@@ -73,6 +73,27 @@ After packaging, the workflow runs `scripts/make-appcast.sh`, which:
 A tag without the secret fails; a manual run without it skips the appcast. When Sparkle moves to a new version, update the package and the version and checksum in `scripts/make-appcast.sh` together.
 
 The key never changes: apps already installed only accept updates signed with the key they shipped with. Keep the exported file somewhere safe outside the repository.
+
+## Homebrew
+
+`brew install raf-a/tap/moonrow` installs Moonrow from the tap, [raf-a/homebrew-tap](https://github.com/raf-a/homebrew-tap). Publishing a release, but not a prerelease, runs the `Homebrew` workflow: it writes `Casks/moonrow.rb` for the new version with `scripts/make-cask.sh`, which takes the DMG's checksum from the release's `SHA256SUMS`, and pushes it to the tap. The cask says `auto_updates true`, because Sparkle updates the app, so `brew upgrade` leaves Moonrow alone unless it runs with `--greedy`.
+
+The workflow pushes with a deploy key. To set it up, once:
+
+1. Create the public repository `raf-a/homebrew-tap`, with a README so that it has a first commit.
+2. Make a key pair: `ssh-keygen -t ed25519 -N '' -C moonrow-homebrew -f homebrew-tap-key`.
+3. In the tap, add `homebrew-tap-key.pub` as a deploy key and tick Allow write access (Settings → Deploy keys).
+4. Here, add the private half, the contents of `homebrew-tap-key`, as the secret `HOMEBREW_TAP_KEY` in the `release` environment. Then delete both files.
+5. Run Actions → Homebrew → Run workflow on `main`, which writes the cask for the latest release.
+
+Without the secret, the workflow only prints the cask. To write it locally:
+
+```bash
+gh release download v1.2.0 --pattern SHA256SUMS --dir build --clobber
+scripts/make-cask.sh 1.2.0 build/SHA256SUMS
+```
+
+Homebrew's own `homebrew/cask` only takes an app whose repository meets its [acceptance policy](https://docs.brew.sh/Acceptable-Casks), which asks for a repository at least 30 days old and more stars, forks or watchers when the owner submits it.
 
 ## Xcode version
 

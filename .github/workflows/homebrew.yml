@@ -1,0 +1,87 @@
+name: Homebrew
+
+# Publishing a release updates the cask in the tap, raf-a/homebrew-tap, so that
+# `brew install raf-a/tap/moonrow` installs it. Prereleases are left out. Running the workflow
+# by hand writes the cask for a published release: the latest one, or the version you give.
+#
+# It pushes to the tap with a deploy key: the secret HOMEBREW_TAP_KEY in the `release`
+# environment, the private half of a key the tap accepts with write access. Without it the
+# workflow only prints the cask. docs/RELEASING.md says how to set it up.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version, like 1.2.0 (empty for the latest release)
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  cask:
+    if: github.event_name == 'workflow_dispatch' || !github.event.release.prerelease
+    runs-on: ubuntu-latest
+    environment: release
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAP_KEY: ${{ secrets.HOMEBREW_TAP_KEY }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ -n "$RELEASE_TAG" ]; then
+            tag="$RELEASE_TAG"
+          elif [ -n "$INPUT_VERSION" ]; then
+            tag="v${INPUT_VERSION#v}"
+          else
+            tag="$(gh release view --json tagName --jq .tagName)"
+          fi
+          state="$(gh release view "$tag" --json isDraft,isPrerelease --jq '"\(.isDraft) \(.isPrerelease)"')"
+          if [ "$state" != "false false" ]; then
+            echo "::error::$tag isn't a published release" >&2
+            exit 1
+          fi
+          echo "TAG=$tag" >> "$GITHUB_ENV"
+          echo "VERSION=${tag#v}" >> "$GITHUB_ENV"
+          echo "Version ${tag#v}"
+
+      - name: Cask
+        run: |
+          mkdir -p build
+          gh release download "$TAG" --pattern SHA256SUMS --dir build --clobber
+          scripts/make-cask.sh "$VERSION" build/SHA256SUMS > build/moonrow.rb
+          cat build/moonrow.rb
+
+      - name: No tap key
+        if: env.TAP_KEY == ''
+        run: echo "::warning::The HOMEBREW_TAP_KEY secret isn't set; the tap wasn't updated"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: env.TAP_KEY != ''
+        with:
+          repository: ${{ github.repository_owner }}/homebrew-tap
+          ssh-key: ${{ secrets.HOMEBREW_TAP_KEY }}
+          path: build/tap
+
+      - name: Update the tap
+        if: env.TAP_KEY != ''
+        working-directory: build/tap
+        run: |
+          mkdir -p Casks
+          cp ../moonrow.rb Casks/moonrow.rb
+          git add Casks/moonrow.rb
+          if git diff --cached --quiet; then
+            echo "The tap already has Moonrow $VERSION"
+            exit 0
+          fi
+          git -c user.name='github-actions[bot]' \
+            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit --quiet -m "Moonrow $VERSION"
+          git push origin HEAD
