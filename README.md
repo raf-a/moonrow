@@ -40,9 +40,11 @@ Download the [latest release](https://github.com/raf-a/moonrow/releases/latest).
 With Xcode 26 or later:
 
 ```bash
-swift build
+scripts/build-tools.sh
 scripts/build-app.sh
 ```
+
+The first script builds the tools Backup and Restore run, which is slow but only needed once. The app is in `build/Moonrow.app`.
 
 ## Contributing
 
