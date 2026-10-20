@@ -18,7 +18,7 @@ Running the workflow by hand (Actions → Release → Run workflow) builds and p
 
 ## Release notes
 
-Sparkle's update window shows each release's notes, written by hand in `docs/release-notes/<version>.md`. A tag without its notes fails before the build; a prerelease such as `v1.2.0-rc.1` uses `1.2.0.md`. The GitHub release page keeps GitHub's generated notes.
+Sparkle's update window shows each release's notes, written by hand in `docs/release-notes/<version>.md`. A tag without its notes fails before the build; a prerelease such as `v1.2.0-rc.1` uses `1.2.0.md`. The GitHub release page shows the same notes, above GitHub's generated list of pull requests and new contributors.
 
 [`docs/release-notes/README.md`](release-notes/README.md) says how to write them: the brand style, their shape and the area tags on Fixes and Improvements. The `/release-notes` skill drafts them from the commits since the last tag. Images go in `docs/release-notes/images/` and are loaded from the tagged commit on GitHub.
 
