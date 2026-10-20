@@ -1,8 +1,8 @@
 #!/bin/bash
 # Builds the client tools Backup and Restore run, from the vendors' source, into build/tools.
-# Usage: scripts/build-tools.sh [--clean]
-# Run outside Claude Code's sandbox. A clean build takes a while; scripts/build-app.sh copies
-# the result into Moonrow.app (Contents/Helpers/tools, Contents/Resources/tools.json).
+# Usage: scripts/build-tools.sh [--source | --clean | --stamp]
+# Run outside Claude Code's sandbox. A build from source takes a while; scripts/build-app.sh
+# copies the result into Moonrow.app (Contents/Helpers/tools, Contents/Resources/tools.json).
 #
 # Every tool is universal (arm64 and x86_64), runs on macOS 14 and needs nothing outside the
 # folder: one kit per release, plus the libraries they share in lib/ (the tools find them through
@@ -16,10 +16,21 @@
 # (Kit folders have no dots: codesign takes a dotted folder in Contents/Helpers for a bundle.)
 #   Licenses/                each project's licence, and SOURCES (where the code came from)
 #
+# The stamp is a hash of this script and scripts/tools-patches; build/tools/.stamp holds the one
+# it was made with, and when that matches, nothing runs. Otherwise the script first looks for
+# backup-tools-<stamp>.tar.gz on the repository's `tools` prerelease, which the Backup tools
+# workflow (.github/workflows/tools.yml) builds on main. It checks the archive's build provenance
+# with `gh attestation verify` when gh is installed and signed in (on CI, gh is required), then
+# that the archive is for this stamp and its tools are universal and self-contained, and uses it.
+# With no archive, no network or a failed check, it says so and builds from source.
+#   --source   build from source, without looking for an archive
+#   --clean    build from source, starting over (also drops the parts below)
+#   --stamp    print the stamp and stop
+#   MOONROW_TOOLS_ARCHIVE   another archive to try, a URL or a path (for testing)
+#
 # Downloads and work folders are kept in build/tools-src. A part already built from the same
 # sources (its archive, the patches for it, the parts it links and CMake) isn't built again; a
-# change to a part's build options alone doesn't rebuild it, so use --clean then (it starts over).
-# build/tools/.stamp holds this script's hash: when it matches, nothing runs.
+# change to a part's build options alone doesn't rebuild it, so use --clean then.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
@@ -28,17 +39,102 @@ work="$root/build/tools-src"
 out="$root/build/tools"
 patches="$root/scripts/tools-patches"
 stamp="$( (cat "$0"; if [ -d "$patches" ]; then find "$patches" -type f | sort | xargs cat; fi) | shasum -a 256 | cut -c1-16)"
+repo="${GITHUB_REPOSITORY:-raf-a/moonrow}"
+archive="backup-tools-$stamp.tar.gz"
+archs="arm64 x86_64"
 
-if [ "${1:-}" = "--clean" ]; then
-  rm -rf "$work/build" "$work/deps" "$work/stage" "$out"
-elif [ -f "$out/.stamp" ] && [ "$(cat "$out/.stamp")" = "$stamp" ]; then
-  echo "build/tools is up to date"
-  exit 0
-fi
+# check_tools <folder>: every binary is universal and links nothing outside the folder or the
+# system.
+check_tools() {
+  local dir="$1" f archs_found arch bad status=0
+  for f in "$dir"/lib/* "$dir"/*/*; do
+    case "$f" in "$dir/Licenses/"*|"$dir/tools.json") continue ;; esac
+    archs_found="$(lipo -archs "$f" 2>&1)"
+    [ "$archs_found" = "x86_64 arm64" ] || [ "$archs_found" = "arm64 x86_64" ] || { echo "error: $f is $archs_found" >&2; status=1; }
+    for arch in $archs; do
+      bad="$(otool -arch "$arch" -L "$f" | tail -n +2 | awk '{print $1}' | grep -vE '^(@rpath/|/usr/lib/|/System/)' || true)"
+      [ -z "$bad" ] || { echo "error: $f ($arch) links $bad" >&2; status=1; }
+    done
+  done
+  return "$status"
+}
+
+# show_tools: each tool's version, and the folder's size.
+show_tools() {
+  local tool
+  for tool in "$out"/postgresql-*/* "$out"/mysql-*/* "$out"/mariadb-*/*; do
+    printf '%s: %s\n' "${tool#"$out"/}" "$("$tool" --version 2>&1 | head -1)"
+  done
+  du -sh "$out"
+}
+
+# prebuilt: build/tools from this stamp's archive on the tools release; fails, saying why, when
+# there's none or it doesn't check out. (Called in a condition, so set -e is off here.)
+prebuilt() {
+  local url="${MOONROW_TOOLS_ARCHIVE:-https://github.com/$repo/releases/download/tools/$archive}"
+  local tmp="$root/build/tools-download"
+  local file="$tmp/$archive"
+  rm -rf "$tmp" && mkdir -p "$tmp/unpacked" || return 1
+  if [ -f "$url" ]; then
+    cp "$url" "$file" || return 1
+  elif ! curl -fsSL --retry 2 -o "$file" "$url" 2>/dev/null; then
+    echo "No prebuilt tools for this script ($archive)"
+    return 1
+  fi
+  if command -v gh >/dev/null && { [ -n "${CI:-}" ] || gh auth status >/dev/null 2>&1; }; then
+    if ! gh attestation verify "$file" --repo "$repo" --signer-workflow "$repo/.github/workflows/tools.yml" \
+        --source-ref refs/heads/main --deny-self-hosted-runners >/dev/null; then
+      echo "$archive has no valid attestation from the tools workflow on main"
+      return 1
+    fi
+    echo "Verified $archive's build provenance"
+  elif [ -n "${CI:-}" ]; then
+    echo "gh isn't installed, so $archive can't be verified"
+    return 1
+  else
+    echo "warning: gh isn't installed or signed in; $archive's build provenance isn't checked" >&2
+  fi
+  tar -xzf "$file" -C "$tmp/unpacked" || { echo "$archive doesn't unpack"; return 1; }
+  if [ "$(cat "$tmp/unpacked/tools/.stamp" 2>/dev/null)" != "$stamp" ] || [ ! -f "$tmp/unpacked/tools/tools.json" ]; then
+    echo "$archive doesn't hold the tools for $stamp"
+    return 1
+  fi
+  check_tools "$tmp/unpacked/tools" || { echo "$archive's tools don't pass the checks"; return 1; }
+  rm -rf "$out" && mv "$tmp/unpacked/tools" "$out" || return 1
+}
+
+case "${1:-}" in
+  --stamp)
+    echo "$stamp"
+    exit 0
+    ;;
+  --clean)
+    rm -rf "$work/build" "$work/deps" "$work/stage" "$out"
+    ;;
+  ""|--source)
+    if [ -f "$out/.stamp" ] && [ "$(cat "$out/.stamp")" = "$stamp" ]; then
+      echo "build/tools is up to date"
+      exit 0
+    fi
+    if [ -z "${1:-}" ]; then
+      if prebuilt; then
+        rm -rf "$root/build/tools-download"
+        echo "build/tools is $archive from the tools release"
+        show_tools
+        exit 0
+      fi
+      rm -rf "$root/build/tools-download"
+      echo "Building the tools from source"
+    fi
+    ;;
+  *)
+    echo "usage: scripts/build-tools.sh [--source | --clean | --stamp]" >&2
+    exit 2
+    ;;
+esac
 
 export MACOSX_DEPLOYMENT_TARGET=14.0
 jobs="$(sysctl -n hw.ncpu)"
-archs="arm64 x86_64"
 host_arch="$(uname -m)"
 sdk="$(xcrun --sdk macosx --show-sdk-path)"
 
@@ -397,20 +493,6 @@ tar -xOf "$work/dl/${lz4[0]}" lz4-1.10.0/lib/LICENSE > "$out/Licenses/lz4.txt"
   awk '/^[^ ]/ { skip = /^cmake-/ } !skip' "$sources"
 } > "$out/Licenses/SOURCES.txt"
 
-# Check: universal, and nothing linked from outside the folder or the system.
-status=0
-for f in "$out"/lib/* "$out"/*/*; do
-  case "$f" in "$out/Licenses/"*|"$out/tools.json") continue ;; esac
-  archs_found="$(lipo -archs "$f")"
-  [ "$archs_found" = "x86_64 arm64" ] || [ "$archs_found" = "arm64 x86_64" ] || { echo "error: $f is $archs_found" >&2; status=1; }
-  for arch in $archs; do
-    bad="$(otool -arch "$arch" -L "$f" | tail -n +2 | awk '{print $1}' | grep -vE '^(@rpath/|/usr/lib/|/System/)' || true)"
-    [ -z "$bad" ] || { echo "error: $f ($arch) links $bad" >&2; status=1; }
-  done
-done
-[ "$status" = 0 ] || exit 1
-for tool in "$out"/postgresql-*/* "$out"/mysql-*/* "$out"/mariadb-*/*; do
-  printf '%s: %s\n' "${tool#"$out"/}" "$("$tool" --version 2>&1 | head -1)"
-done
+check_tools "$out" || exit 1
 echo "$stamp" > "$out/.stamp"
-du -sh "$out"
+show_tools

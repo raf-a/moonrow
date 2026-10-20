@@ -46,6 +46,9 @@ jobs:
   build:
     runs-on: macos-26
     environment: release
+    permissions:
+      contents: read
+      attestations: read
     env:
       MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
       MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
@@ -130,14 +133,11 @@ jobs:
           printf '%s' "$NOTARY_KEY" | base64 --decode > "$RUNNER_TEMP/notary.p8"
           echo "NOTARY_KEY_PATH=$RUNNER_TEMP/notary.p8" >> "$GITHUB_ENV"
 
-      # The client tools Backup and Restore run, built from source (long); kept until the
-      # script or its patches change.
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: build/tools
-          key: backup-tools-${{ hashFiles('scripts/build-tools.sh', 'scripts/tools-patches/**') }}
-
-      - name: Build the backup tools
+      # The client tools Backup and Restore run: the Backup tools workflow's archive for this
+      # version of the script, checked with gh attestation verify, or else built from source (long).
+      - name: Backup tools
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: scripts/build-tools.sh
 
       - name: Build
