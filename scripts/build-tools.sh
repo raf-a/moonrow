@@ -324,9 +324,10 @@ postgres() {
       ZSTD_CFLAGS="-I$deps/include" ZSTD_LIBS="$deps/lib/libzstd.a" \
         ./configure "${flags[@]}" >"$work/build/$dir.configure.log" 2>&1 \
         || { tail -30 "$work/build/$dir.configure.log"; tail -60 config.log; exit 1; }
-      # Generated headers first, alone: old branches race on them under -j.
-      { make -C src/backend generated-headers || make -C src/backend submake-errcodes; } >"$work/build/$dir.make.log" 2>&1 \
-        || { tail -40 "$work/build/$dir.make.log"; exit 1; }
+      # Generated headers first, alone: old branches race on them under -j (pg_config_paths.h
+      # is written by each submake that needs src/port, and two at once garble it).
+      { { make -C src/backend generated-headers || make -C src/backend submake-errcodes; } && make -C src/port pg_config_paths.h; } \
+        >"$work/build/$dir.make.log" 2>&1 || { tail -40 "$work/build/$dir.make.log"; exit 1; }
       make -C src/bin/pg_dump -j"$jobs" >>"$work/build/$dir.make.log" 2>&1 || { tail -40 "$work/build/$dir.make.log"; exit 1; }
       make -C src/bin/psql -j"$jobs" >>"$work/build/$dir.make.log" 2>&1 || { tail -40 "$work/build/$dir.make.log"; exit 1; }
       if [ "$major" = 18 ]; then make -C src/interfaces/libpq -j"$jobs" >>"$work/build/$dir.make.log" 2>&1; fi
