@@ -80,12 +80,21 @@ The workflows run on GitHub's `macos-26` image and pick the newest Xcode on it. 
 
 ## Backup tools
 
-The app carries its own pg_dump, pg_restore, psql, mysqldump, mysql, mariadb-dump and mariadb, built from the vendors' source by `scripts/build-tools.sh` into `build/tools` (versions and checksums are at the top of the script). The release workflow caches them until the script or `scripts/tools-patches/` changes; a clean build takes a while. A universal or signed `build-app.sh` fails without them.
+The app carries its own pg_dump, pg_restore, psql, mysqldump, mysql, mariadb-dump and mariadb, built from the vendors' source by `scripts/build-tools.sh` into `build/tools` (versions and checksums are at the top of the script). A build from source takes about 40 minutes on GitHub's runners, so it happens once per version of the script, not once per release:
+
+- The `Backup tools` workflow (`.github/workflows/tools.yml`) runs on main whenever `scripts/build-tools.sh` or `scripts/tools-patches/` changes, and by hand (Actions → Backup tools → Run workflow). It builds with `--source`, packs `build/tools` as `backup-tools-<stamp>.tar.gz`, attests its build provenance and uploads it to the `tools` release. The stamp is the script's hash of itself and its patches (`scripts/build-tools.sh --stamp`); a stamp whose archive is already there isn't built again.
+- `scripts/build-tools.sh` with no option, in the Release workflow and locally, downloads its stamp's archive, checks it with `gh attestation verify` (it must come from `tools.yml` on main; on CI gh is required, locally the check is skipped with a warning when gh isn't installed or signed in), then checks the stamp inside and that every tool is universal and self-contained. With no archive, no network or a failed check, it says why and builds from source. `--source` builds without looking, and `--clean` starts the build over.
+
+**Before tagging a release whose script or patches changed**, let the `Backup tools` run for that commit on main finish (Actions → Backup tools). Otherwise the release finds no archive and builds from source, which still works but takes 40 minutes longer.
+
+The `tools` release is a prerelease and never marked latest, so the update feed (`releases/latest`) can't land on it, and its `tools` tag doesn't match the `v*` tags that start the Release workflow. Older archives stay there for the commits that use them; delete one only if no commit you might release from has its stamp. A local build from source keeps each part in `build/tools-src` and rebuilds a part only when its archive, its patches or a part it links (OpenSSL, zstd and lz4, CMake) changes; changing only a part's build options needs `--clean`.
+
+A universal or signed `build-app.sh` fails without the tools.
 
 ## Locally
 
 ```bash
-scripts/build-tools.sh                # once; build/tools
+scripts/build-tools.sh                # build/tools, downloaded or built
 MOONROW_UNIVERSAL=1 MOONROW_VERSION=1.2.0 scripts/build-app.sh release
 scripts/package-release.sh 1.2.0      # build/release/
 ```

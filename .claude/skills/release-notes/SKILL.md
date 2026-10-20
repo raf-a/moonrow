@@ -9,7 +9,7 @@ Every release's notes follow `docs/release-notes/README.md`: the brand style, th
 
 ## 1. Settle the versions
 
-- **The previous release** is `git describe --tags --abbrev=0` (or the tag the user names).
+- **The previous release** is `git describe --tags --abbrev=0 --match 'v[0-9]*'` (or the tag the user names).
 - **The new version** is the one the user names. If they haven't named one, propose the next minor version and say so.
 - **For a version that already has notes,** revise that file rather than starting over.
 

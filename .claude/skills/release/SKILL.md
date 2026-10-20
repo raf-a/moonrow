@@ -27,7 +27,8 @@ Check each of these, and report them together:
 
   Say which version this works out to, starting from which tag, and get a yes before going on. `v<version>` must be on neither the local repository nor the remote (`git ls-remote --tags origin v<version>`), and there must be no release of it (`gh release view v<version>` fails).
 - **Secrets:** `gh secret list --env release`, or the repository's own `gh secret list` while they're still there, includes `SPARKLE_PRIVATE_KEY`, `MACOS_CERTIFICATE`, `MACOS_CERTIFICATE_PASSWORD` and `NOTARY_KEY`, and `gh variable list` includes `NOTARY_KEY_ID` and `NOTARY_ISSUER_ID`. Without the Sparkle key the release fails. Without the others it's unsigned or not notarized, so ask before going on.
-- **Other drafts:** `gh release list` shows any older draft. Mention it, but leave it alone.
+- **Backup tools:** the `tools` release has the archive for main's `scripts/build-tools.sh`: `gh release view tools --json assets --jq '.assets[].name' | grep -xF "backup-tools-$(scripts/build-tools.sh --stamp).tar.gz"`. If not, the `Backup tools` workflow is still running or failed for that commit (`gh run list --workflow tools.yml --limit 3`). The release would still work, building the tools from source for 40 more minutes, so say so and ask whether to wait.
+- **Other drafts:** `gh release list` shows any older draft. Mention it, but leave it alone. The `tools` prerelease is the backup tools' store, not a Moonrow release.
 
 ## 2. Write the notes
 

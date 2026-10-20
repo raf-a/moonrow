@@ -109,28 +109,40 @@ public struct BundledTools: Sendable {
         }
     }
 
-    /// The kit for a server: the oldest whose major version isn't older than the server's, else
-    /// the newest (and the newest when the version isn't known). A MariaDB server gets MariaDB's
-    /// kit, a MySQL server MySQL's, when there is one.
-    public func defaultKit(for family: DumpTool.Family, serverMajor: Int?, mariaDBServer: Bool) -> ToolKit? {
+    /// The part of a server's version its kits are matched on: the major version, and for MySQL
+    /// the minor too (8.0, 8.4 and 9.7 are separate lines, each with its own tools).
+    static func line(_ version: [Int], family: DumpTool.Family, mariaDB: Bool) -> [Int] {
+        Array(version.prefix(family == .mysql && !mariaDB ? 2 : 1))
+    }
+
+    /// The kit for a server: the oldest whose line (see `line`) isn't older than the server's,
+    /// else the newest (and the newest when the version isn't known). A MariaDB server gets
+    /// MariaDB's kit, a MySQL server MySQL's, when there is one.
+    public func defaultKit(for family: DumpTool.Family, serverVersion: [Int]?, mariaDBServer: Bool) -> ToolKit? {
         var candidates = kits(for: family)
         if family == .mysql {
             let sameKind = candidates.filter { $0.isMariaDB == mariaDBServer }
             if !sameKind.isEmpty { candidates = sameKind }
         }
-        guard let serverMajor else { return candidates.first }
-        return candidates.last { $0.major >= serverMajor } ?? candidates.first
+        guard let serverVersion, !serverVersion.isEmpty else { return candidates.first }
+        let server = Self.line(serverVersion, family: family, mariaDB: mariaDBServer)
+        return candidates.last { !Self.line($0.version, family: family, mariaDB: mariaDBServer).lexicographicallyPrecedes(server) }
+            ?? candidates.first
     }
 
     /// Why `kit` may not suit the server, if it may not.
-    public func warning(_ kit: ToolKit, role: Role, serverMajor: Int?, mariaDBServer: Bool) -> String? {
+    public func warning(_ kit: ToolKit, role: Role, serverVersion: [Int]?, mariaDBServer: Bool) -> String? {
         if kit.family == .mysql, kit.isMariaDB != mariaDBServer {
             let server = mariaDBServer ? "MariaDB" : "MySQL"
             return "These are \(kit.product)'s tools; \(server)'s own suit a \(server) server better."
         }
         // Shown after the tool and its version.
-        if role.isBackup, let serverMajor, kit.major < serverMajor {
-            return "older than the server (\(serverMajor))" + (kit.family == .postgres ? ", which it refuses to back up." : ".")
+        if role.isBackup, let serverVersion, !serverVersion.isEmpty {
+            let server = Self.line(serverVersion, family: kit.family, mariaDB: mariaDBServer)
+            if Self.line(kit.version, family: kit.family, mariaDB: mariaDBServer).lexicographicallyPrecedes(server) {
+                let shown = server.map(String.init).joined(separator: ".")
+                return "older than the server (\(shown))" + (kit.family == .postgres ? ", which it refuses to back up." : ".")
+            }
         }
         return nil
     }
@@ -146,9 +158,9 @@ public struct BundledTools: Sendable {
     }
 
     /// The tool `role` runs from the server's default kit, and why it may not suit the server.
-    public func choose(_ role: Role, serverMajor: Int?, mariaDBServer: Bool) -> (ToolInfo?, warning: String?) {
-        guard let kit = defaultKit(for: role.family, serverMajor: serverMajor, mariaDBServer: mariaDBServer) else { return (nil, nil) }
-        return (tool(for: role, in: kit), warning(kit, role: role, serverMajor: serverMajor, mariaDBServer: mariaDBServer))
+    public func choose(_ role: Role, serverVersion: [Int]?, mariaDBServer: Bool) -> (ToolInfo?, warning: String?) {
+        guard let kit = defaultKit(for: role.family, serverVersion: serverVersion, mariaDBServer: mariaDBServer) else { return (nil, nil) }
+        return (tool(for: role, in: kit), warning(kit, role: role, serverVersion: serverVersion, mariaDBServer: mariaDBServer))
     }
 
     public enum Role: Sendable {

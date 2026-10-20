@@ -625,11 +625,16 @@ public enum BackupCommands {
     ) throws -> ToolCommand {
         let option = try optionFile(password: login.password, in: folder, write: write)
         var args = mysqlConnection(tool, login, optionFile: option)
-        args.append("--verbose")
+        // MySQL 5.7's tools talk 3-byte utf8 unless told otherwise, which turns 4-byte
+        // characters (emoji) into "?" in the backup.
+        args += ["--default-character-set=utf8mb4", "--verbose"]
         if o.singleTransaction { args.append("--single-transaction") }
-        if o.routines { args.append("--routines") }
-        if o.events { args.append("--events") }
-        args.append(o.triggers ? "--triggers" : "--skip-triggers")
+        // Triggers, routines and events are structure: a data-only backup leaves them out, or
+        // restoring it onto the structure stops at "Trigger already exists".
+        let structure = o.content != .dataOnly
+        if o.routines, structure { args.append("--routines") }
+        if o.events, structure { args.append("--events") }
+        args.append(o.triggers && structure ? "--triggers" : "--skip-triggers")
         args.append(o.addDropTable ? "--add-drop-table" : "--skip-add-drop-table")
         if o.noTablespaces { args.append("--no-tablespaces") }
         switch o.content {
@@ -656,7 +661,8 @@ public enum BackupCommands {
                                     write: Bool = true) throws -> ToolCommand {
         let option = try optionFile(password: login.password, in: folder, write: write)
         var args = mysqlConnection(tool, login, optionFile: option)
-        args.append("--verbose")
+        // A script that doesn't say (SET NAMES) is read as UTF-8, 4-byte characters included.
+        args += ["--default-character-set=utf8mb4", "--verbose"]
         if !o.stopOnError { args.append("--force") }
         args += try ToolCommand.splitArguments(o.otherArguments)
         args.append(login.database)
@@ -920,15 +926,24 @@ public enum ServerInfo {
             .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
     }
 
-    /// The server's major version and whether it's MariaDB.
-    public static func version(_ connection: any DatabaseConnection) -> (major: Int?, mariaDB: Bool) {
+    /// The server's version (e.g. [16, 4] or [8, 4, 3]) and whether it's MariaDB.
+    public static func version(_ connection: any DatabaseConnection) -> (version: [Int]?, mariaDB: Bool) {
         if let pg = connection as? PostgresConnection {
-            return (Int(pg.serverVersion.prefix { $0.isNumber }), false)
+            return (parseVersion(pg.serverVersion), false)
         }
         if let my = connection as? MySQLConnection {
-            return (Int(my.serverVersion.prefix { $0.isNumber }), my.isMariaDB)
+            return (parseVersion(my.serverVersion, mariaDB: my.isMariaDB), my.isMariaDB)
         }
         return (nil, false)
+    }
+
+    /// The release numbers at the start of a version string: `16.4 (Debian 16.4-1)` gives [16, 4].
+    /// MariaDB before 11 announces itself as `5.5.5-10.6.18-MariaDB`; the prefix is skipped.
+    static func parseVersion(_ text: String, mariaDB: Bool = false) -> [Int]? {
+        var text = Substring(text)
+        if mariaDB, text.hasPrefix("5.5.5-") { text = text.dropFirst("5.5.5-".count) }
+        let numbers = text.prefix { $0.isNumber || $0 == "." }.split(separator: ".").compactMap { Int($0) }
+        return numbers.isEmpty ? nil : numbers
     }
 }
 

@@ -227,7 +227,7 @@ extension DevHarness {
         let family = try require(backup.family, "a family")
         try check(!backup.versionPopup.isHidden && backup.versionPopup.itemTitles == tools.kits(for: family).map(\.title),
                   "the version menu lists the bundled tools: \(backup.versionPopup.itemTitles.joined(separator: ", "))")
-        let serverKit = tools.defaultKit(for: family, serverMajor: backup.serverMajor, mariaDBServer: backup.serverIsMariaDB)
+        let serverKit = tools.defaultKit(for: family, serverVersion: backup.serverVersion, mariaDBServer: backup.serverIsMariaDB)
         try check(backup.kit != nil && backup.kit == serverKit && backup.versionPopup.titleOfSelectedItem == serverKit?.title,
                   "the server's kit is picked: \(serverKit?.title ?? "none")")
         // The oldest other kit: older than the server (or of the other kind), which its tooltip says.

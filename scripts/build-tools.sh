@@ -1,8 +1,8 @@
 #!/bin/bash
 # Builds the client tools Backup and Restore run, from the vendors' source, into build/tools.
-# Usage: scripts/build-tools.sh [--clean]
-# Run outside Claude Code's sandbox. A clean build takes a while; scripts/build-app.sh copies
-# the result into Moonrow.app (Contents/Helpers/tools, Contents/Resources/tools.json).
+# Usage: scripts/build-tools.sh [--source | --clean | --stamp]
+# Run outside Claude Code's sandbox. A build from source takes a while; scripts/build-app.sh
+# copies the result into Moonrow.app (Contents/Helpers/tools, Contents/Resources/tools.json).
 #
 # Every tool is universal (arm64 and x86_64), runs on macOS 14 and needs nothing outside the
 # folder: one kit per release, plus the libraries they share in lib/ (the tools find them through
@@ -11,13 +11,26 @@
 #   tools.json               the kits: id, product, version, family, tools
 #   lib/                     libpq (PostgreSQL 18's, for every PostgreSQL kit), OpenSSL
 #   postgresql-10 … -18/     pg_dump, pg_restore, psql
-#   mysql-57/, mysql-80/     mysqldump, mysql
+#   mysql-57/ … mysql-97/    mysqldump, mysql (5.7, 8.0, 8.4, 9.7)
 #   mariadb-123/             mariadb-dump, mariadb
 # (Kit folders have no dots: codesign takes a dotted folder in Contents/Helpers for a bundle.)
 #   Licenses/                each project's licence, and SOURCES (where the code came from)
 #
-# Downloads and work folders are kept in build/tools-src; a part already built isn't built again
-# (--clean starts over). build/tools/.stamp holds this script's hash: when it matches, nothing runs.
+# The stamp is a hash of this script and scripts/tools-patches; build/tools/.stamp holds the one
+# it was made with, and when that matches, nothing runs. Otherwise the script first looks for
+# backup-tools-<stamp>.tar.gz on the repository's `tools` prerelease, which the Backup tools
+# workflow (.github/workflows/tools.yml) builds on main. It checks the archive's build provenance
+# with `gh attestation verify` when gh is installed and signed in (on CI, gh is required), then
+# that the archive is for this stamp and its tools are universal and self-contained, and uses it.
+# With no archive, no network or a failed check, it says so and builds from source.
+#   --source   build from source, without looking for an archive
+#   --clean    build from source, starting over (also drops the parts below)
+#   --stamp    print the stamp and stop
+#   MOONROW_TOOLS_ARCHIVE   another archive to try, a URL or a path (for testing)
+#
+# Downloads and work folders are kept in build/tools-src. A part already built from the same
+# sources (its archive, the patches for it, the parts it links and CMake) isn't built again; a
+# change to a part's build options alone doesn't rebuild it, so use --clean then.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
@@ -26,17 +39,102 @@ work="$root/build/tools-src"
 out="$root/build/tools"
 patches="$root/scripts/tools-patches"
 stamp="$( (cat "$0"; if [ -d "$patches" ]; then find "$patches" -type f | sort | xargs cat; fi) | shasum -a 256 | cut -c1-16)"
+repo="${GITHUB_REPOSITORY:-raf-a/moonrow}"
+archive="backup-tools-$stamp.tar.gz"
+archs="arm64 x86_64"
 
-if [ "${1:-}" = "--clean" ]; then
-  rm -rf "$work/build" "$work/deps" "$work/stage" "$out"
-elif [ -f "$out/.stamp" ] && [ "$(cat "$out/.stamp")" = "$stamp" ]; then
-  echo "build/tools is up to date"
-  exit 0
-fi
+# check_tools <folder>: every binary is universal and links nothing outside the folder or the
+# system.
+check_tools() {
+  local dir="$1" f archs_found arch bad status=0
+  for f in "$dir"/lib/* "$dir"/*/*; do
+    case "$f" in "$dir/Licenses/"*|"$dir/tools.json") continue ;; esac
+    archs_found="$(lipo -archs "$f" 2>&1)"
+    [ "$archs_found" = "x86_64 arm64" ] || [ "$archs_found" = "arm64 x86_64" ] || { echo "error: $f is $archs_found" >&2; status=1; }
+    for arch in $archs; do
+      bad="$(otool -arch "$arch" -L "$f" | tail -n +2 | awk '{print $1}' | grep -vE '^(@rpath/|/usr/lib/|/System/)' || true)"
+      [ -z "$bad" ] || { echo "error: $f ($arch) links $bad" >&2; status=1; }
+    done
+  done
+  return "$status"
+}
+
+# show_tools: each tool's version, and the folder's size.
+show_tools() {
+  local tool
+  for tool in "$out"/postgresql-*/* "$out"/mysql-*/* "$out"/mariadb-*/*; do
+    printf '%s: %s\n' "${tool#"$out"/}" "$("$tool" --version 2>&1 | head -1)"
+  done
+  du -sh "$out"
+}
+
+# prebuilt: build/tools from this stamp's archive on the tools release; fails, saying why, when
+# there's none or it doesn't check out. (Called in a condition, so set -e is off here.)
+prebuilt() {
+  local url="${MOONROW_TOOLS_ARCHIVE:-https://github.com/$repo/releases/download/tools/$archive}"
+  local tmp="$root/build/tools-download"
+  local file="$tmp/$archive"
+  rm -rf "$tmp" && mkdir -p "$tmp/unpacked" || return 1
+  if [ -f "$url" ]; then
+    cp "$url" "$file" || return 1
+  elif ! curl -fsSL --retry 2 -o "$file" "$url" 2>/dev/null; then
+    echo "No prebuilt tools for this script ($archive)"
+    return 1
+  fi
+  if command -v gh >/dev/null && { [ -n "${CI:-}" ] || gh auth status >/dev/null 2>&1; }; then
+    if ! gh attestation verify "$file" --repo "$repo" --signer-workflow "$repo/.github/workflows/tools.yml" \
+        --source-ref refs/heads/main --deny-self-hosted-runners >/dev/null; then
+      echo "$archive has no valid attestation from the tools workflow on main"
+      return 1
+    fi
+    echo "Verified $archive's build provenance"
+  elif [ -n "${CI:-}" ]; then
+    echo "gh isn't installed, so $archive can't be verified"
+    return 1
+  else
+    echo "warning: gh isn't installed or signed in; $archive's build provenance isn't checked" >&2
+  fi
+  tar -xzf "$file" -C "$tmp/unpacked" || { echo "$archive doesn't unpack"; return 1; }
+  if [ "$(cat "$tmp/unpacked/tools/.stamp" 2>/dev/null)" != "$stamp" ] || [ ! -f "$tmp/unpacked/tools/tools.json" ]; then
+    echo "$archive doesn't hold the tools for $stamp"
+    return 1
+  fi
+  check_tools "$tmp/unpacked/tools" || { echo "$archive's tools don't pass the checks"; return 1; }
+  rm -rf "$out" && mv "$tmp/unpacked/tools" "$out" || return 1
+}
+
+case "${1:-}" in
+  --stamp)
+    echo "$stamp"
+    exit 0
+    ;;
+  --clean)
+    rm -rf "$work/build" "$work/deps" "$work/stage" "$out"
+    ;;
+  ""|--source)
+    if [ -f "$out/.stamp" ] && [ "$(cat "$out/.stamp")" = "$stamp" ]; then
+      echo "build/tools is up to date"
+      exit 0
+    fi
+    if [ -z "${1:-}" ]; then
+      if prebuilt; then
+        rm -rf "$root/build/tools-download"
+        echo "build/tools is $archive from the tools release"
+        show_tools
+        exit 0
+      fi
+      rm -rf "$root/build/tools-download"
+      echo "Building the tools from source"
+    fi
+    ;;
+  *)
+    echo "usage: scripts/build-tools.sh [--source | --clean | --stamp]" >&2
+    exit 2
+    ;;
+esac
 
 export MACOSX_DEPLOYMENT_TARGET=14.0
 jobs="$(sysctl -n hw.ncpu)"
-archs="arm64 x86_64"
 host_arch="$(uname -m)"
 sdk="$(xcrun --sdk macosx --show-sdk-path)"
 
@@ -55,6 +153,13 @@ mysql80=(mysql-boost-8.0.46.tar.gz https://cdn.mysql.com/Downloads/MySQL-8.0/mys
   dff4332ee7f8f37fc0516c66763600a22a81c8192c743c477b6484206e314f2f)
 # Oracle moves a release to the archive once the next one is out.
 mysql80_archive=https://cdn.mysql.com/archives/mysql-8.0/mysql-boost-8.0.46.tar.gz
+# 8.4 and 9.7 (the LTS lines) carry the Boost they need in the plain source archive.
+mysql84=(mysql-8.4.13.tar.gz https://cdn.mysql.com/Downloads/MySQL-8.4/mysql-8.4.13.tar.gz
+  f6ddc7f7fb6462bab8b533b13c06af3fff57fa9ca12259b81ab13cd9930b9d58)
+mysql84_archive=https://cdn.mysql.com/archives/mysql-8.4/mysql-8.4.13.tar.gz
+mysql97=(mysql-9.7.4.tar.gz https://cdn.mysql.com/Downloads/MySQL-9.7/mysql-9.7.4.tar.gz
+  9188eb1abec42b8ab8bb69948492f06258dd27e6aabd13e2d4c6197dbcde75b2)
+mysql97_archive=https://cdn.mysql.com/archives/mysql-9.7/mysql-9.7.4.tar.gz
 mariadb=(mariadb-12.3.3.tar.gz https://archive.mariadb.org/mariadb-12.3.3/source/mariadb-12.3.3.tar.gz
   e99d739fd4a55f9a11dea7bd2287a262673e287550af3071c8469dd2bec0c163)
 # version, sha256 (ftp.postgresql.org/pub/source/v<version>/postgresql-<version>.tar.bz2)
@@ -121,7 +226,17 @@ relink() {
   esac
 }
 
-done_marker() { echo "$work/stage/.$1-done"; }
+# Each part built is recorded in stage/.<part>.done with what it was built from: its archives
+# and their SHA-256, a hash of its patches, and what was recorded for the parts it builds on. A
+# part is built again when that changes, so a new version or hash rebuilds only the parts that
+# use it. (Markers from before, stage/.<part>-done, said only the major version; they're dropped.)
+rm -f "$work"/stage/.*-done
+# patched <folder>: a hash of the patches for a release (tools-patches/<folder>), or "none".
+patched() {
+  if [ -d "$patches/$1" ]; then cat "$patches/$1"/*.patch | shasum -a 256 | cut -c1-16; else echo none; fi
+}
+is_built() { [ "$(cat "$work/stage/.$1.done" 2>/dev/null)" = "$2" ]; }
+mark_built() { printf '%s\n' "$2" > "$work/stage/.$1.done"; }
 
 # MARK: - Build tools
 
@@ -132,12 +247,14 @@ if [ ! -x "$work/cmake/CMake.app/Contents/bin/cmake" ]; then
   tar -xf "$work/dl/${cmake[0]}" -C "$work/cmake" --strip-components 1
 fi
 cmake_bin="$work/cmake/CMake.app/Contents/bin/cmake"
+cmake_from="${cmake[0]} ${cmake[2]}"
 
 # MARK: - OpenSSL, zstd, lz4 (universal, in deps/)
 
 deps="$work/deps"
 fetch "${openssl[@]}"
-if [ ! -f "$(done_marker openssl)" ]; then
+openssl_from="${openssl[0]} ${openssl[2]} patches $(patched openssl)"
+if ! is_built openssl "$openssl_from"; then
   for arch in $archs; do
     unpack "${openssl[0]}" "openssl-$arch"
     (
@@ -161,12 +278,13 @@ if [ ! -f "$(done_marker openssl)" ]; then
   install_name_tool -change "$work/build/openssl-x86_64-install/lib/libcrypto.3.dylib" @rpath/libcrypto.3.dylib "$deps/lib/libssl.3.dylib" 2>/dev/null || true
   ln -sf libssl.3.dylib "$deps/lib/libssl.dylib"
   ln -sf libcrypto.3.dylib "$deps/lib/libcrypto.dylib"
-  touch "$(done_marker openssl)"
+  mark_built openssl "$openssl_from"
 fi
 
 fetch "${zstd[@]}"
 fetch "${lz4[@]}"
-if [ ! -f "$(done_marker compression)" ]; then
+compression_from="${zstd[0]} ${zstd[2]} patches $(patched zstd); ${lz4[0]} ${lz4[2]} patches $(patched lz4)"
+if ! is_built compression "$compression_from"; then
   unpack "${zstd[0]}" zstd
   make -C "$work/build/zstd/lib" -j"$jobs" libzstd.a CFLAGS="-O2 -arch arm64 -arch x86_64" >/dev/null
   cp "$work/build/zstd/lib/libzstd.a" "$deps/lib/"
@@ -175,17 +293,18 @@ if [ ! -f "$(done_marker compression)" ]; then
   make -C "$work/build/lz4/lib" -j"$jobs" liblz4.a CFLAGS="-O2 -arch arm64 -arch x86_64" >/dev/null
   cp "$work/build/lz4/lib/liblz4.a" "$deps/lib/"
   cp "$work/build/lz4/lib/lz4.h" "$work/build/lz4/lib/lz4hc.h" "$work/build/lz4/lib/lz4frame.h" "$deps/include/"
-  touch "$(done_marker compression)"
+  mark_built compression "$compression_from"
 fi
 
 # MARK: - PostgreSQL
 
 # One configure and build per architecture (configure picks code per CPU, e.g. its CRC-32C),
 # cross-compiling the one this Mac doesn't run; nothing built is run during the build.
+# postgres <version> <what it's built from>
 postgres() {
-  local version="$1" major="${1%%.*}" id="postgresql-${1%%.*}"
+  local version="$1" major="${1%%.*}" id="postgresql-${1%%.*}" from="$2"
   local stage="$work/stage/$id"
-  [ -f "$(done_marker "$id")" ] && return
+  is_built "$id" "$from" && return
   rm -rf "$stage" && mkdir -p "$stage"
   for arch in $archs; do
     local dir="postgresql-$version-$arch"
@@ -205,9 +324,10 @@ postgres() {
       ZSTD_CFLAGS="-I$deps/include" ZSTD_LIBS="$deps/lib/libzstd.a" \
         ./configure "${flags[@]}" >"$work/build/$dir.configure.log" 2>&1 \
         || { tail -30 "$work/build/$dir.configure.log"; tail -60 config.log; exit 1; }
-      # Generated headers first, alone: old branches race on them under -j.
-      { make -C src/backend generated-headers || make -C src/backend submake-errcodes; } >"$work/build/$dir.make.log" 2>&1 \
-        || { tail -40 "$work/build/$dir.make.log"; exit 1; }
+      # Generated headers first, alone: old branches race on them under -j (pg_config_paths.h
+      # is written by each submake that needs src/port, and two at once garble it).
+      { { make -C src/backend generated-headers || make -C src/backend submake-errcodes; } && make -C src/port pg_config_paths.h; } \
+        >"$work/build/$dir.make.log" 2>&1 || { tail -40 "$work/build/$dir.make.log"; exit 1; }
       make -C src/bin/pg_dump -j"$jobs" >>"$work/build/$dir.make.log" 2>&1 || { tail -40 "$work/build/$dir.make.log"; exit 1; }
       make -C src/bin/psql -j"$jobs" >>"$work/build/$dir.make.log" 2>&1 || { tail -40 "$work/build/$dir.make.log"; exit 1; }
       if [ "$major" = 18 ]; then make -C src/interfaces/libpq -j"$jobs" >>"$work/build/$dir.make.log" 2>&1; fi
@@ -227,14 +347,14 @@ postgres() {
   fi
   cp "$work/build/postgresql-$version-arm64/COPYRIGHT" "$stage/LICENSE"
   for arch in $archs; do rm -rf "$work/build/postgresql-$version-$arch"; done
-  touch "$(done_marker "$id")"
+  mark_built "$id" "$from"
 }
 
 while read -r version sha; do
   [ -n "$version" ] || continue
   fetch "postgresql-$version.tar.bz2" "https://ftp.postgresql.org/pub/source/v$version/postgresql-$version.tar.bz2" "$sha"
   echo "PostgreSQL $version"
-  postgres "$version"
+  postgres "$version" "postgresql-$version.tar.bz2 $sha patches $(patched "postgresql-$version"); $openssl_from; $compression_from"
 done <<< "$postgres_versions"
 
 # MARK: - MySQL and MariaDB
@@ -244,15 +364,16 @@ done <<< "$postgres_versions"
 # library. Sources CMake picks for the host's CPU only (zstd's x86_64 assembly) are turned off.
 # MariaDB picks code and defines per CPU throughout, so it builds once per architecture: natively
 # first, then cross-compiled with the native build's helpers (IMPORT_EXECUTABLES).
+# cmake_client <id> <what it's built from> <tarball> <folder> <universal|split> <targets…> -- <arguments…>
 cmake_client() {
-  local id="$1" tarball="$2" dir="$3" layout="$4"
-  shift 4
+  local id="$1" from="$2" tarball="$3" dir="$4" layout="$5"
+  shift 5
   local targets=() args=()
   while [ "$1" != -- ]; do targets+=("$1"); shift; done
   shift
   args=("$@")
   local stage="$work/stage/$id"
-  [ -f "$(done_marker "$id")" ] && return
+  is_built "$id" "$from" && return
   rm -rf "$stage" && mkdir -p "$stage"
   unpack "$tarball" "$dir"
   # cmake_build <folder> <architectures> [arguments]
@@ -293,43 +414,73 @@ cmake_client() {
 
 fetch "${mysql57[@]}"
 echo "MySQL 5.7"
+mysql57_from="${mysql57[0]} ${mysql57[2]} patches $(patched mysql-5.7); $openssl_from; $cmake_from"
 # (5.7's WITHOUT_SERVER wants storage/ndb, which the source archive lacks; only the two targets
 # are built anyway.)
-cmake_client mysql-5.7 "${mysql57[0]}" mysql-5.7 universal mysqldump mysql -- \
+cmake_client mysql-5.7 "$mysql57_from" "${mysql57[0]}" mysql-5.7 universal mysqldump mysql -- \
   -DWITH_EMBEDDED_SERVER=OFF -DWITH_BOOST=../boost -DWITH_EDITLINE=bundled -DWITH_LZ4=bundled \
   -DCMAKE_CXX_STANDARD=11 -DCMAKE_CXX_FLAGS="-Wno-register -Wno-deprecated-declarations -Wno-enum-constexpr-conversion" \
   -DCMAKE_C_FLAGS="-Wno-implicit-function-declaration -Wno-incompatible-function-pointer-types -Wno-int-conversion"
-if [ ! -f "$(done_marker mysql-5.7)" ]; then
+if ! is_built mysql-5.7 "$mysql57_from"; then
   cp "$work/build/mysql-5.7/LICENSE" "$work/stage/mysql-5.7/LICENSE"
   rm -rf "$work/build/mysql-5.7"
-  touch "$(done_marker mysql-5.7)"
+  mark_built mysql-5.7 "$mysql57_from"
 fi
 
 fetch "${mysql80[@]}" "$mysql80_archive"
 echo "MySQL 8.0"
-cmake_client mysql-8.0 "${mysql80[0]}" mysql-8.0 universal mysqldump mysql -- \
+mysql80_from="${mysql80[0]} ${mysql80[2]} patches $(patched mysql-8.0); $openssl_from; $cmake_from"
+cmake_client mysql-8.0 "$mysql80_from" "${mysql80[0]}" mysql-8.0 universal mysqldump mysql -- \
   -DWITHOUT_SERVER=ON -DWITH_BOOST=../boost -DWITH_EDITLINE=bundled -DWITH_ZSTD=bundled -DWITH_LZ4=bundled \
   -DWITH_FIDO=none -DWITH_AUTHENTICATION_LDAP=OFF -DWITH_AUTHENTICATION_KERBEROS=OFF -DWITH_ROUTER=OFF \
   -DWITH_ICU=bundled -DWITH_PROTOBUF=bundled -DWITH_RAPIDJSON=bundled \
   -DCMAKE_C_FLAGS=-DZSTD_DISABLE_ASM -DCMAKE_CXX_FLAGS=-DZSTD_DISABLE_ASM
-if [ ! -f "$(done_marker mysql-8.0)" ]; then
+if ! is_built mysql-8.0 "$mysql80_from"; then
   cp "$work/build/mysql-8.0/LICENSE" "$work/stage/mysql-8.0/LICENSE"
   rm -rf "$work/build/mysql-8.0"
-  touch "$(done_marker mysql-8.0)"
+  mark_built mysql-8.0 "$mysql80_from"
+fi
+
+# 8.4 and 9.7: as 8.0, with Boost from the source archive. (9.7's patch builds in the
+# mysql_native_password client plugin, which 9.x otherwise loads from its install folder.)
+mysql_lts_args=(-DWITHOUT_SERVER=ON -DWITH_EDITLINE=bundled -DWITH_ZSTD=bundled -DWITH_LZ4=bundled
+  -DWITH_FIDO=none -DWITH_AUTHENTICATION_WEBAUTHN=OFF -DWITH_AUTHENTICATION_LDAP=OFF -DWITH_AUTHENTICATION_KERBEROS=OFF
+  -DWITH_ROUTER=OFF -DWITH_ICU=bundled -DWITH_PROTOBUF=bundled -DWITH_RAPIDJSON=bundled
+  -DCMAKE_C_FLAGS=-DZSTD_DISABLE_ASM -DCMAKE_CXX_FLAGS=-DZSTD_DISABLE_ASM)
+
+fetch "${mysql84[@]}" "$mysql84_archive"
+echo "MySQL 8.4"
+mysql84_from="${mysql84[0]} ${mysql84[2]} patches $(patched mysql-8.4); $openssl_from; $cmake_from"
+cmake_client mysql-8.4 "$mysql84_from" "${mysql84[0]}" mysql-8.4 universal mysqldump mysql -- "${mysql_lts_args[@]}"
+if ! is_built mysql-8.4 "$mysql84_from"; then
+  cp "$work/build/mysql-8.4/LICENSE" "$work/stage/mysql-8.4/LICENSE"
+  rm -rf "$work/build/mysql-8.4"
+  mark_built mysql-8.4 "$mysql84_from"
+fi
+
+fetch "${mysql97[@]}" "$mysql97_archive"
+echo "MySQL 9.7"
+mysql97_from="${mysql97[0]} ${mysql97[2]} patches $(patched mysql-9.7); $openssl_from; $cmake_from"
+cmake_client mysql-9.7 "$mysql97_from" "${mysql97[0]}" mysql-9.7 universal mysqldump mysql -- "${mysql_lts_args[@]}"
+if ! is_built mysql-9.7 "$mysql97_from"; then
+  cp "$work/build/mysql-9.7/LICENSE" "$work/stage/mysql-9.7/LICENSE"
+  rm -rf "$work/build/mysql-9.7"
+  mark_built mysql-9.7 "$mysql97_from"
 fi
 
 fetch "${mariadb[@]}"
 echo "MariaDB 12.3"
+mariadb_from="${mariadb[0]} ${mariadb[2]} patches $(patched mariadb-12.3); $openssl_from; $cmake_from"
 # The client's authentication plugins are built in, so nothing is loaded from a plugin folder.
-cmake_client mariadb-12.3 "${mariadb[0]}" mariadb-12.3 split mariadb-dump mariadb -- \
+cmake_client mariadb-12.3 "$mariadb_from" "${mariadb[0]}" mariadb-12.3 split mariadb-dump mariadb -- \
   -DWITHOUT_SERVER=ON -DWITH_READLINE=OFF -DWITH_LIBEDIT=OFF -DCONC_WITH_UNIT_TESTS=OFF -DWITH_EMBEDDED_SERVER=OFF \
   -DCLIENT_PLUGIN_CACHING_SHA2_PASSWORD=STATIC -DCLIENT_PLUGIN_SHA256_PASSWORD=STATIC -DCLIENT_PLUGIN_CLIENT_ED25519=STATIC \
   -DCLIENT_PLUGIN_PARSEC=STATIC -DCLIENT_PLUGIN_DIALOG=STATIC -DCLIENT_PLUGIN_MYSQL_CLEAR_PASSWORD=STATIC \
   -DCLIENT_PLUGIN_AUTH_GSSAPI_CLIENT=OFF -DCLIENT_PLUGIN_REMOTE_IO=OFF -DPLUGIN_AUTH_GSSAPI=NO -DWITH_SAFEMALLOC=OFF
-if [ ! -f "$(done_marker mariadb-12.3)" ]; then
+if ! is_built mariadb-12.3 "$mariadb_from"; then
   cp "$work/build/mariadb-12.3/COPYING" "$work/stage/mariadb-12.3/LICENSE"
   rm -rf "$work/build/mariadb-12.3"
-  touch "$(done_marker mariadb-12.3)"
+  mark_built mariadb-12.3 "$mariadb_from"
 fi
 
 # MARK: - Output
@@ -358,6 +509,8 @@ while read -r version sha; do
 done <<< "$postgres_versions"
 add_kit mysql-5.7 mysql-57 MySQL 5.7.44 mysql mysqldump mysql
 add_kit mysql-8.0 mysql-80 MySQL 8.0.46 mysql mysqldump mysql
+add_kit mysql-8.4 mysql-84 MySQL 8.4.13 mysql mysqldump mysql
+add_kit mysql-9.7 mysql-97 MySQL 9.7.4 mysql mysqldump mysql
 add_kit mariadb-12.3 mariadb-123 MariaDB 12.3.3 mysql mariadb-dump mariadb
 printf '%s\n]\n' "$manifest" > "$out/tools.json"
 # One PostgreSQL licence is enough; the kits share it.
@@ -365,6 +518,8 @@ for f in "$out"/Licenses/PostgreSQL-*.txt; do [ "$f" = "$out/Licenses/PostgreSQL
 mv "$out/Licenses/PostgreSQL-postgresql-18.txt" "$out/Licenses/PostgreSQL.txt"
 mv "$out/Licenses/MySQL-mysql-80.txt" "$out/Licenses/MySQL-8.0.txt"
 mv "$out/Licenses/MySQL-mysql-57.txt" "$out/Licenses/MySQL-5.7.txt"
+mv "$out/Licenses/MySQL-mysql-84.txt" "$out/Licenses/MySQL-8.4.txt"
+mv "$out/Licenses/MySQL-mysql-97.txt" "$out/Licenses/MySQL-9.7.txt"
 mv "$out/Licenses/MariaDB-mariadb-123.txt" "$out/Licenses/MariaDB.txt"
 tar -xOf "$work/dl/${openssl[0]}" openssl-3.5.9/LICENSE.txt > "$out/Licenses/OpenSSL.txt"
 tar -xOf "$work/dl/${zstd[0]}" zstd-1.5.7/LICENSE > "$out/Licenses/zstd.txt"
@@ -377,20 +532,6 @@ tar -xOf "$work/dl/${lz4[0]}" lz4-1.10.0/lib/LICENSE > "$out/Licenses/lz4.txt"
   awk '/^[^ ]/ { skip = /^cmake-/ } !skip' "$sources"
 } > "$out/Licenses/SOURCES.txt"
 
-# Check: universal, and nothing linked from outside the folder or the system.
-status=0
-for f in "$out"/lib/* "$out"/*/*; do
-  case "$f" in "$out/Licenses/"*|"$out/tools.json") continue ;; esac
-  archs_found="$(lipo -archs "$f")"
-  [ "$archs_found" = "x86_64 arm64" ] || [ "$archs_found" = "arm64 x86_64" ] || { echo "error: $f is $archs_found" >&2; status=1; }
-  for arch in $archs; do
-    bad="$(otool -arch "$arch" -L "$f" | tail -n +2 | awk '{print $1}' | grep -vE '^(@rpath/|/usr/lib/|/System/)' || true)"
-    [ -z "$bad" ] || { echo "error: $f ($arch) links $bad" >&2; status=1; }
-  done
-done
-[ "$status" = 0 ] || exit 1
-for tool in "$out"/postgresql-*/* "$out"/mysql-*/* "$out"/mariadb-*/*; do
-  printf '%s: %s\n' "${tool#"$out"/}" "$("$tool" --version 2>&1 | head -1)"
-done
+check_tools "$out" || exit 1
 echo "$stamp" > "$out/.stamp"
-du -sh "$out"
+show_tools

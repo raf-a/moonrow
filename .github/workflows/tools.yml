@@ -1,0 +1,89 @@
+name: Backup tools
+
+# Builds the client tools Backup and Restore run (scripts/build-tools.sh, about 40 minutes) and
+# keeps them as backup-tools-<stamp>.tar.gz on the `tools` prerelease, with a build provenance
+# attestation. <stamp> is the script's hash of itself and its patches (build-tools.sh --stamp),
+# so each change to either gets its own archive; older archives stay for the commits that use
+# them. build-tools.sh downloads its stamp's archive and checks the attestation, so the Release
+# workflow and local builds skip the build; without an archive they build from source.
+#
+# The `tools` release is a prerelease and never the latest, so the update feed, which GitHub
+# serves from the latest release, never sees it. It runs on main only: a tag whose script
+# changed needs this to have run on main first, or it builds from source.
+on:
+  push:
+    branches: [main]
+    paths:
+      - scripts/build-tools.sh
+      - scripts/tools-patches/**
+  workflow_dispatch:
+
+permissions: {}
+
+# One run at a time, and none cancelled halfway: the second finds the first's archive.
+concurrency:
+  group: backup-tools
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main'
+    runs-on: macos-26
+    timeout-minutes: 150
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Stamp
+        run: |
+          stamp="$(scripts/build-tools.sh --stamp)"
+          archive="backup-tools-$stamp.tar.gz"
+          echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
+          if gh release view tools --json assets --jq '.assets[].name' 2>/dev/null | grep -qxF "$archive"; then
+            echo "$archive is already on the tools release"
+            echo "BUILT=1" >> "$GITHUB_ENV"
+          fi
+
+      # The newest Xcode on the image, unless the XCODE_APP repository variable names one.
+      - name: Select Xcode
+        if: env.BUILT != '1'
+        env:
+          XCODE_APP: ${{ vars.XCODE_APP }}
+        run: |
+          xcode="$XCODE_APP"
+          [ -n "$xcode" ] || xcode="$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+          sudo xcode-select -s "$xcode"
+          xcodebuild -version
+
+      - name: Build the backup tools
+        if: env.BUILT != '1'
+        run: scripts/build-tools.sh --source
+
+      - name: Pack
+        if: env.BUILT != '1'
+        run: |
+          COPYFILE_DISABLE=1 tar -czf "build/$ARCHIVE" -C build tools
+          ls -l "build/$ARCHIVE"
+          shasum -a 256 "build/$ARCHIVE"
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        if: env.BUILT != '1'
+        with:
+          subject-path: build/${{ env.ARCHIVE }}
+
+      - name: Upload
+        if: env.BUILT != '1'
+        run: |
+          if ! gh release view tools >/dev/null 2>&1; then
+            gh release create tools --prerelease --latest=false --target "$GITHUB_SHA" --title "Backup tools" \
+              --notes "Not a Moonrow release. The client tools Moonrow's Backup and Restore run (pg_dump, pg_restore and psql for PostgreSQL 10 to 18; mysqldump and mysql for MySQL 5.7, 8.0, 8.4 and 9.7; mariadb-dump and mariadb), built from source by scripts/build-tools.sh. Each backup-tools-<stamp>.tar.gz is the build/tools folder for one version of that script, with a build provenance attestation (gh attestation verify). Licences and sources are in tools/Licenses."
+          fi
+          gh release upload tools "build/$ARCHIVE"
