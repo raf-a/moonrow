@@ -202,10 +202,16 @@ jobs:
           name: Moonrow-${{ env.VERSION }}
           path: build
 
+      # The release page shows the notes from the update window, above GitHub's list of pull
+      # requests. Images load from this commit, as in the appcast.
       - name: Draft the release
         run: |
           flags=""
           case "$VERSION" in *-*) flags="--prerelease" ;; esac
-          gh release create "$GITHUB_REF_NAME" --draft --title "Moonrow $VERSION" --generate-notes $flags \
+          base="https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_SHA/docs/release-notes/"
+          sed -E "s#^[[:space:]]*(!\[[^]]*\]\()([^:)]+\))[[:space:]]*\$#\1$base\2#" \
+            "docs/release-notes/${VERSION%%-*}.md" > build/release-notes.md
+          gh release create "$GITHUB_REF_NAME" --draft --title "Moonrow $VERSION" \
+            --notes-file build/release-notes.md --generate-notes $flags \
             build/release/Moonrow-"$VERSION".dmg build/release/Moonrow-"$VERSION".zip build/release/SHA256SUMS \
             build/release/appcast.xml
