@@ -285,7 +285,7 @@ final class Sent: @unchecked Sendable {
         #expect(DatabaseCatalog.createSQL(NewDatabase(name: "shop", encoding: "LATIN1"), dialect: pg)
             == #"CREATE DATABASE "shop" ENCODING 'LATIN1' TEMPLATE template0"#)
         #expect(DatabaseCatalog.createSQL(NewDatabase(name: "s", encoding: "UTF8", collation: DatabaseCollation(name: "en_US", locale: "en_US.utf8")), dialect: pg)
-            == #"CREATE DATABASE "s" ENCODING 'UTF8' LOCALE 'en_US.utf8' TEMPLATE template0"#)
+            == #"CREATE DATABASE "s" ENCODING 'UTF8' LC_COLLATE 'en_US.utf8' LC_CTYPE 'en_US.utf8' TEMPLATE template0"#)
         #expect(DatabaseCatalog.createSQL(NewDatabase(name: "s", collation: DatabaseCollation(name: "de-x-icu", provider: .icu, locale: "de")), dialect: pg)
             == #"CREATE DATABASE "s" LOCALE_PROVIDER icu ICU_LOCALE 'de' TEMPLATE template0"#)
         #expect(DatabaseCatalog.createSQL(NewDatabase(name: "s", collation: DatabaseCollation(name: "pg_c_utf8", provider: .builtin, locale: "C.UTF-8")), dialect: pg)
