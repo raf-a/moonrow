@@ -214,7 +214,9 @@ struct PGServerTests {
             """,
             "CREATE UNIQUE INDEX child_note ON child (lower(note), pa) WHERE note IS NOT NULL",
             "CREATE FUNCTION touch() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$",
-            "CREATE TRIGGER child_touch BEFORE INSERT OR UPDATE ON child FOR EACH ROW EXECUTE FUNCTION touch()",
+            // EXECUTE PROCEDURE and the aggregate are for servers before 11 too, which have no prokind.
+            "CREATE TRIGGER child_touch BEFORE INSERT OR UPDATE ON child FOR EACH ROW EXECUTE PROCEDURE touch()",
+            "CREATE AGGREGATE total(int) (SFUNC = int4pl, STYPE = int)",
             "CREATE VIEW child_view AS SELECT id FROM child",
             "CREATE MATERIALIZED VIEW child_mv AS SELECT id FROM child",
         ] { _ = try await s.db.execute(sql) }
@@ -250,7 +252,7 @@ struct PGServerTests {
         let triggers = try await s.db.triggers(of: TableRef(schema: ns, "child"))
         #expect(triggers.map(\.name) == ["child_touch"])
         #expect(triggers.first?.timing == "BEFORE" && triggers.first?.events == ["INSERT", "UPDATE"])
-        #expect(triggers.first?.definition.contains("EXECUTE FUNCTION") == true)
+        #expect(triggers.first?.definition.contains(s.db.versionNumber >= 110_000 ? "EXECUTE FUNCTION" : "EXECUTE PROCEDURE") == true)
 
         await #expect(throws: DatabaseError.self) { try await s.db.columns(of: TableRef(schema: ns, "missing")) }
     }

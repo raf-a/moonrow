@@ -10,6 +10,9 @@ public final class PostgresConnection: DatabaseConnection, @unchecked Sendable {
     public let configuration: PostgresConfiguration
     /// `server_version` as reported at login, e.g. `18.0 (Debian 18.0-1.pgdg13+3)`.
     public let serverVersion: String
+    /// `serverVersion` numbered as `server_version_num` is: 90624 for 9.6.24, 180000 for 18.0.
+    /// The catalog queries pick their columns by it.
+    public let versionNumber: Int
     public let statementLog: StatementLog?
     private let host: SessionHost<PGSession>
     private let state = NSLock()
@@ -19,9 +22,19 @@ public final class PostgresConnection: DatabaseConnection, @unchecked Sendable {
     private init(configuration: PostgresConfiguration, first: PGSession, log: StatementLog) {
         self.configuration = configuration
         self.serverVersion = first.parameters["server_version"] ?? ""
+        self.versionNumber = Self.versionNumber(serverVersion)
         self.statementLog = log
         self.currentDatabase = configuration.database
         self.host = SessionHost(first: first) { try await PGSession.open(configuration, log: log) }
+    }
+
+    /// The leading `major.minor[.patch]` of a `server_version`: before 10 the first two numbers
+    /// are the major version. One it can't read counts as the newest, whose catalogs are current.
+    static func versionNumber(_ version: String) -> Int {
+        let parts = version.prefix { $0.isNumber || $0 == "." }.split(separator: ".").compactMap { Int($0) }
+        guard let major = parts.first else { return .max }
+        let part = { (i: Int) in i < parts.count ? parts[i] : 0 }
+        return major >= 10 ? major * 10_000 + part(1) : major * 10_000 + part(1) * 100 + part(2)
     }
 
     /// The database the sessions connect to now: the configuration's until `switchDatabase`.
@@ -135,9 +148,9 @@ public final class PostgresConnection: DatabaseConnection, @unchecked Sendable {
             ORDER BY c.relname
             """, [namespace])
         let routines = try await rows("""
-            SELECT n.nspname, p.proname, p.prokind::text, pg_catalog.pg_get_function_identity_arguments(p.oid)
+            SELECT n.nspname, p.proname, \(routineKind), pg_catalog.pg_get_function_identity_arguments(p.oid)
             FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
-            WHERE n.nspname = coalesce($1, current_schema()) AND p.prokind IN ('f', 'p')
+            WHERE n.nspname = coalesce($1, current_schema()) AND \(isRoutine)
               AND NOT EXISTS (
                 SELECT 1 FROM pg_catalog.pg_depend d
                 WHERE d.classid = 'pg_catalog.pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')
@@ -156,13 +169,16 @@ public final class PostgresConnection: DatabaseConnection, @unchecked Sendable {
     }
 
     public func columns(of table: TableRef) async throws -> [ColumnInfo] {
+        // Identity columns came in 10, generated ones in 12.
+        let identity = versionNumber >= 100_000 ? "a.attidentity::text" : "''"
+        let generated = versionNumber >= 120_000 ? "a.attgenerated::text" : "''"
         let rows = try await rows("""
             SELECT a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod), NOT a.attnotnull,
-                   CASE WHEN a.attgenerated = '' THEN pg_catalog.pg_get_expr(d.adbin, d.adrelid) END,
+                   CASE WHEN \(generated) = '' THEN pg_catalog.pg_get_expr(d.adbin, d.adrelid) END,
                    array_position(i.indkey::int2[], a.attnum) - array_lower(i.indkey::int2[], 1) + 1,
-                   pg_catalog.col_description(a.attrelid, a.attnum), a.attidentity::text,
-                   CASE WHEN a.attgenerated <> '' THEN pg_catalog.pg_get_expr(d.adbin, d.adrelid) END,
-                   a.attgenerated::text
+                   pg_catalog.col_description(a.attrelid, a.attnum), \(identity),
+                   CASE WHEN \(generated) <> '' THEN pg_catalog.pg_get_expr(d.adbin, d.adrelid) END,
+                   \(generated)
             FROM pg_catalog.pg_attribute a
             LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
             LEFT JOIN pg_catalog.pg_index i ON i.indrelid = a.attrelid AND i.indisprimary
@@ -224,7 +240,7 @@ public final class PostgresConnection: DatabaseConnection, @unchecked Sendable {
             let found = try await rows("""
                 SELECT pg_catalog.pg_get_functiondef(p.oid)
                 FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
-                WHERE n.nspname = coalesce($1, current_schema()) AND p.proname = $2 AND p.prokind IN ('f', 'p')
+                WHERE n.nspname = coalesce($1, current_schema()) AND p.proname = $2 AND \(isRoutine)
                   AND ($3::text IS NULL OR pg_catalog.pg_get_function_identity_arguments(p.oid) = $3)
                 ORDER BY p.oid
                 """, [object.ref.schema.map(DBValue.text) ?? .null, .text(object.ref.name),
@@ -243,6 +259,17 @@ public final class PostgresConnection: DatabaseConnection, @unchecked Sendable {
         }
     }
 
+    /// `pg_proc`'s kind of routine, 'f' or 'p' for the ones listed. Before 11 there's no
+    /// `prokind` and no procedures; aggregates and window functions are flagged instead.
+    private var routineKind: String {
+        versionNumber >= 110_000 ? "p.prokind::text" : "'f'"
+    }
+
+    /// Functions and procedures, not aggregates or window functions.
+    private var isRoutine: String {
+        versionNumber >= 110_000 ? "p.prokind IN ('f', 'p')" : "NOT p.proisagg AND NOT p.proiswindow"
+    }
+
     /// `pg_get_viewdef` text without its final `;` and surrounding blank space.
     static func statementBody(_ text: String) -> String {
         var body = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -251,6 +278,8 @@ public final class PostgresConnection: DatabaseConnection, @unchecked Sendable {
     }
 
     public func indexes(of table: TableRef) async throws -> [IndexInfo] {
+        // INCLUDE columns (11+) follow the key columns; before 11 every column is a key.
+        let keys = versionNumber >= 110_000 ? "ix.indnkeyatts" : "ix.indnatts"
         let rows = try await rows("""
             SELECT ic.relname, ix.indisunique, ix.indisprimary, am.amname,
                    pg_catalog.pg_get_indexdef(ix.indexrelid, k, true),
@@ -261,7 +290,7 @@ public final class PostgresConnection: DatabaseConnection, @unchecked Sendable {
             FROM pg_catalog.pg_index ix
             JOIN pg_catalog.pg_class ic ON ic.oid = ix.indexrelid
             JOIN pg_catalog.pg_am am ON am.oid = ic.relam
-            CROSS JOIN LATERAL generate_series(1, ix.indnkeyatts) AS k
+            CROSS JOIN LATERAL generate_series(1, \(keys)) AS k
             WHERE ix.indrelid = $1::regclass
             ORDER BY ic.relname, k
             """, [.text(dialect.qualified(table))])

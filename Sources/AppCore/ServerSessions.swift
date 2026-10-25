@@ -48,14 +48,16 @@ public enum ServerSessions {
     /// Client sessions other than the one asking, longest-running first, idle ones last.
     public static func list(on connection: any DatabaseConnection) async throws -> [ServerSession] {
         var sessions: [ServerSession]
-        if connection is PostgresConnection {
+        if let pg = connection as? PostgresConnection {
+            // Before 10 the view has only client sessions, and no backend_type.
+            let clients = pg.versionNumber >= 100_000 ? "backend_type = 'client backend' AND " : ""
             let rows = try await connection.execute("""
                 SELECT pid, coalesce(usename, ''), coalesce(datname, ''),
                        coalesce(host(client_addr), CASE WHEN client_port = -1 THEN 'local socket' ELSE '' END),
                        coalesce(state, ''), EXTRACT(EPOCH FROM (now() - coalesce(query_start, backend_start)))::float8,
                        coalesce(query, '')
                 FROM pg_catalog.pg_stat_activity
-                WHERE backend_type = 'client backend' AND pid <> pg_catalog.pg_backend_pid()
+                WHERE \(clients)pid <> pg_catalog.pg_backend_pid()
                 """).rows
             sessions = rows.map { r in
                 let state = r[4].string ?? ""
