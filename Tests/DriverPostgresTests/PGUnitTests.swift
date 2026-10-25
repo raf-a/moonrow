@@ -57,6 +57,15 @@ import Testing
         #expect(PGType.logged(.text("it's")) == "'it''s'")
     }
 
+    @Test func versionNumbers() {
+        #expect(PostgresConnection.versionNumber("9.6.24") == 90624)
+        #expect(PostgresConnection.versionNumber("9.6") == 90600)
+        #expect(PostgresConnection.versionNumber("10.5") == 100005)
+        #expect(PostgresConnection.versionNumber("18.0 (Debian 18.0-1.pgdg13+3)") == 180000)
+        #expect(PostgresConnection.versionNumber("11beta1") == 110000)
+        #expect(PostgresConnection.versionNumber("") == .max)
+    }
+
     @Test func commandTagCounts() {
         #expect(PGSession.rowCount("INSERT 0 5") == 5)
         #expect(PGSession.rowCount("UPDATE 2") == 2)

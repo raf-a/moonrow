@@ -78,10 +78,11 @@ public enum DatabaseCatalog {
         let list: [DatabaseCollation]
         if connection.dialect is PostgresDialect {
             // ICU and builtin locales are `colllocale` from Postgres 17, `colliculocale` before.
+            // Before 10 every collation is libc's and there's no `collprovider`.
             var sql = """
-                SELECT c.collname, c.collprovider::text, COALESCE(c.collcollate, to_jsonb(c) ->> 'colllocale', to_jsonb(c) ->> 'colliculocale')
-                FROM pg_catalog.pg_collation c
-                WHERE c.collprovider IN ('c', 'i', 'b')
+                SELECT c.collname, p.provider, COALESCE(c.collcollate, to_jsonb(c) ->> 'colllocale', to_jsonb(c) ->> 'colliculocale')
+                FROM pg_catalog.pg_collation c, LATERAL (SELECT coalesce(to_jsonb(c) ->> 'collprovider', 'c') AS provider) p
+                WHERE p.provider IN ('c', 'i', 'b')
                 """
             var bindings: [DBValue] = []
             if let encoding {
@@ -114,7 +115,8 @@ public enum DatabaseCatalog {
     }
 
     /// `CREATE DATABASE`. Postgres needs `TEMPLATE template0` for an encoding or locale other
-    /// than template1's.
+    /// than template1's. A libc locale is spelled out as LC_COLLATE and LC_CTYPE, which every
+    /// version takes (LOCALE came in 13).
     public static func createSQL(_ new: NewDatabase, dialect: any Dialect) -> String {
         var sql = "CREATE DATABASE \(dialect.quoteIdentifier(new.name))"
         let text = { (s: String) in dialect.literal(.text(s)) }
@@ -122,7 +124,7 @@ public enum DatabaseCatalog {
             if let e = new.encoding { sql += " ENCODING \(text(e))" }
             if let c = new.collation {
                 switch c.provider {
-                case .libc: sql += " LOCALE \(text(c.locale))"
+                case .libc: sql += " LC_COLLATE \(text(c.locale)) LC_CTYPE \(text(c.locale))"
                 case .icu: sql += " LOCALE_PROVIDER icu ICU_LOCALE \(text(c.locale))"
                 case .builtin: sql += " LOCALE_PROVIDER builtin BUILTIN_LOCALE \(text(c.locale))"
                 }
