@@ -17,6 +17,12 @@ struct TestServer: Sendable, CustomTestStringConvertible {
     var testDescription: String { name }
     var isMariaDB: Bool { name == "MariaDB" }
 
+    /// The server's major version: 5, 8 or 9 for MySQL, 10 to 12 for MariaDB.
+    func majorVersion(_ c: MySQLConnection) async throws -> Int {
+        let version = try await c.execute("SELECT VERSION()").rows.first?.first?.displayString ?? ""
+        return Int(version.prefix { $0.isNumber }) ?? 0
+    }
+
     func configuration(
         user: String? = nil, password: String? = nil, database: String? = nil, tls: TLSMode = .disable
     ) -> MySQLConfiguration {
@@ -56,23 +62,32 @@ struct MySQLServerTests {
         let admin = try await server.connect()
         let tag = UUID().uuidString.prefix(6).lowercased()
         let native = "native_\(tag)", sha2 = "sha2_\(tag)", empty = "empty_\(tag)"
+        // MySQL 9 has no mysql_native_password, and caching_sha2_password came in 8.0.
+        let major = try await server.majorVersion(admin)
+        let hasNative = server.isMariaDB || major < 9
         let nativeClause = server.isMariaDB ? "IDENTIFIED BY 'pw-native'" : "IDENTIFIED WITH mysql_native_password BY 'pw-native'"
-        _ = try await admin.execute("CREATE USER '\(native)'@'%' \(nativeClause)")
+        if hasNative {
+            _ = try await admin.execute("CREATE USER '\(native)'@'%' \(nativeClause)")
+        }
         _ = try await admin.execute("CREATE USER '\(empty)'@'%' IDENTIFIED BY ''")
-        defer { Task { _ = try? await admin.execute("DROP USER '\(native)'@'%', '\(empty)'@'%'"); await admin.close() } }
+        defer { Task { _ = try? await admin.execute("DROP USER IF EXISTS '\(native)'@'%', '\(empty)'@'%'"); await admin.close() } }
 
-        let n = try await server.connect(user: native, password: "pw-native")
-        #expect(try await currentUser(n) == "\(native)@%")
-        await n.close()
+        if hasNative {
+            let n = try await server.connect(user: native, password: "pw-native")
+            #expect(try await currentUser(n) == "\(native)@%")
+            await n.close()
+        }
         let e = try await server.connect(user: empty, password: "")
         #expect(try await currentUser(e) == "\(empty)@%")
         await e.close()
 
-        let denied = await #expect(throws: DatabaseError.self) { try await server.connect(user: native, password: "wrong") }
+        let denied = await #expect(throws: DatabaseError.self) {
+            try await server.connect(user: hasNative ? native : empty, password: "wrong")
+        }
         #expect(denied?.code == 1045)
         #expect(denied?.message.contains("Access denied") == true)
 
-        guard !server.isMariaDB else { return }
+        guard !server.isMariaDB, major >= 8 else { return }
         _ = try await admin.execute("CREATE USER '\(sha2)'@'%' IDENTIFIED WITH caching_sha2_password BY 'pw-sha2'")
         defer { Task { _ = try? await admin.execute("DROP USER '\(sha2)'@'%'") } }
         // Not cached yet: full authentication, the password RSA-encrypted over plain TCP.
@@ -190,12 +205,15 @@ struct MySQLServerTests {
         #expect(try await c.execute("SELECT 7").rows == [[.integer(7)]])
     }
 
-    private func longSeries(_ server: TestServer, _ c: MySQLConnection, rows: Int) async throws -> SQLStatement {
-        _ = try await c.execute(server.isMariaDB ? "SET SESSION max_recursive_iterations = 10000000"
-                                                 : "SET SESSION cte_max_recursion_depth = 10000000")
+    /// 1 to `rows` with a label, from digits joined to each other (MySQL 5.7 has no recursive CTEs).
+    private func longSeries(rows: Int) -> SQLStatement {
+        let digit = "(SELECT 0 AS d " + (1...9).map { "UNION ALL SELECT \($0) " }.joined() + ")"
+        let places = String(rows - 1).count
+        let n = (0..<places).map { "d\($0).d * \(Int(pow(10, Double($0))))" }.joined(separator: " + ")
+        let from = (0..<places).map { "\(digit) d\($0)" }.joined(separator: " CROSS JOIN ")
         return SQLStatement("""
-            WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < \(rows))
-            SELECT n, CONCAT('row ', n) AS label FROM s
+            SELECT n, CONCAT('row ', n) AS label FROM (SELECT \(n) + 1 AS n FROM \(from)) s
+            WHERE n <= \(rows) ORDER BY n
             """)
     }
 
@@ -204,7 +222,7 @@ struct MySQLServerTests {
         defer { Task { await c.close() } }
         var batches = 0, total = 0
         var last: DBValue?
-        for try await batch in c.stream(try await longSeries(server, c, rows: 200_000), batchSize: 5000) {
+        for try await batch in c.stream(longSeries(rows: 200_000), batchSize: 5000) {
             batches += 1
             total += batch.rows.count
             #expect(batch.rows.count <= 5000)
@@ -218,9 +236,9 @@ struct MySQLServerTests {
     @Test(arguments: TestServer.all) func cancellingStopsTheServerQuickly(server: TestServer) async throws {
         let (c, db) = try await server.scratch()
         defer { Task { await server.drop(db, c) } }
-        // A cross join streams as it goes (a recursive CTE is materialized before the first row).
+        // A cross join streams as it goes (a sorted series is materialized before the first row).
         _ = try await c.execute("CREATE TABLE t (n INT, label VARCHAR(20))")
-        _ = try await c.execute(SQLStatement("INSERT INTO t " + (try await longSeries(server, c, rows: 3000)).sql))
+        _ = try await c.execute(SQLStatement("INSERT INTO t " + longSeries(rows: 3000).sql))
         var seen = 0
         for try await batch in c.stream(SQLStatement("SELECT a.n, b.n FROM t a CROSS JOIN t b"), batchSize: 1000) {
             seen += batch.rows.count
