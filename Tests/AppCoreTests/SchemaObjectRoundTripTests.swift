@@ -121,14 +121,21 @@ import Testing
         defer { Task { await f.tearDown() } }
         let d = f.db.dialect
         let changes = StagedChanges()
-        for kind in [DefinitionKind.function, .procedure] {
+        // Postgres before 11 has no procedures: New Procedure isn't offered, and its text is refused.
+        let procedures = d.supportsDefinitions(of: .procedure)
+        if !procedures {
+            #expect(backend.kind == .postgres)
+            let text = DefinitionTemplate.text(.procedure, name: "p", schema: nil, dialect: d)
+            #expect(throws: DatabaseError.self) { try d.definitionPlan(replacing: nil, kind: .procedure, text: text) }
+        }
+        for kind in procedures ? [DefinitionKind.function, .procedure] : [.function] {
             changes.addNewDefinition(kind: kind, schema: nil, dialect: d, taken: []) { name in
                 DefinitionTemplate.text(kind, name: name, schema: nil, dialect: d)
             }
         }
         try await commit(f, changes)
         #expect(try await objects(f, .function).map(\.ref.name) == ["untitled_function"])
-        #expect(try await objects(f, .procedure).map(\.ref.name) == ["untitled_procedure"])
+        #expect(try await objects(f, .procedure).map(\.ref.name) == (procedures ? ["untitled_procedure"] : []))
         #expect(try await value(f, "SELECT untitled_function()") == "1")
 
         let functionObject = try #require(try await objects(f, .function).first)
@@ -140,9 +147,11 @@ import Testing
         try await commit(f, changes)
         #expect(try await value(f, "SELECT untitled_function()") == "2")
         try await roundTrip(f, function)
-        let procedureObject = try #require(try await objects(f, .procedure).first)
-        let procedure = try #require(DefinedObject(procedureObject))
-        try await roundTrip(f, procedure)
+        if procedures {
+            let procedureObject = try #require(try await objects(f, .procedure).first)
+            let procedure = try #require(DefinedObject(procedureObject))
+            try await roundTrip(f, procedure)
+        }
 
         // A definition the database refuses changes nothing.
         try await stage(changes, f, function) { text in
