@@ -1,0 +1,91 @@
+name: Servers
+
+# The server tests (drivers, editing, structure, import, MCP, backup and restore) against each
+# database version Homebrew has, with scripts/test-matrix.sh --brew: GitHub's macOS runners have
+# no Docker. The versions Homebrew doesn't have run in Docker locally (scripts/test-matrix.sh).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: servers-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.family }}
+    runs-on: macos-26
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - family: PostgreSQL
+            servers: pg15 pg16 pg17 pg18
+          - family: MySQL
+            servers: mysql80 mysql84
+          - family: MariaDB
+            servers: mariadb106 mariadb1011 mariadb114 mariadb118
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALL_CLEANUP: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The newest Xcode on the image, unless the XCODE_APP repository variable names one.
+      - name: Select Xcode
+        env:
+          XCODE_APP: ${{ vars.XCODE_APP }}
+        run: |
+          xcode="$XCODE_APP"
+          [ -n "$xcode" ] || xcode="$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+          sudo xcode-select -s "$xcode"
+          xcodebuild -version
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .build
+          key: spm-${{ runner.os }}-${{ hashFiles('Package.resolved') }}-${{ hashFiles('Package.swift') }}
+          restore-keys: spm-${{ runner.os }}-
+
+      # The Backup tools workflow's archive for this version of build-tools.sh, checked with gh
+      # attestation verify. Without one (a change to the script that main hasn't built yet), the
+      # backup tests skip rather than build the tools from source.
+      - name: Backup tools
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          archive="backup-tools-$(scripts/build-tools.sh --stamp).tar.gz"
+          if gh release view tools --json assets --jq '.assets[].name' 2>/dev/null | grep -qxF "$archive"; then
+            scripts/build-tools.sh
+          else
+            echo "::warning::No $archive on the tools release yet; the backup tests skip"
+          fi
+
+      - name: Build
+        run: swift build --build-tests
+
+      - name: Start the servers
+        run: scripts/test-matrix.sh --brew up ${{ matrix.servers }}
+
+      - name: Test
+        run: |
+          eval "$(scripts/test-matrix.sh --brew env ${{ matrix.servers }})"
+          scripts/test-matrix.sh run
+
+      - name: Logs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: logs-${{ matrix.family }}
+          path: build/matrix
+          retention-days: 7

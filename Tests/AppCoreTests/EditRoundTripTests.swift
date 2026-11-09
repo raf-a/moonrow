@@ -12,8 +12,9 @@ import WireSupport
 ///
 /// - SQLite: its statement trace, values expanded inline (`sqlite3_expanded_sql`).
 /// - MySQL / MariaDB: `mysql.general_log`, where the server writes bound values inline.
-/// - Postgres: the server log (jsonlog), which keeps the statement with `$n` and its parameters
-///   apart; both sides are compared with the parameters written into the placeholders.
+/// - Postgres: the server log (jsonlog, or csvlog before 15), which keeps the statement with `$n`
+///   and its parameters apart; both sides are compared with the parameters written into the
+///   placeholders.
 ///
 /// Server backends run when `scripts/test-servers.sh env` variables are set.
 struct Backend: Sendable, CustomTestStringConvertible {
@@ -60,6 +61,9 @@ final class Fixture: @unchecked Sendable {
     private var admin: (any DatabaseConnection)?
     private var scratch: String?
     private var mark: DBValue = .null
+    /// Postgres: the log's format, and the statement `startLog` ran to mark where it starts.
+    private var logFormat = "jsonlog"
+    private var marker = ""
     private let traced = TraceLog()
 
     init(_ backend: Backend) async throws {
@@ -131,7 +135,12 @@ final class Fixture: @unchecked Sendable {
         case .sqlite:
             _ = traced.take()
         case .postgres:
-            mark = try await admin!.execute("SELECT size FROM pg_stat_file(pg_current_logfile('jsonlog'))").rows[0][0]
+            // A statement reaches the log a little after it runs, so the one before could still land
+            // past the offset: only what follows the marker counts.
+            logFormat = try await admin!.execute("SELECT current_setting('log_destination')").rows[0][0].displayString
+            mark = try await admin!.execute("SELECT size FROM pg_stat_file(pg_current_logfile('\(logFormat)'))").rows[0][0]
+            marker = "SELECT 'log mark \(UUID().uuidString)'"
+            _ = try await db.execute(SQLStatement(marker))
         case .mysql:
             mark = try await admin!.execute("SELECT NOW(6)").rows[0][0]
         }
@@ -162,19 +171,72 @@ final class Fixture: @unchecked Sendable {
                 ORDER BY event_time
                 """, bindings: [.integer(Int64(id)), mark])).rows.map { $0[0].displayString }
         case .postgres:
-            let pid = try await (db as! PostgresConnection).backendProcessID()
+            let pid = Int(try await (db as! PostgresConnection).backendProcessID())
+            let file = "pg_current_logfile('\(logFormat)')"
             let text = try await admin!.execute(SQLStatement("""
-                SELECT pg_read_file(pg_current_logfile('jsonlog'), $1, (SELECT size FROM pg_stat_file(pg_current_logfile('jsonlog'))) - $1)
+                SELECT pg_read_file(\(file), $1, (SELECT size FROM pg_stat_file(\(file))) - $1)
                 """, bindings: [mark])).rows[0][0].displayString
-            return text.split(separator: "\n").compactMap { line -> String? in
-                guard let entry = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
-                      entry["pid"] as? Int == Int(pid), let message = entry["message"] as? String else { return nil }
-                for prefix in ["execute <unnamed>: ", "statement: "] where message.hasPrefix(prefix) {
-                    let sql = String(message.dropFirst(prefix.count))
-                    return Self.substitute(sql, Self.parameters(entry["detail"] as? String ?? ""))
+            let entries = logFormat == "csvlog" ? Self.csvEntries(text) : Self.jsonEntries(text)
+            let statements = entries.compactMap { entry -> String? in
+                guard entry.pid == pid else { return nil }
+                for prefix in ["execute <unnamed>: ", "statement: "] where entry.message.hasPrefix(prefix) {
+                    let sql = String(entry.message.dropFirst(prefix.count))
+                    return Self.substitute(sql, Self.parameters(entry.detail))
                 }
                 return nil
             }
+            guard let start = statements.lastIndex(of: marker) else { return [] }
+            return Array(statements[(start + 1)...])
+        }
+    }
+
+    struct LogEntry {
+        let pid: Int
+        let message: String
+        let detail: String
+    }
+
+    /// jsonlog: one object a line.
+    static func jsonEntries(_ text: String) -> [LogEntry] {
+        text.split(separator: "\n").compactMap { line in
+            guard let entry = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+                  let pid = entry["pid"] as? Int, let message = entry["message"] as? String else { return nil }
+            return LogEntry(pid: pid, message: message, detail: entry["detail"] as? String ?? "")
+        }
+    }
+
+    /// csvlog: one record a line, though a quoted field can hold line breaks; the process ID is
+    /// the 4th field, the message the 14th and the detail the 15th.
+    static func csvEntries(_ text: String) -> [LogEntry] {
+        var records: [[String]] = []
+        var fields: [String] = []
+        var field = ""
+        var quoted = false
+        var chars = Array(text)[...]
+        while let c = chars.popFirst() {
+            if quoted {
+                if c != "\"" {
+                    field.append(c)
+                } else if chars.first == "\"" {
+                    field.append(chars.removeFirst())
+                } else {
+                    quoted = false
+                }
+            } else if c == "\"" {
+                quoted = true
+            } else if c == "," {
+                fields.append(field)
+                field = ""
+            } else if c == "\n" {
+                records.append(fields + [field])
+                fields = []
+                field = ""
+            } else {
+                field.append(c)
+            }
+        }
+        return records.compactMap { r in
+            r.count > 14 ? LogEntry(pid: Int(r[3]) ?? 0, message: r[13], detail: r[14]) : nil
         }
     }
 
@@ -197,9 +259,9 @@ final class Fixture: @unchecked Sendable {
         return out
     }
 
-    /// `Parameters: $1 = '7', $2 = NULL` → `["'7'", "NULL"]`.
+    /// `Parameters: $1 = '7', $2 = NULL` → `["'7'", "NULL"]` (lower case before Postgres 17).
     static func parameters(_ detail: String) -> [String] {
-        guard let start = detail.range(of: "Parameters: ") else { return [] }
+        guard let start = detail.range(of: "parameters: ", options: .caseInsensitive) else { return [] }
         var out: [String] = []
         var s = Substring(detail[start.upperBound...])
         while let eq = s.range(of: " = ") {

@@ -184,7 +184,8 @@ import Testing
             process.standardError = errors
             output.fileHandleForReading.readabilityHandler = { [weak self] h in
                 let data = h.availableData
-                guard let self, !data.isEmpty else { return }
+                // At the end the handler would be called again and again.
+                guard let self, !data.isEmpty else { h.readabilityHandler = nil; return }
                 self.lock.withLock {
                     self.buffer.append(data)
                     while let i = self.buffer.firstIndex(of: 10) {
@@ -208,14 +209,30 @@ import Testing
                 if let found { return found }
                 try await Task.sleep(for: .milliseconds(50))
             }
-            throw MCPToolError("no reply to \(id.text); stderr: " + String(decoding: errors.fileHandleForReading.availableData, as: UTF8.self))
+            // Stopped first: reading the stderr of a bridge that's still running waits for it.
+            process.terminate()
+            _ = exited(within: 5)
+            throw MCPToolError("no reply to \(id.text); stderr: " + String(decoding: errors.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self))
         }
 
         var allLines: [String] { lock.withLock { lines } }
 
         func close() {
             try? input.fileHandleForWriting.close()
-            process.waitUntilExit()
+            // A bridge that doesn't stop at the end of its input fails the test instead of hanging it.
+            if !exited(within: 10) {
+                process.terminate()
+                Issue.record("moonrow-mcp kept running after its input closed")
+                _ = exited(within: 5)
+            }
+        }
+
+        /// Whether the bridge has exited, waiting up to `seconds`. Not waitUntilExit, which runs the
+        /// current thread's run loop and, on a concurrency thread, can miss the exit and wait forever.
+        private func exited(within seconds: Double) -> Bool {
+            let deadline = Date().addingTimeInterval(seconds)
+            while process.isRunning, Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
+            return !process.isRunning
         }
     }
 

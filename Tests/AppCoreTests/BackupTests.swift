@@ -430,7 +430,9 @@ final class Lines: @unchecked Sendable {
         let dir = try temporaryFolder()
         defer { try? FileManager.default.removeItem(at: dir) }
         do {
-            _ = try await s.admin.execute(SQLStatement(DatabaseCatalog.createSQL(NewDatabase(name: source), dialect: s.admin.dialect)))
+            // utf8mb4 for the seed's ✓: MySQL 5.7's default is latin1.
+            let encoding = family == .mysql ? "utf8mb4" : nil
+            _ = try await s.admin.execute(SQLStatement(DatabaseCatalog.createSQL(NewDatabase(name: source, encoding: encoding), dialect: s.admin.dialect)))
             let db = try await open(s, database: source)
             try await seed(db)
             let expected = try await contents(db)

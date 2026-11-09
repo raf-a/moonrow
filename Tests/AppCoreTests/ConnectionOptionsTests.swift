@@ -248,10 +248,15 @@ import Testing
         }
     }
 
-    /// Postgres 17+ takes TLS without the SSLRequest first.
+    /// Postgres 17+ takes TLS without the SSLRequest first; older servers aren't asked.
     @Test func postgresDirectTLS() async throws {
         guard let url = ProcessInfo.processInfo.environment["MOONROW_TEST_PG"] else { return }
         var (c, password) = try #require(ConnectionConfig.parse(url: url))
+        c.tlsMode = .disable
+        let plain = try await ConnectionFactory.open(c, password: password)
+        let version = try await plain.execute("SELECT current_setting('server_version_num')").rows.first?.first?.displayString
+        await plain.close()
+        guard let version, Int(version) ?? 0 >= 170000 else { return }
         c.tlsMode = .require
         c.tlsDirect = true
         let db = try await ConnectionFactory.open(c, password: password)
