@@ -55,7 +55,10 @@ public struct SQLiteDialect: Dialect {
 }
 
 public struct PostgresDialect: Dialect {
-    public init() {}
+    /// The server's `server_version_num` (100000 for 10.0); `.max` when unknown, which counts as
+    /// the newest server. Statements that changed across versions are written for this one.
+    public let versionNumber: Int
+    public init(versionNumber: Int = .max) { self.versionNumber = versionNumber }
     public var name: String { "PostgreSQL" }
     public var lexer: LexerDialect { .postgres }
 

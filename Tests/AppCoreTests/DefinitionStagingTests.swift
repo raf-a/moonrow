@@ -67,6 +67,20 @@ private let viewText = "CREATE OR REPLACE VIEW \"public\".\"stock\" AS\n SELECT 
         #expect(changes.definitions.count == 2)
     }
 
+    @Test func postgresTemplatesFollowTheServerVersion() {
+        let trigger = { (v: Int) in
+            DefinitionTemplate.text(.trigger, name: "t", schema: "public", table: TableRef(schema: "public", "items"),
+                                    dialect: PostgresDialect(versionNumber: v))
+        }
+        #expect(trigger(100_023).contains("EXECUTE PROCEDURE \"public\".\"t_fn\"()"))
+        #expect(trigger(110_000).contains("EXECUTE FUNCTION \"public\".\"t_fn\"()"))
+        #expect(pg.supportsDefinitions(of: .procedure))
+        #expect(PostgresDialect(versionNumber: 110_000).supportsDefinitions(of: .procedure))
+        let pg10 = PostgresDialect(versionNumber: 100_023)
+        #expect(!pg10.supportsDefinitions(of: .procedure) && pg10.supportsDefinitions(of: .function))
+        #expect(throws: DatabaseError.self) { try pg10.definitionPlan(replacing: nil, kind: .procedure, text: "CREATE PROCEDURE p() LANGUAGE sql AS $$ $$") }
+    }
+
     @Test func droppingATableTakesItsTriggerEditsAlong() {
         let changes = StagedChanges()
         let trigger = DefinedObject.trigger("touch", on: items)

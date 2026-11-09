@@ -252,7 +252,8 @@ struct PGServerTests {
         let triggers = try await s.db.triggers(of: TableRef(schema: ns, "child"))
         #expect(triggers.map(\.name) == ["child_touch"])
         #expect(triggers.first?.timing == "BEFORE" && triggers.first?.events == ["INSERT", "UPDATE"])
-        #expect(triggers.first?.definition.contains(s.db.versionNumber >= 110_000 ? "EXECUTE FUNCTION" : "EXECUTE PROCEDURE") == true)
+        // 11 takes EXECUTE FUNCTION but prints the definition with EXECUTE PROCEDURE until 12.
+        #expect(triggers.first?.definition.contains(s.db.versionNumber >= 120_000 ? "EXECUTE FUNCTION" : "EXECUTE PROCEDURE") == true)
 
         await #expect(throws: DatabaseError.self) { try await s.db.columns(of: TableRef(schema: ns, "missing")) }
     }

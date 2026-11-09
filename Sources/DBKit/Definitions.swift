@@ -290,7 +290,12 @@ extension Dialect {
     /// `object` is replaced as `replaceMethod(for:)` says. When the text names another object
     /// than `object`, the old one is dropped first (renaming by editing the name).
     public func definitionPlan(replacing object: DefinedObject?, kind: DefinitionKind, text: String) throws -> DDLPlan {
-        guard supportsDefinitions(of: kind) else { throw DatabaseError("\(name) has no \(kind.title)s.") }
+        guard supportsDefinitions(of: kind) else {
+            if self is PostgresDialect, kind == .procedure {
+                throw DatabaseError("This server has no procedures: they came in PostgreSQL 11. Write a function instead.")
+            }
+            throw DatabaseError("\(name) has no \(kind.title)s.")
+        }
         let statements = DefinitionText.statements(text, dialect: lexer)
         guard !statements.isEmpty else { throw DatabaseError("The \(kind.title)'s definition is empty.") }
         guard let object else { return DDLPlan(statements: statements, isAtomic: transactionalDDL) }

@@ -19,9 +19,11 @@ public enum DefinitionTemplate {
             return "CREATE OR REPLACE FUNCTION \(target)()\nRETURNS integer\nLANGUAGE sql\nAS $$\n    SELECT 1;\n$$;\n"
         case (.procedure, is PostgresDialect):
             return "CREATE OR REPLACE PROCEDURE \(target)()\nLANGUAGE plpgsql\nAS $$\nBEGIN\n    NULL;\nEND;\n$$;\n"
-        case (.trigger, is PostgresDialect):
-            // A Postgres trigger calls a function; the template brings one along.
+        case (.trigger, let pg as PostgresDialect):
+            // A Postgres trigger calls a function; the template brings one along. Servers before
+            // 11 only take the older spelling, EXECUTE PROCEDURE.
             let function = dialect.qualified(TableRef(schema: schema, name + "_fn"))
+            let execute = pg.versionNumber >= 110_000 ? "EXECUTE FUNCTION" : "EXECUTE PROCEDURE"
             return """
                 CREATE OR REPLACE FUNCTION \(function)()
                 RETURNS trigger
@@ -35,7 +37,7 @@ public enum DefinitionTemplate {
                 CREATE TRIGGER \(q(name))
                 BEFORE UPDATE ON \(on)
                 FOR EACH ROW
-                EXECUTE FUNCTION \(function)();
+                \(execute) \(function)();
 
                 """
         case (.function, _):

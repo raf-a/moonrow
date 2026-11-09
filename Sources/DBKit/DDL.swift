@@ -189,7 +189,8 @@ extension PostgresDialect {
         return "\(qualified(object.ref))(\(signature))"
     }
 
-    public func supportsDefinitions(of kind: DefinitionKind) -> Bool { true }
+    /// Procedures came in 11.
+    public func supportsDefinitions(of kind: DefinitionKind) -> Bool { kind != .procedure || versionNumber >= 110_000 }
 
     /// Views and routines keep their privileges and dependents through `CREATE OR REPLACE`;
     /// materialized views and triggers have none (before 14 for triggers), and the drop runs in

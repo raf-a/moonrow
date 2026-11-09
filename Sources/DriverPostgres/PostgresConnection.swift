@@ -5,7 +5,8 @@ import WireSupport
 /// A connection to one Postgres database. Statements run one at a time on a single backend,
 /// which is opened again if the server drops it between statements.
 public final class PostgresConnection: DatabaseConnection, @unchecked Sendable {
-    public let dialect: any Dialect = PostgresDialect()
+    /// Written for this server's version.
+    public let dialect: any Dialect
     /// As connected; `database` says which database the sessions use now.
     public let configuration: PostgresConfiguration
     /// `server_version` as reported at login, e.g. `18.0 (Debian 18.0-1.pgdg13+3)`.
@@ -23,6 +24,7 @@ public final class PostgresConnection: DatabaseConnection, @unchecked Sendable {
         self.configuration = configuration
         self.serverVersion = first.parameters["server_version"] ?? ""
         self.versionNumber = Self.versionNumber(serverVersion)
+        self.dialect = PostgresDialect(versionNumber: versionNumber)
         self.statementLog = log
         self.currentDatabase = configuration.database
         self.host = SessionHost(first: first) { try await PGSession.open(configuration, log: log) }
